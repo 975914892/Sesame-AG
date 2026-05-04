@@ -689,7 +689,7 @@ class AntMember : ModelTask() {
                         val statistics = spreadTaobaoData.optJSONObject("statistics")
                         val dailyAppWateringCount = statistics?.optInt("dailyAppWateringCount", 0) ?: 0
 
-                        Log.farm("今日农场已施肥💩 $dailyAppWateringCount 次 [$stageText]")
+                        Log.orchard("今日农场已施肥💩 $dailyAppWateringCount 次 [$stageText]")
 
                         Log.sesame("信誉任务[芭芭农场施肥成功] $title | 已施肥 $dailyAppWateringCount 次"
                         )

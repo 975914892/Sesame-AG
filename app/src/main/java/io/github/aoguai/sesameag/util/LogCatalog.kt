@@ -143,7 +143,7 @@ enum class LogChannel(
         displayName = "会员日志",
         moduleDomain = LogModuleDomain.MEMBER,
         techKind = LogTechKind.BUSINESS,
-        description = "会员积分、黄金票与会员任务相关日志",
+        description = "会员积分、余额宝体验金、黄金票与会员任务相关日志",
         viewerGroup = LogViewerGroup.MODULES,
         mirrorToRecord = true,
         visibleInViewer = true,
@@ -180,7 +180,7 @@ enum class LogChannel(
         viewerGroup = LogViewerGroup.MODULES,
         mirrorToRecord = true,
         visibleInViewer = true,
-        logTag = "芝麻粒"
+        logTag = "芝麻信用"
     ),
     RUNTIME(
         loggerName = "runtime",

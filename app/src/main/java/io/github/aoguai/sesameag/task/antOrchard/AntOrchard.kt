@@ -403,7 +403,7 @@ class AntOrchard : ModelTask() {
             if (enterSceneResponse.optString("resultCode").isNotEmpty() &&
                 enterSceneResponse.optString("resultCode") != "100"
             ) {
-                Log.orchard("余额宝体验金任务场景进入异常: ${
+                Log.member("余额宝体验金任务场景进入异常: ${
                         enterSceneResponse.optString(
                             "resultDesc",
                             enterSceneResponse.toString()
@@ -414,7 +414,7 @@ class AntOrchard : ModelTask() {
 
             var queryResponse = JSONObject(AntOrchardRpcCall.queryYebExpGoldMain())
             if (!isYebExpGoldSuccess(queryResponse)) {
-                Log.orchard("余额宝体验金任务查询失败: ${
+                Log.member("余额宝体验金任务查询失败: ${
                         queryResponse.optString(
                             "resultDesc",
                             queryResponse.toString()
@@ -445,7 +445,7 @@ class AntOrchard : ModelTask() {
 
                 val title = getYebExpGoldTaskTitle(task, taskId)
                 if (isYebExpGoldTaskBlacklisted(title, taskId)) {
-                    Log.orchard("跳过黑名单任务[$title]")
+                    Log.member("跳过黑名单任务[$title]")
                     continue
                 }
                 val successFlag = StatusFlags.FLAG_ANTORCHARD_YEB_EXP_GOLD_TASK_PREFIX + taskId
@@ -480,7 +480,7 @@ class AntOrchard : ModelTask() {
                 handledTask = claimPendingYebExpGoldRewards(queryResponse, taskMap) || handledTask
                 handledTask = handleYebExpGoldExchange(queryResponse) || handledTask
             } else {
-                Log.orchard("余额宝体验金任务刷新失败: ${
+                Log.member("余额宝体验金任务刷新失败: ${
                         queryResponse.optString(
                             "resultDesc",
                             queryResponse.toString()
@@ -490,10 +490,10 @@ class AntOrchard : ModelTask() {
             }
 
             if (!handledTask && manualTaskTitles.isEmpty()) {
-                Log.orchard("余额宝体验金任务: 未发现可自动处理项目")
+                Log.member("余额宝体验金任务: 未发现可自动处理项目")
             }
             if (manualTaskTitles.isNotEmpty()) {
-                Log.orchard("余额宝体验金任务待手动完成: ${manualTaskTitles.joinToString("、")}")
+                Log.member("余额宝体验金任务待手动完成: ${manualTaskTitles.joinToString("、")}")
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "handleYebExpGoldTasks err:", t)
@@ -544,14 +544,14 @@ class AntOrchard : ModelTask() {
             .orEmpty()
         val title = if (amount.isBlank()) "余额宝体验金签到" else "余额宝体验金签到(${amount}元)"
         if (TaskBlacklist.isTaskInBlacklist(YEB_TASK_BLACKLIST_MODULE, title)) {
-            Log.orchard("跳过黑名单任务[$title]")
+            Log.member("跳过黑名单任务[$title]")
             Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_YEB_EXP_GOLD_SIGN_DONE)
             return false
         }
 
         val signResponse = JSONObject(AntOrchardRpcCall.signInYebExpGold())
         if (!isYebExpGoldSuccess(signResponse)) {
-            Log.orchard("余额宝体验金签到失败: ${getYebExpGoldErrorDesc(signResponse)}")
+            Log.member("余额宝体验金签到失败: ${getYebExpGoldErrorDesc(signResponse)}")
             manualTaskTitles.add(title)
             return false
         }
@@ -581,13 +581,13 @@ class AntOrchard : ModelTask() {
                     fallbackAmount.isNotBlank() -> fallbackAmount + "元"
                     else -> "成功"
                 }
-                Log.orchard("余额宝体验金💰[签到成功]#$rewardText")
+                Log.member("余额宝体验金💰[签到成功]#$rewardText")
             }
             return
         }
 
         val rewardText = if (fallbackAmount.isNotBlank()) "${fallbackAmount}元" else "成功"
-        Log.orchard("余额宝体验金💰[签到成功]#$rewardText")
+        Log.member("余额宝体验金💰[签到成功]#$rewardText")
     }
 
     private fun getYebExpGoldErrorDesc(response: JSONObject): String {
@@ -632,7 +632,7 @@ class AntOrchard : ModelTask() {
 
         val prepareResponse = JSONObject(AntOrchardRpcCall.queryYebExpGoldMain(true, taskId))
         if (!isYebExpGoldSuccess(prepareResponse)) {
-            Log.orchard("余额宝体验金任务预处理失败[$title]: ${
+            Log.member("余额宝体验金任务预处理失败[$title]: ${
                     prepareResponse.optString(
                         "resultDesc",
                         prepareResponse.toString()
@@ -660,7 +660,7 @@ class AntOrchard : ModelTask() {
                     return true
                 }
             }
-            Log.orchard("余额宝体验金任务领取失败[$title]: ${
+            Log.member("余额宝体验金任务领取失败[$title]: ${
                     completeResponse.optString(
                         "resultDesc",
                         completeResponse.toString()
@@ -697,7 +697,7 @@ class AntOrchard : ModelTask() {
 
             val title = getYebExpGoldCompletedTitle(rewardItem, taskMap[taskId], taskId)
             if (isYebExpGoldTaskBlacklisted(title, taskId)) {
-                Log.orchard("跳过黑名单任务[$title]")
+                Log.member("跳过黑名单任务[$title]")
                 continue
             }
             val completeResponse = JSONObject(AntOrchardRpcCall.completeYebExpGoldTask(taskId))
@@ -712,7 +712,7 @@ class AntOrchard : ModelTask() {
                     claimed = true
                     continue
                 }
-                Log.orchard("余额宝体验金任务领取失败[$title]: ${
+                Log.member("余额宝体验金任务领取失败[$title]: ${
                         completeResponse.optString(
                             "resultDesc",
                             completeResponse.toString()
@@ -772,7 +772,7 @@ class AntOrchard : ModelTask() {
         }
 
         if (threshold > 0.0 && balance < threshold) {
-            Log.orchard("余额宝体验金未达兑换门槛: 当前$balanceText，最低需${thresholdText.ifBlank { threshold.toString() }}"
+            Log.member("余额宝体验金未达兑换门槛: 当前$balanceText，最低需${thresholdText.ifBlank { threshold.toString() }}"
             )
             Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_YEB_EXP_GOLD_EXCHANGE_DONE)
             return false
@@ -780,7 +780,7 @@ class AntOrchard : ModelTask() {
 
         val trialAssetResponse = JSONObject(AntOrchardRpcCall.queryYebTrialAsset())
         if (!isYebExpGoldSuccess(trialAssetResponse)) {
-            Log.orchard("余额宝体验金资产查询失败: ${
+            Log.member("余额宝体验金资产查询失败: ${
                     trialAssetResponse.optString(
                         "resultDesc",
                         trialAssetResponse.toString()
@@ -792,14 +792,14 @@ class AntOrchard : ModelTask() {
 
         val trialInfo = getYebTrialInfo(trialAssetResponse)
         if (trialInfo == null) {
-            Log.orchard("余额宝体验金兑换缺少试用资产信息")
+            Log.member("余额宝体验金兑换缺少试用资产信息")
             return false
         }
 
         val campId = trialInfo.optString("promoCampId")
         val prizeId = trialInfo.optString("promoPrizeId")
         if (campId.isBlank() || prizeId.isBlank()) {
-            Log.orchard("余额宝体验金兑换缺少活动参数")
+            Log.member("余额宝体验金兑换缺少活动参数")
             return false
         }
 
@@ -811,7 +811,7 @@ class AntOrchard : ModelTask() {
             )
         )
         if (!isYebExpGoldSuccess(exchangeResponse)) {
-            Log.orchard("余额宝体验金兑换失败: ${
+            Log.member("余额宝体验金兑换失败: ${
                     exchangeResponse.optString(
                         "resultDesc",
                         exchangeResponse.toString()
@@ -825,13 +825,13 @@ class AntOrchard : ModelTask() {
             ?.optString("equityNo")
             .orEmpty()
         if (couponId.isBlank()) {
-            Log.orchard("余额宝体验金兑换成功但缺少激活凭证")
+            Log.member("余额宝体验金兑换成功但缺少激活凭证")
             return false
         }
 
         val activeResponse = JSONObject(AntOrchardRpcCall.activeYebTrial(couponId))
         if (!isYebExpGoldSuccess(activeResponse)) {
-            Log.orchard("余额宝体验金激活失败: ${
+            Log.member("余额宝体验金激活失败: ${
                     activeResponse.optString(
                         "resultDesc",
                         activeResponse.toString()
@@ -856,7 +856,7 @@ class AntOrchard : ModelTask() {
                 append("[收益:$profitDate]")
             }
         }
-        Log.orchard("余额宝体验金💰[兑换激活]#${amountText}元$extraInfo")
+        Log.member("余额宝体验金💰[兑换激活]#${amountText}元$extraInfo")
         Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_YEB_EXP_GOLD_EXCHANGE_DONE)
         return true
     }
@@ -893,7 +893,7 @@ class AntOrchard : ModelTask() {
                 }
             }
         } else {
-            Log.orchard("余额宝体验金任务列表查询失败: ${getYebExpGoldErrorDesc(taskListResponse)}"
+            Log.member("余额宝体验金任务列表查询失败: ${getYebExpGoldErrorDesc(taskListResponse)}"
             )
         }
 
@@ -1013,7 +1013,7 @@ class AntOrchard : ModelTask() {
             }
             if (rewardNames.isNotEmpty()) {
                 rewardNames.forEach { prizeName ->
-                    Log.orchard("余额宝体验金💰[$title]#$prizeName")
+                    Log.member("余额宝体验金💰[$title]#$prizeName")
                 }
                 return
             }
@@ -1026,14 +1026,14 @@ class AntOrchard : ModelTask() {
                 val prizeOrder = prizeSendOrderList.optJSONObject(index) ?: continue
                 val prizeName = prizeOrder.optString("prizeName")
                 if (prizeName.isNotBlank()) {
-                    Log.orchard("余额宝体验金💰[$title]#$prizeName")
+                    Log.member("余额宝体验金💰[$title]#$prizeName")
                 } else {
-                    Log.orchard("余额宝体验金💰[$title]")
+                    Log.member("余额宝体验金💰[$title]")
                 }
             }
             return
         }
-        Log.orchard("余额宝体验金💰[$title]")
+        Log.member("余额宝体验金💰[$title]")
     }
 
     // 辅助方法：施肥后检测肥料礼盒
