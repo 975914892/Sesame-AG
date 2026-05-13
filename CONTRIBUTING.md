@@ -21,6 +21,35 @@
 
 ---
 
+## 可编译环境
+
+请优先对齐当前维护环境和 GitHub Actions 中的构建基线，不要自行升级 Gradle、AGP、Kotlin 或 Android SDK 版本。除非你有能力解决编译失败问题。
+
+当前可编译基线：
+
+- CI 环境：`ubuntu-latest`。
+- JDK：Oracle JDK `17.0.1` x64
+- Android SDK：`platform-tools`、`platforms;android-36`、`build-tools;36.0.0`。
+- Gradle： `9.4.0-milestone-3`。
+- Android Gradle Plugin：`9.0.1`。
+- Kotlin：`2.2.10`。
+- 编译配置：`compileSdk = 36`，`targetSdk = 36`，`minSdk = 29`，Java/Kotlin 目标版本均为 17。
+
+Windows 本地 debug 构建命令：
+
+```powershell
+.\gradlew.bat --no-daemon --stacktrace :app:assembleDebug
+```
+
+如需尽量复现 GitHub Actions 的 release 构建路径，可在 PowerShell 中显式开启 `CI` 环境变量后构建：
+
+```powershell
+$env:CI = "true"
+.\gradlew.bat --no-daemon --stacktrace :app:assembleRelease
+```
+
+---
+
 ## 🌟 欢迎的贡献类型
 
 我们非常欢迎各种形式的贡献，包括但不限于：

@@ -18,9 +18,11 @@ env:
   RELEASE_DIR: app/build/outputs/apk/release
   STAGING_DIR: app/build/outputs/apk/all
   ASSET_DIR: app/build/outputs/apk/release-assets
+  ARTIFACT_PASSWORD: Sesame-AG
   RELEASE_TAG_RAW: ${{ github.ref_name }}
   TARGET_SOURCE_BRANCH: dev
   TARGET_MODULE_REPO: Xposed-Modules-Repo/io.github.aoguai.sesameag
+  PUBLISH_TO_XPOSED_REPO: "false"
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -120,17 +122,20 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
+          PUBLISH_TO_XPOSED_REPO: ${{ env.PUBLISH_TO_XPOSED_REPO }}
         run: |
           set -euo pipefail
 
           git fetch origin "refs/heads/${TARGET_SOURCE_BRANCH}:refs/remotes/origin/${TARGET_SOURCE_BRANCH}" --force
 
           missing=()
-          [[ -n "${ANDROID_SIGNING_KEY}" ]] || missing+=("ANDROID_SIGNING_KEY")
-          [[ -n "${ANDROID_KEY_ALIAS}" ]] || missing+=("ANDROID_KEY_ALIAS")
-          [[ -n "${ANDROID_KEYSTORE_PASSWORD}" ]] || missing+=("ANDROID_KEYSTORE_PASSWORD")
-          [[ -n "${ANDROID_KEY_PASSWORD}" ]] || missing+=("ANDROID_KEY_PASSWORD")
-          [[ -n "${TARGET_REPO_PAT}" ]] || missing+=("TARGET_REPO_PAT")
+          if [[ "${PUBLISH_TO_XPOSED_REPO}" == "true" ]]; then
+            [[ -n "${ANDROID_SIGNING_KEY}" ]] || missing+=("ANDROID_SIGNING_KEY")
+            [[ -n "${ANDROID_KEY_ALIAS}" ]] || missing+=("ANDROID_KEY_ALIAS")
+            [[ -n "${ANDROID_KEYSTORE_PASSWORD}" ]] || missing+=("ANDROID_KEYSTORE_PASSWORD")
+            [[ -n "${ANDROID_KEY_PASSWORD}" ]] || missing+=("ANDROID_KEY_PASSWORD")
+            [[ -n "${TARGET_REPO_PAT}" ]] || missing+=("TARGET_REPO_PAT")
+          fi
 
           ready="false"
           reason=""
@@ -145,6 +150,9 @@ jobs:
             reason="标签中的 versionCode (${TAG_VERSION_CODE}) 与当前提交计算得到的 versionCode (${VERSION_CODE}) 不一致"
           elif ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${TARGET_SOURCE_BRANCH}"; then
             reason="标签 ${RELEASE_TAG_RAW} 指向的提交不在 ${TARGET_SOURCE_BRANCH} 分支上"
+          elif [[ "${PUBLISH_TO_XPOSED_REPO}" != "true" ]]; then
+            ready="true"
+            reason="预检通过"
           else
             api_url="https://api.github.com/repos/${TARGET_MODULE_REPO}"
             if http_code="$(curl -sS -o target_repo.json -w "%{http_code}" \
@@ -194,6 +202,7 @@ jobs:
             echo "- 版本号: \`${VERSION_CODE}\`"
             echo "- 模块仓库标签: \`${XPOSED_TAG}\`"
             echo "- 目标仓库: \`${TARGET_MODULE_REPO}\`"
+            echo "- 发布到目标仓库: \`${PUBLISH_TO_XPOSED_REPO}\`"
             echo "- 检查结果: ${reason}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -294,7 +303,29 @@ jobs:
             cp "${apk}" "${STAGING_DIR}/"
           done
 
+      - name: Package APK Artifact
+        id: package_artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${ASSET_DIR}"
+          artifact_path="${GITHUB_WORKSPACE}/${ASSET_DIR}/Sesame-AG-${RELEASE_TAG_RAW}.zip"
+          (
+            cd "${STAGING_DIR}"
+            zip -r -P "${ARTIFACT_PASSWORD}" "${artifact_path}" .
+          )
+          echo "artifact_path=${artifact_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Sesame-AG-${{ github.ref_name }}
+          archive: false
+          path: ${{ steps.package_artifact.outputs.artifact_path }}
+          if-no-files-found: error
+
       - name: Sign APKs
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
         id: sign_apks
         uses: ilharp/sign-android-release@v2
         with:
@@ -306,6 +337,7 @@ jobs:
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Prepare Release Assets
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
         id: prepare_assets
         shell: bash
         run: |
@@ -329,6 +361,7 @@ jobs:
           echo "asset_dir=${ASSET_DIR}" >> "$GITHUB_OUTPUT"
 
       - name: Generate Release Notes
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
         id: release_notes
         shell: bash
         env:
@@ -534,6 +567,7 @@ jobs:
           echo "body_path=${body_path}" >> "$GITHUB_OUTPUT"
 
       - name: Sync Release to Target Repository
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
         uses: softprops/action-gh-release@v2
         with:
           repository: ${{ env.TARGET_MODULE_REPO }}
