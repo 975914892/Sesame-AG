@@ -59,6 +59,9 @@ object ModelFieldTodayStateResolver {
             "AntForest.pkEnergy" ->
                 flag(StatusFlags.FLAG_ANTFOREST_PK_SKIP_TODAY, "今日 PK 榜无需处理")
 
+            "AntForest.energyPvpChallenge" ->
+                flag(StatusFlags.FLAG_ANTFOREST_ENERGY_PVP_CHALLENGE_DONE, "今日 1V1 能量挑战赛已处理")
+
             "AntForest.whackMoleMode",
             "AntForest.whackMoleGames",
             "AntForest.whackMoleMoleCount",
@@ -181,6 +184,10 @@ object ModelFieldTodayStateResolver {
             "AntSports.neverlandGridStepCount" ->
                 neverlandGridState(modelFields)
 
+            "AntSports.neverlandAutoReward",
+            "AntSports.neverlandPreferMedal" ->
+                neverlandRewardState()
+
             "AntCooperate.teamCooperateWaterNum" ->
                 limitReached(
                     current = Status.getIntFlagToday(StatusFlags.FLAG_TEAM_WATER_DAILY_COUNT),
@@ -295,8 +302,16 @@ object ModelFieldTodayStateResolver {
         return limitReached(
             current = Status.getIntFlagToday(StatusFlags.FLAG_NEVERLAND_STEP_COUNT),
             limit = intValue(modelFields["neverlandGridStepCount"]),
-            reason = "今日健康岛走路次数已达上限"
+            reason = "今日健康岛建造次数已达上限"
         )
+    }
+
+    private fun neverlandRewardState(): ModelFieldTodayState {
+        return if (hasFlagTodayWithPrefix(StatusFlags.FLAG_NEVERLAND_REWARD_UNAVAILABLE_PREFIX)) {
+            inactive("今日健康岛奖励已明确不可领取")
+        } else {
+            ModelFieldTodayState()
+        }
     }
 
     private fun specialFoodLimitState(modelFields: ModelFields): ModelFieldTodayState {
@@ -386,6 +401,13 @@ object ModelFieldTodayStateResolver {
         return StatusFlags.FLAG_CREDIT2101_EVENT_COUNT_PREFIX +
             eventType +
             StatusFlags.FLAG_CREDIT2101_EVENT_COUNT_SUFFIX
+    }
+
+    private fun hasFlagTodayWithPrefix(flagPrefix: String): Boolean {
+        val index = flagPrefix.indexOf("::")
+        val module = if (index > 0) flagPrefix.substring(0, index) else "general"
+        val namePrefix = if (index > 0) flagPrefix.substring(index + 2) else flagPrefix
+        return Status.INSTANCE.moduleFlags[module]?.keys?.any { it.startsWith(namePrefix) } == true
     }
 
     private fun whackMoleState(modelFields: ModelFields): ModelFieldTodayState {

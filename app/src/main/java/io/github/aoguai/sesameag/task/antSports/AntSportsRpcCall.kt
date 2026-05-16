@@ -705,6 +705,18 @@ object AntSportsRpcCall {
     }
 
     /**
+     * @brief 查询城市见闻勋章详情
+     *
+     * @remark 对应抓包：com.alipay.sportsplay.biz.rpc.walk.queryMedalDetail
+     */
+    fun queryMedalDetail(): String {
+        return RequestManager.requestString(
+            "com.alipay.sportsplay.biz.rpc.walk.queryMedalDetail",
+            """[{"chInfo":"medical_health","clientOS":"android","features":$FEATURES}]"""
+        )
+    }
+
+    /**
      * @brief 查询服务端推荐的下一批路线
      *
      * @param pathId 当前路线 ID
@@ -1507,6 +1519,8 @@ object AntSportsRpcCall {
      * 包括签到、任务、泡泡、建造、走路等功能。
      */
     object NeverlandRpcCall {
+        private const val DEFAULT_SOURCE = "jkdsportcard"
+        private const val QUICK_GAME_CITY_CODE = "440100"
 
         /**
          * @brief 查询签到状态
@@ -1549,11 +1563,11 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryBubbleTask
          */
-        fun queryBubbleTask(): String {
+        fun queryBubbleTask(source: String = DEFAULT_SOURCE): String {
             RpcCache.invalidate(NEVERLAND_QUERY_BUBBLE_TASK_RPC)
             return RequestManager.requestString(
                 NEVERLAND_QUERY_BUBBLE_TASK_RPC,
-                """[{"source":"jkdsportcard","sportsAuthed":true}]"""
+                """[{"source":"$source","sportsAuthed":true}]"""
             )
         }
 
@@ -1566,18 +1580,34 @@ object AntSportsRpcCall {
          *
          * @remark 对应API：com.alipay.neverland.biz.rpc.pickBubbleTaskEnergy
          */
-        fun pickBubbleTaskEnergy(ids: List<String>): String {
+        fun pickBubbleTaskEnergy(
+            ids: List<String>,
+            source: String = DEFAULT_SOURCE,
+            pickAllEnergyBall: Boolean = true
+        ): String {
             val obj = JSONObject().apply {
                 put("medEnergyBallInfoRecordIds", JSONArray().apply {
                     ids.forEach { put(it) }
                 })
-                put("pickAllEnergyBall", true)
-                put("source", "jkdsportcard")
+                put("pickAllEnergyBall", pickAllEnergyBall)
+                put("source", source)
             }
             val arr = JSONArray().put(obj)
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.pickBubbleTaskEnergy",
                 arr.toString()
+            )
+        }
+
+        /**
+         * @brief 查询健康岛快捷游戏入口
+         *
+         * @remark 对应抓包：com.alipay.neverland.biz.rpc.queryQuickGameList
+         */
+        fun queryQuickGameList(source: String = DEFAULT_SOURCE): String {
+            return RequestManager.requestString(
+                "com.alipay.neverland.biz.rpc.queryQuickGameList",
+                """[{"chInfo":"$source","cityCode":"$QUICK_GAME_CITY_CODE","source":"$source"}]"""
             )
         }
 
@@ -1590,11 +1620,11 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryTaskCenter
          */
-        fun queryTaskCenter(): String {
+        fun queryTaskCenter(source: String = DEFAULT_SOURCE): String {
             RpcCache.invalidate(NEVERLAND_QUERY_TASK_CENTER_RPC)
             return RequestManager.requestString(
                 NEVERLAND_QUERY_TASK_CENTER_RPC,
-                """[{"apDid":"6b30jO17Z6Wbr2ggRytFxB09hZdhixfSekjytgi9Ytc=","cityCode":"","deviceLevel":"high","newGame":0,"source":"jkdsportcard"}]"""
+                """[{"apDid":"6b30jO17Z6Wbr2ggRytFxB09hZdhixfSekjytgi9Ytc=","cityCode":"","deviceLevel":"high","newGame":0,"source":"$source"}]"""
             )
         }
 
@@ -1628,11 +1658,17 @@ object AntSportsRpcCall {
          *
          * @remark 对应API：com.alipay.neverland.biz.rpc.energyReceive
          */
-        fun energyReceive(encryptValue: String, energyNum: Int, type: String, lightTaskId: String?): String {
+        fun energyReceive(
+            encryptValue: String,
+            energyNum: Int,
+            type: String,
+            lightTaskId: String?,
+            source: String = DEFAULT_SOURCE
+        ): String {
             val obj = JSONObject().apply {
                 put("encryptValue", encryptValue)
                 put("energyNum", energyNum.toString())
-                put("source", "jkdsportcard")
+                put("source", source)
                 put("type", type)
                 if (!lightTaskId.isNullOrEmpty()) {
                     put("lightTaskId", lightTaskId)
@@ -1700,10 +1736,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryMapList
          */
-        fun queryMapList(): String {
+        fun queryMapList(source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.queryMapList",
-                """[{"source":"jkdsportcard"}]"""
+                """[{"source":"$source"}]"""
             )
         }
 
@@ -1719,12 +1755,12 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryMapInfo
          */
         @Throws(JSONException::class)
-        fun queryMapInfo(mapId: String, branchId: String): String {
+        fun queryMapInfo(mapId: String, branchId: String, source: String = DEFAULT_SOURCE): String {
             val obj = JSONObject()
             obj.put("branchId", branchId)
             obj.put("drilling", false)
             obj.put("mapId", mapId)
-            obj.put("source", "jkdsportcard")
+            obj.put("source", source)
 
             val arr = JSONArray()
             arr.put(obj)
@@ -1740,10 +1776,14 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryMapInfoNew
          */
-        fun queryMapInfoNew(mapId: String, branchId: String = "MASTER"): String {
+        fun queryMapInfoNew(
+            mapId: String,
+            branchId: String = "MASTER",
+            source: String = DEFAULT_SOURCE
+        ): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.queryMapInfoNew",
-                """[{"branchId":"$branchId","mapId":"$mapId","source":"jkdsportcard"}]"""
+                """[{"branchId":"$branchId","mapId":"$mapId","source":"$source"}]"""
             )
         }
 
@@ -1754,10 +1794,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryBaseinfo
          */
-        fun queryBaseinfo(): String {
+        fun queryBaseinfo(source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.queryBaseinfo",
-                """[{"source":"jkdsportcard"}]"""
+                """[{"source":"$source"}]"""
             )
         }
 
@@ -1772,18 +1812,23 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.build
          */
-        fun build(branchId: String, mapId: String, multiNum: Int): String {
+        fun build(branchId: String, mapId: String, multiNum: Int, source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.build",
-                """[{"branchId":"$branchId","mapId":"$mapId","multiNum":$multiNum,"source":"jkdsportcard"}]"""
+                """[{"branchId":"$branchId","mapId":"$mapId","multiNum":$multiNum,"source":"$source"}]"""
             )
         }
 
         /**
          * @brief 建造建筑（新版参数顺序，兼容旧 build(branchId, mapId, multiNum)）
          */
-        fun build(mapId: String, multiNum: Int, branchId: String = "MASTER"): String {
-            return build(branchId, mapId, multiNum)
+        fun build(
+            mapId: String,
+            multiNum: Int,
+            branchId: String = "MASTER",
+            source: String = DEFAULT_SOURCE
+        ): String {
+            return build(branchId, mapId, multiNum, source)
         }
 
         /**
@@ -1795,10 +1840,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryMapDetail
          */
-        fun queryMapDetail(mapId: String): String {
+        fun queryMapDetail(mapId: String, source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.queryMapDetail",
-                """[{"mapId":"$mapId","source":"jkdsportcard"}]"""
+                """[{"mapId":"$mapId","source":"$source"}]"""
             )
         }
 
@@ -1813,10 +1858,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.mapStageReward
          */
-        fun mapStageReward(branchId: String, level: Int, mapId: String): String {
+        fun mapStageReward(branchId: String, level: Int, mapId: String, source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.mapStageReward",
-                """[{"branchId":"$branchId","level":$level,"mapId":"$mapId","source":"jkdsportcard"}]"""
+                """[{"branchId":"$branchId","level":$level,"mapId":"$mapId","source":"$source"}]"""
             )
         }
 
@@ -1831,10 +1876,15 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.mapChooseReward
          */
-        fun chooseReward(branchId: String, mapId: String, rewardId: String): String {
+        fun chooseReward(
+            branchId: String,
+            mapId: String,
+            rewardId: String,
+            source: String = DEFAULT_SOURCE
+        ): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.mapChooseReward",
-                """[{"branchId":"$branchId","channel":"jkdsportcard","mapId":"$mapId","rewardId":"$rewardId","source":"jkdsportcard"}]"""
+                """[{"branchId":"$branchId","channel":"$source","mapId":"$mapId","rewardId":"$rewardId","source":"$source"}]"""
             )
         }
 
@@ -1848,10 +1898,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.mapChooseFree
          */
-        fun chooseMap(branchId: String, mapId: String): String {
+        fun chooseMap(branchId: String, mapId: String, source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.mapChooseFree",
-                """[{"branchId":"$branchId","mapId":"$mapId","source":"jkdsportcard"}]"""
+                """[{"branchId":"$branchId","mapId":"$mapId","source":"$source"}]"""
             )
         }
 
@@ -1866,10 +1916,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.walkGrid
          */
-        fun walkGrid(branchId: String, mapId: String, drilling: Boolean): String {
+        fun walkGrid(branchId: String, mapId: String, drilling: Boolean, source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.walkGrid",
-                """[{"branchId":"$branchId","mapId":"$mapId","drilling":$drilling,"source":"jkdsportcard"}]"""
+                """[{"branchId":"$branchId","mapId":"$mapId","drilling":$drilling,"source":"$source"}]"""
             )
         }
 
@@ -1880,10 +1930,10 @@ object AntSportsRpcCall {
          * 
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryUserAccount
          */
-        fun queryUserEnergy(): String {
+        fun queryUserEnergy(source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.queryUserAccount",
-                """[{"source":"jkdsportcard"}]"""
+                """[{"source":"$source"}]"""
             )
         }
     }
