@@ -18,6 +18,10 @@ import org.json.JSONObject
 internal fun AntFarm.handleDonationCompetition() {
     if (donationCompetition?.value != true) return
 
+    if (receiveDonationCompetitionAward?.value == true) {
+        receiveCompetitionAwards()
+    }
+
     val endTimeStr = "2000"
     val endCal = TimeUtil.getTodayCalendarByTimeStr(endTimeStr) ?: return
     val now = System.currentTimeMillis()
@@ -39,13 +43,6 @@ internal fun AntFarm.handleDonationCompetition() {
             return
         }
 
-        if (receiveDonationCompetitionAward?.value == true) {
-            val rankInfo = jo.optJSONObject("donationRankHomeInfo")
-            if (rankInfo?.optBoolean("hasAward") == true) {
-                receiveCompetitionAwards()
-            }
-        }
-
         scheduleDonationCompetitionTask(endCal.timeInMillis)
 
     } catch (e: Exception) {
@@ -56,18 +53,18 @@ internal fun AntFarm.handleDonationCompetition() {
 /**
  * 遍历奖励列表并领取
  */
-private fun receiveCompetitionAwards() {
+private fun receiveCompetitionAwards(): Int {
     try {
         val res = AntFarmRpcCall.enterCompetitionAwardPage()
         val jo = JSONObject(res)
-        if (!ResChecker.checkRes(TAG, jo)) return
+        if (!ResChecker.checkRes(TAG, jo)) return 0
 
-        val userLevelInfo = jo.optJSONObject("userDonationLevelInfo") ?: return
+        val userLevelInfo = jo.optJSONObject("userDonationLevelInfo") ?: return 0
         val currentLevelId = userLevelInfo.optInt("levelId")
         val currentLevelName = userLevelInfo.optString("levelName")
         val lightStars = userLevelInfo.optInt("levelLightStarNum", 0)
 
-        val awardList = jo.optJSONArray("levelAwardInfoList") ?: return
+        val awardList = jo.optJSONArray("levelAwardInfoList") ?: return 0
 
         var highestLevelName = "未知"
         var starsToHighest = 0
@@ -103,24 +100,49 @@ private fun receiveCompetitionAwards() {
         Log.record(TAG, "👑 最高段位：$highestLevelName (总差距 ${starsToHighest}🌟)")
         Log.record(TAG, "------------------------")
 
+        var claimableCount = 0
+        var receivedCount = 0
         for (i in 0 until awardList.length()) {
             val award = awardList.getJSONObject(i)
-            if (award.optString("status") == "unreceived") {
-                val rightsId = award.getString("rightsId")
-                val levelName = award.optString("levelName", "未知段位")
+            if (!award.optString("status").equals("unreceived", ignoreCase = true)) continue
 
-                Log.record(TAG, "发现可领取排位奖励：$levelName")
-                val receiveRes = AntFarmRpcCall.receiveDonationLevelReward(rightsId)
-                val receiveJo = JSONObject(receiveRes)
+            claimableCount++
+            val rightsId = award.optString("rightsId")
+            val levelName = award.optString("levelName", "未知段位")
+            if (rightsId.isBlank()) {
+                Log.record(TAG, "发现可领取排位奖励但缺少 rightsId：$levelName")
+                continue
+            }
 
-                if (ResChecker.checkRes(TAG, receiveJo)) {
-                    Log.record(TAG, "🎉 成功领取 $levelName 段位奖励")
-                }
+            Log.record(TAG, "发现可领取排位奖励：$levelName")
+            val receiveRes = AntFarmRpcCall.receiveDonationLevelReward(rightsId)
+            val receiveJo = JSONObject(receiveRes)
+
+            if (ResChecker.checkRes(TAG, receiveJo)) {
+                receivedCount++
+                Log.record(TAG, "🎉 成功领取 $levelName 段位奖励")
+            } else {
+                Log.record(TAG, "领取 $levelName 段位奖励失败：${formatDonationAwardFailure(receiveJo)}")
             }
         }
+
+        if (claimableCount == 0) {
+            Log.record(TAG, "当前没有可领取的排位赛段位奖励")
+        }
+        return receivedCount
     } catch (e: Exception) {
         Log.printStackTrace(TAG, "receiveCompetitionAwards err:", e)
     }
+    return 0
+}
+
+private fun formatDonationAwardFailure(jo: JSONObject): String {
+    return jo.optString("memo")
+        .ifBlank { jo.optString("resultDesc") }
+        .ifBlank { jo.optString("errorMsg") }
+        .ifBlank { jo.optString("desc") }
+        .ifBlank { jo.optString("resultCode") }
+        .ifBlank { jo.toString() }
 }
 
 /**
