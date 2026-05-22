@@ -52,6 +52,12 @@ object ResChecker {
 
     private val checkFailedWindowStats = ConcurrentHashMap<String, CheckFailedWindowStat>()
     private const val CHECK_FAILED_SUMMARY_WINDOW_MS = 10 * 60_000L
+
+    private fun formatFailureMessage(context: String?, message: String): String {
+        val prefix = context?.trim()?.takeIf { it.isNotEmpty() } ?: return message
+        val separator = if (prefix.endsWith(":") || prefix.endsWith("：")) " " else ": "
+        return "$prefix$separator$message"
+    }
     
     /**
      * 核心检查逻辑
@@ -104,7 +110,7 @@ object ResChecker {
         "CyclomaticComplexMethod",
         "ReturnCount"
     )
-    private fun core(tag: String, jo: JSONObject): Boolean {
+    private fun core(tag: String, context: String?, jo: JSONObject): Boolean {
         return try {
             // 检查 success 或 isSuccess 字段为 true
             if (jo.optBoolean("success") || jo.optBoolean("isSuccess")) {
@@ -134,7 +140,7 @@ object ResChecker {
             // 获取调用栈信息以确定错误来源
             val stackTrace = Thread.currentThread().stackTrace
             val callerInfo = getString(stackTrace)
-            val key = "$tag|${failureInfo.code}"
+            val key = "$tag|${context.orEmpty().trim()}|${failureInfo.code}"
             val now = System.currentTimeMillis()
             val stat = checkFailedWindowStats.computeIfAbsent(key) {
                 CheckFailedWindowStat(windowStartMs = now, count = 0)
@@ -160,13 +166,13 @@ object ResChecker {
                 }
                 stat.count++
             }
-            summaryLog?.let { Log.error(tag, it) }
+            summaryLog?.let { Log.error(tag, formatFailureMessage(context, it)) }
             if (shouldLogDetail) {
-                Log.error(tag, "Check failed: [来源: $callerInfo] $jo")
+                Log.error(tag, formatFailureMessage(context, "Check failed: [来源: $callerInfo] $jo"))
             }
             false
         } catch (t: Throwable) {
-            Log.printStackTrace(tag, "Error checking JSON success:", t)
+            Log.printStackTrace(tag, formatFailureMessage(context, "Error checking JSON success:"), t)
             false
         }
     }
@@ -221,7 +227,12 @@ object ResChecker {
      */
     @JvmStatic
     fun checkRes(tag: String, jo: JSONObject): Boolean {
-        return core(tag, jo)
+        return core(tag, null, jo)
+    }
+
+    @JvmStatic
+    fun checkRes(tag: String, context: String, jo: JSONObject): Boolean {
+        return core(tag, context, jo)
     }
 
     @JvmStatic
@@ -249,13 +260,19 @@ object ResChecker {
     @JvmStatic
     @Throws(JSONException::class)
     fun checkRes(tag: String, jsonStr: String?): Boolean {
+        return checkRes(tag, null, jsonStr)
+    }
+
+    @JvmStatic
+    @Throws(JSONException::class)
+    fun checkRes(tag: String, context: String?, jsonStr: String?): Boolean {
         // 检查null或空字符串
         if (jsonStr.isNullOrBlank()) {
-            Log.record(TAG, "[$tag] RPC响应为空")
+            Log.error(tag, formatFailureMessage(context, "RPC响应为空"))
             return false
         }
         val jo = JSONObject(jsonStr)
-        return checkRes(tag, jo)
+        return core(tag, context, jo)
     }
 }
 

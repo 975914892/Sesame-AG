@@ -1145,7 +1145,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val homeStr = AntForestRpcCall.queryHomePage()
             if (homeStr.isBlank()) return
             val homeJo = JSONObject(homeStr)
-            if (!ResChecker.checkRes(TAG + "queryHomePage:", homeJo)) return
+            if (!ResChecker.checkRes(TAG, "queryHomePage:", homeJo)) return
             updateSelfHomePage(homeJo)
 
             val currentEnergy = homeJo.optJSONObject("userBaseInfo")?.optInt("currentEnergy", 0) ?: 0
@@ -1153,7 +1153,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val dynamicStr = AntForestRpcCall.queryDynamicsIndex()
             if (dynamicStr.isBlank()) return
             val dynamicJo = JSONObject(dynamicStr)
-            if (!ResChecker.checkRes(TAG + "queryDynamicsIndex:", dynamicJo)) return
+            if (!ResChecker.checkRes(TAG, "queryDynamicsIndex:", dynamicJo)) return
 
             val summary = dynamicJo.optJSONObject("todayEnergySummary") ?: return
             val obtainTotal = summary.optInt("obtainTotal", 0)
@@ -1322,7 +1322,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private fun processCollectResult(response: String, successMessage: String?) {
         try {
             val joEnergy = JSONObject(response)
-            if (ResChecker.checkRes(TAG + "收集能量失败:", joEnergy)) {
+            if (ResChecker.checkRes(TAG, "收集能量失败:", joEnergy)) {
                 val bubbles = joEnergy.getJSONArray("bubbles")
                 if (bubbles.length() > 0) {
                     val collected = bubbles.getJSONObject(0).getInt("collectedEnergy")
@@ -1369,7 +1369,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 try {
                     val response = AntForestRpcCall.collectProp(giveConfigId, giveId)
                     val responseObj = JSONObject(response)
-                    if (ResChecker.checkRes(TAG + "领取道具失败:", responseObj)) {
+                    if (ResChecker.checkRes(TAG, "领取道具失败:", responseObj)) {
                         val str = "领取道具🎭[$propName]"
                         Log.forest(str)
                         Toast.show(str)
@@ -1425,7 +1425,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 val animalName = extInfo.getJSONObject("animal").getString("name")
                 val response = AntForestRpcCall.collectAnimalRobEnergy(propId, propType, shortDay)
                 val responseObj = JSONObject(response)
-                if (ResChecker.checkRes(TAG + "收取动物派遣能量失败:", responseObj)) {
+                if (ResChecker.checkRes(TAG, "收取动物派遣能量失败:", responseObj)) {
                     val energy = extInfo.optInt("energy", 0)
                     if (energy > 0) {
                         selfId?.takeIf { it.isNotBlank() }?.let { uid ->
@@ -1494,7 +1494,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     val response = AntForestRpcCall.collectBombCardEnergy(propId)
 
                     val responseObj = JSONObject(response)
-                    if (ResChecker.checkRes(TAG + "收取炸弹卡能量失败:", responseObj)) {
+                    if (ResChecker.checkRes(TAG, "收取炸弹卡能量失败:", responseObj)) {
                         val collected = responseObj.optInt("collectEnergy", 0)
                         if (collected > 0) {
                             selfId?.takeIf { it.isNotBlank() }?.let { uid ->
@@ -1612,7 +1612,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 return
             }
             val homeObj = JSONObject(homeResponse)
-            if (!ResChecker.checkRes(TAG + "查询1V1能量挑战赛失败:", homeObj)) {
+            if (!ResChecker.checkRes(TAG, "查询1V1能量挑战赛失败:", homeObj)) {
                 Log.forest("1V1能量挑战赛查询失败: ${homeObj.optString("resultDesc", homeObj.optString("resultCode"))}")
                 if (pvpInfo?.hasReward == true) {
                     Log.forest("1V1能量挑战赛：入口提示有待领奖励，主页查询失败后尝试直接领取")
@@ -1662,7 +1662,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return null
         }
         val obj = JSONObject(response)
-        if (!ResChecker.checkRes(TAG + "查询1V1能量挑战赛入口失败:", obj)) {
+        if (!ResChecker.checkRes(TAG, "查询1V1能量挑战赛入口失败:", obj)) {
             Log.forest("1V1能量挑战赛入口查询失败: ${obj.optString("resultDesc", obj.optString("resultCode"))}")
             return null
         }
@@ -1692,7 +1692,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return false
         }
         val receiveObj = JSONObject(receiveResponse)
-        if (!ResChecker.checkRes(TAG + "领取1V1能量挑战赛奖励失败:", receiveObj)) {
+        if (!ResChecker.checkRes(TAG, "领取1V1能量挑战赛奖励失败:", receiveObj)) {
             val resultCode = receiveObj.optString("resultCode")
             val resultDesc = receiveObj.optString("resultDesc", resultCode)
             if (isPvpRewardTerminalResult(resultCode, resultDesc)) {
@@ -1718,7 +1718,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 return
             }
             val recordsObj = JSONObject(recordsResponse)
-            if (ResChecker.checkRes(TAG + "复查1V1能量挑战赛记录失败:", recordsObj)) {
+            if (ResChecker.checkRes(TAG, "复查1V1能量挑战赛记录失败:", recordsObj)) {
                 Log.forest("1V1能量挑战赛奖励复查：hasRewards=${recordsObj.optBoolean("hasRewards", false)}")
             }
         } catch (t: Throwable) {
@@ -1869,7 +1869,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
             userHomeObj = JSONObject(response)
             // 检查响应是否成功
-            if (!ResChecker.checkRes(TAG + "查询自己主页失败:", userHomeObj)) {
+            if (!ResChecker.checkRes(TAG, "查询自己主页失败:", userHomeObj)) {
                 Log.error(TAG, "查询自己主页失败: " + userHomeObj.optString("resultDesc", "未知错误"))
                 return null
             }
@@ -1953,7 +1953,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 return null
             }
             // 检查响应是否成功
-            if (!ResChecker.checkRes(TAG + "查询好友主页失败:", friendHomeObj)) {
+            if (!ResChecker.checkRes(TAG, "查询好友主页失败:", friendHomeObj)) {
                 // 检测并记录"手速太快"错误，避免日志刷屏
                 ForestUtil.checkAndRecordFrequencyError(safeUserId, friendHomeObj)
                 return null
@@ -2030,7 +2030,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 return null
             }
             // 1. 检查接口返回是否成功
-            if (!ResChecker.checkRes(TAG + "载入用户主页失败:", userHomeObj)) {
+            if (!ResChecker.checkRes(TAG, "载入用户主页失败:", userHomeObj)) {
                 Log.forest("载入失败: " + userHomeObj.optString("resultDesc", "未知错误"))
                 return userHomeObj
             }
@@ -2442,7 +2442,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 Log.error(TAG, "获取" + rankingName + "失败")
                 return@withContext
             }
-            if (!ResChecker.checkRes(TAG + "获取" + rankingName + "失败:", rankingObject)) {
+            if (!ResChecker.checkRes(TAG, "获取" + rankingName + "失败:", rankingObject)) {
                 Log.error(
                     TAG,
                     "获取" + rankingName + "失败: " + rankingObject.optString("resultDesc")
@@ -3164,7 +3164,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             val title = giftBox.getString("title")
                             val giftBoxResult =
                                 JSONObject(AntForestRpcCall.collectFriendGiftBox(giftBoxId, safeUserId))
-                            if (!ResChecker.checkRes(TAG + "领取好友礼盒失败:", giftBoxResult)) {
+                            if (!ResChecker.checkRes(TAG, "领取好友礼盒失败:", giftBoxResult)) {
                                 Log.forest(giftBoxResult.getString("resultDesc"))
                                 Log.forest(giftBoxResult.toString())
                                 continue
@@ -3230,7 +3230,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             Log.forest("复活能量今日次数已用完，已记录为当日限制")
                             break
                         }
-                        if (!ResChecker.checkRes(TAG + "复活能量失败:", joProtect)) {
+                        if (!ResChecker.checkRes(TAG, "复活能量失败:", joProtect)) {
                             //Log.forest(joProtect.getString("resultDesc"))
                             //Log.runtime(joProtect.toString())
                             continue
@@ -3910,7 +3910,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         GlobalThreadPools.sleepCompat(300) // 等待300毫秒
                         if (isForestSignAlreadyHandled(joSign)) {
                             Log.forest("森林签到已完成，跳过重复签到")
-                        } else if (ResChecker.checkRes(TAG + "森林签到失败:", joSign)) {
+                        } else if (ResChecker.checkRes(TAG, "森林签到失败:", joSign)) {
                             Log.forest("森林签到📆成功")
                             totalAwardCount += awardCount
                         }
@@ -4007,7 +4007,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     )
                 )
             )
-            if (!ResChecker.checkRes(TAG + "森林七日礼包查询失败:", commonSignResponse)) {
+            if (!ResChecker.checkRes(TAG, "森林七日礼包查询失败:", commonSignResponse)) {
                 return
             }
 
@@ -4305,7 +4305,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     finishedCount++
                 }
 
-                ResChecker.checkRes(TAG + "完成绿色践行子任务失败:", finishTaskResponse) -> {
+                ResChecker.checkRes(TAG, "完成绿色践行子任务失败:", finishTaskResponse) -> {
                     forestTaskTryCount.remove(bizKey)
                     Log.forest("森林任务🧾️[绿色践行-$childTaskTitle]")
                     changed = true
@@ -4463,7 +4463,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             var response: JSONObject? = null
             for (candidate in sourceCandidates) {
                 val candidateResponse = requestDeferredForestRights(sceneCode, touchIds, candidate)
-                if (candidateResponse == null || !ResChecker.checkRes(TAG + "领取森林累计奖励失败:", candidateResponse)) {
+                if (candidateResponse == null || !ResChecker.checkRes(TAG, "领取森林累计奖励失败:", candidateResponse)) {
                     if (response == null) {
                         response = candidateResponse
                     }
@@ -4474,7 +4474,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     break
                 }
             }
-            if (response == null || !ResChecker.checkRes(TAG + "领取森林累计奖励失败:", response)) {
+            if (response == null || !ResChecker.checkRes(TAG, "领取森林累计奖励失败:", response)) {
                 continue
             }
             val touchMap = response.optJSONObject("batchQueryAndTouchVOMap") ?: continue
@@ -4509,7 +4509,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val responseObj = JSONObject(response)
             // 兼容不同 RPC Bridge 的返回结构：有的直接返回业务字段，有的包一层 resData
             val payload = responseObj.optJSONObject("resData") ?: responseObj
-            if (!ResChecker.checkRes(TAG + "查询森林任务[$sourceName]失败:", payload)) {
+            if (!ResChecker.checkRes(TAG, "查询森林任务[$sourceName]失败:", payload)) {
                 Log.forest("森林任务[$sourceName]返回异常: " + payload.optString(
                         "resultDesc",
                         payload.optString("desc", "未知错误")
@@ -4537,7 +4537,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
         Log.forest("森林任务🧾️[$taskTitle] 直接提交完成RPC")
         val finishTaskResponse = JSONObject(AntForestRpcCall.finishTask(sceneCode, taskType))
-        return if (ResChecker.checkRes(TAG + "完成游戏任务失败:", finishTaskResponse)) {
+        return if (ResChecker.checkRes(TAG, "完成游戏任务失败:", finishTaskResponse)) {
             Log.forest("游戏任务完成 🎮️[$taskTitle]# $awardCount 活力值")
             true
         } else {
@@ -4590,7 +4590,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 false
             }
 
-            ResChecker.checkRes(TAG + "领取森林任务奖励失败:", awardResponse) -> {
+            ResChecker.checkRes(TAG, "领取森林任务奖励失败:", awardResponse) -> {
                 val incAwardCount = awardResponse.optInt("incAwardCount", awardCount)
                 val displayAwardCount = if (incAwardCount > 0) incAwardCount else awardCount
                 Log.forest("森林奖励🎖️[$taskTitle]# $displayAwardCount 活力值")
@@ -4722,7 +4722,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         false
                     }
 
-                    ResChecker.checkRes(TAG + "领取森林任务奖励失败:", awardResponse) -> {
+                    ResChecker.checkRes(TAG, "领取森林任务奖励失败:", awardResponse) -> {
                         val incAwardCount = awardResponse.optInt("incAwardCount", awardCount)
                         val displayAwardCount = if (incAwardCount > 0) incAwardCount else awardCount
                         Log.forest("森林奖励🎖️[$taskTitle]# $displayAwardCount 活力值")
@@ -4766,7 +4766,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         true
                     }
 
-                    ResChecker.checkRes(TAG + "完成森林任务失败:", finishTaskResponse) -> {
+                    ResChecker.checkRes(TAG, "完成森林任务失败:", finishTaskResponse) -> {
                         forestTaskTryCount.remove(bizKey)
                         Log.forest("森林任务🧾️[$taskTitle]")
                         true
@@ -5248,7 +5248,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             do {
                 // 查询道具列表
                 val propListJo = JSONObject(AntForestRpcCall.queryPropList(true))
-                if (ResChecker.checkRes(TAG + "查询道具列表失败:", propListJo)) {
+                if (ResChecker.checkRes(TAG, "查询道具列表失败:", propListJo)) {
                     val forestPropVOList = propListJo.optJSONArray("forestPropVOList")
                     if (forestPropVOList != null && forestPropVOList.length() > 0) {
                         val propJo = forestPropVOList.getJSONObject(0)
@@ -5264,7 +5264,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                                 safeTargetUserId
                             )
                         )
-                        if (ResChecker.checkRes(TAG + "赠送道具失败:", giveResultJo)) {
+                        if (ResChecker.checkRes(TAG, "赠送道具失败:", giveResultJo)) {
                             Log.forest("赠送道具🎭[" + UserMap.getMaskName(safeTargetUserId) + "]#" + propName)
                         } else {
                             val rt = giveResultJo.getString("resultDesc")
@@ -5395,7 +5395,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
         return try {
             val response = unwrapResData(JSONObject(AntForestRpcCall.queryAnimalAndPiece(0, record.patrolId)))
-            if (!ResChecker.checkRes(TAG + "查询巡护图鉴失败:", response)) {
+            if (!ResChecker.checkRes(TAG, "查询巡护图鉴失败:", response)) {
                 Log.forest("巡护图鉴检查失败[${record.reserveName}/${record.patrolId}]: ${response.optString("resultDesc", response.optString("desc"))}")
                 return false
             }
@@ -5474,7 +5474,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return false
         }
         val switchResponse = unwrapResData(JSONObject(AntForestRpcCall.switchUserPatrol(target.patrolId.toString())))
-        return if (ResChecker.checkRes(TAG + "切换巡护地图失败:", switchResponse)) {
+        return if (ResChecker.checkRes(TAG, "切换巡护地图失败:", switchResponse)) {
             Log.forest("巡护⚖️-切换地图至[${target.reserveName}/${target.patrolId}](${target.reason})")
             true
         } else {
@@ -5493,15 +5493,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 // 查询当前巡护任务
                 var jo = unwrapResData(JSONObject(AntForestRpcCall.queryUserPatrol()))
                 // 如果查询成功
-                if (ResChecker.checkRes(TAG + "查询巡护任务失败:", jo)) {
+                if (ResChecker.checkRes(TAG, "查询巡护任务失败:", jo)) {
                     // 查询我的巡护记录
                     val currentPatrolId = jo.optJSONObject("userPatrol")?.optInt("patrolId", 0) ?: 0
                     val recordPayload = unwrapResData(JSONObject(AntForestRpcCall.queryMyPatrolRecord()))
-                    if (ResChecker.checkRes(TAG + "查询巡护记录失败:", recordPayload) &&
+                    if (ResChecker.checkRes(TAG, "查询巡护记录失败:", recordPayload) &&
                         switchUserPatrolIfNeeded(currentPatrolId, recordPayload)
                     ) {
                         jo = unwrapResData(JSONObject(AntForestRpcCall.queryUserPatrol()))
-                        if (!ResChecker.checkRes(TAG + "查询巡护任务失败:", jo)) {
+                        if (!ResChecker.checkRes(TAG, "查询巡护任务失败:", jo)) {
                             Log.forest(jo.optString("resultDesc", jo.optString("desc", "查询巡护任务失败")))
                             break
                         }
@@ -5541,7 +5541,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             usedStep < maxExchangeStep
                         ) { // 如果没有剩余的巡护次数但步数足够，则兑换巡护次数
                             jo = JSONObject(AntForestRpcCall.exchangePatrolChance(leftStep))
-                            if (ResChecker.checkRes(TAG + "兑换巡护次数失败:", jo)) { // 兑换成功，增加巡护次数
+                            if (ResChecker.checkRes(TAG, "兑换巡护次数失败:", jo)) { // 兑换成功，增加巡护次数
                                 val addedChance = jo.optInt("addedChance", 0)
                                 Log.forest("步数兑换⚖️[巡护次数*$addedChance]")
                                 val consumedStep = if (addedChance > 0) addedChance * chanceStepUnit else chanceStepUnit
@@ -5675,7 +5675,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val name = animalProp.getJSONObject("partner").getString("name")
             // 调用API进行伙伴派遣
             val jo = JSONObject(AntForestRpcCall.consumeProp(propGroup, "", propType, false))
-            if (ResChecker.checkRes(TAG + "巡护派遣失败:", jo)) {
+            if (ResChecker.checkRes(TAG, "巡护派遣失败:", jo)) {
                 Log.forest("巡护派遣🐆[$name]")
             } else {
                 Log.forest(jo.getString("resultDesc"))
@@ -6239,7 +6239,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
             // 统一结果处理
             val resultData = unwrapResData(jo)
-            if (ResChecker.checkRes(TAG + "使用道具失败:", resultData)) {
+            if (ResChecker.checkRes(TAG, "使用道具失败:", resultData)) {
                 invalidatePropBagCache()
                 // ⚡ 优化点：根据参数决定是否执行耗时的刷新操作
                 if (needRefreshHome) {

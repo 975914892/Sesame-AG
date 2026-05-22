@@ -24,6 +24,11 @@ object Log {
         ERROR
     }
 
+    private data class TaggedModuleMessage(
+        val channel: LogChannel,
+        val message: String
+    )
+
     init {
         Logback.initLogcatOnly()
         loggerMap = LogCatalog.channels.associateWith { LoggerFactory.getLogger(it.loggerName) }
@@ -41,6 +46,66 @@ object Log {
     private fun getLogger(channel: LogChannel): Logger = loggerMap.getValue(channel)
 
     private fun formatTaggedMessage(tag: String, msg: String): String = "[$tag]: $msg"
+
+    private fun recordTag(channel: LogChannel): String = channel.logTag ?: channel.moduleDomain.displayName
+
+    private fun stripTagSeparator(value: String): String {
+        return when {
+            value.startsWith(": ") || value.startsWith("： ") -> value.substring(2)
+            value.startsWith(":") || value.startsWith("：") -> value.substring(1).trimStart()
+            else -> value.trimStart()
+        }
+    }
+
+    private fun extractTaggedModuleMessage(msg: String): TaggedModuleMessage? {
+        val trimmed = msg.trimStart()
+        if (trimmed.startsWith("[")) {
+            val end = trimmed.indexOf(']')
+            if (end > 1) {
+                val tag = trimmed.substring(1, end).trim()
+                val channel = LogCatalog.findBySourceTagAlias(tag)
+                if (channel != null) {
+                    val body = stripTagSeparator(trimmed.substring(end + 1))
+                    return TaggedModuleMessage(channel, body)
+                }
+            }
+        }
+
+        for (channel in LogCatalog.channels) {
+            for (alias in LogCatalog.sourceTagAliases(channel).sortedByDescending { it.length }) {
+                if (trimmed.length > alias.length &&
+                    trimmed.regionMatches(0, alias, 0, alias.length, ignoreCase = true)
+                ) {
+                    val separator = trimmed[alias.length]
+                    if (separator == ':' || separator == '：') {
+                        return TaggedModuleMessage(
+                            channel,
+                            stripTagSeparator(trimmed.substring(alias.length))
+                        )
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun recordMessageForChannel(channel: LogChannel, msg: String): String {
+        return if (!channel.logTag.isNullOrEmpty()) {
+            formatTaggedMessage(recordTag(channel), msg)
+        } else {
+            msg
+        }
+    }
+
+    private fun copyTaggedMessageToModule(msg: String, severity: Severity): String {
+        val taggedMessage = extractTaggedModuleMessage(msg) ?: return msg
+        logRaw(taggedMessage.channel, severity, taggedMessage.message)
+        return formatTaggedMessage(recordTag(taggedMessage.channel), taggedMessage.message)
+    }
+
+    private fun writeRecordOnly(severity: Severity, msg: String) {
+        logRaw(LogChannel.RECORD, severity, copyTaggedMessageToModule(msg, severity))
+    }
 
     private fun shouldWrite(channel: LogChannel): Boolean {
         return when (channel) {
@@ -68,11 +133,7 @@ object Log {
 
     private fun write(channel: LogChannel, severity: Severity, msg: String, type: Int = 1) {
         if (channel.mirrorToRecord && type == 1) {
-            val recordMsg = if (!channel.logTag.isNullOrEmpty()) {
-                formatTaggedMessage(channel.logTag, msg)
-            } else {
-                msg
-            }
+            val recordMsg = recordMessageForChannel(channel, msg)
             logRaw(LogChannel.RECORD, Severity.INFO, recordMsg)
         }
         logRaw(channel, severity, msg)
@@ -106,6 +167,12 @@ object Log {
     fun record(msg: String, type: Int = 1) {
         logRaw(LogChannel.RUNTIME, Severity.DEBUG, msg)
 
+        val taggedMessage = extractTaggedModuleMessage(msg)
+        if (taggedMessage != null) {
+            write(taggedMessage.channel, Severity.INFO, taggedMessage.message, type)
+            return
+        }
+
         val shouldRecord = if (type == 1) shouldWrite(LogChannel.RECORD) else false
         if (shouldRecord) {
             logRaw(LogChannel.RECORD, Severity.INFO, msg)
@@ -134,7 +201,12 @@ object Log {
 
     @JvmStatic
     fun common(tag: String, msg: String) {
-        common(formatTaggedMessage(tag, msg))
+        val channel = LogCatalog.findBySourceTagAlias(tag)
+        if (channel != null) {
+            business(channel, msg)
+        } else {
+            common(formatTaggedMessage(tag, msg))
+        }
     }
 
     @JvmStatic
@@ -206,7 +278,7 @@ object Log {
 
     @JvmStatic
     fun error(msg: String) {
-        write(LogChannel.ERROR, Severity.ERROR, msg)
+        write(LogChannel.ERROR, Severity.ERROR, copyTaggedMessageToModule(msg, Severity.ERROR))
     }
 
     @JvmStatic
@@ -236,7 +308,7 @@ object Log {
 
     @JvmStatic
     fun w(tag: String, msg: String) {
-        logRaw(LogChannel.RECORD, Severity.WARN, formatTaggedMessage(tag, msg))
+        writeRecordOnly(Severity.WARN, formatTaggedMessage(tag, msg))
     }
 
     @JvmStatic
@@ -246,7 +318,7 @@ object Log {
         } else {
             "${formatTaggedMessage(tag, msg)}\n${android.util.Log.getStackTraceString(th)}"
         }
-        logRaw(LogChannel.RECORD, Severity.WARN, finalMsg)
+        writeRecordOnly(Severity.WARN, finalMsg)
     }
 
     @JvmStatic
@@ -256,7 +328,7 @@ object Log {
         } else {
             "${formatTaggedMessage(tag, msg)}\n${android.util.Log.getStackTraceString(th)}"
         }
-        write(LogChannel.ERROR, Severity.ERROR, finalMsg)
+        error(finalMsg)
     }
 
     private fun shouldSkipDuplicateError(th: Throwable?): Boolean {

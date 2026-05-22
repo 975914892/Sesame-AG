@@ -253,10 +253,78 @@ enum class LogChannel(
         }
         return loggerName.equals(value, ignoreCase = true)
     }
+
+    fun matchesSourceTagAlias(value: String?): Boolean {
+        if (value.isNullOrBlank()) {
+            return false
+        }
+        val candidate = value.trim()
+        return LogCatalog.sourceTagAliases(this).any { it.equals(candidate, ignoreCase = true) }
+    }
 }
 
 object LogCatalog {
     val channels: List<LogChannel> = LogChannel.entries
+
+    private val channelSourceTagAliases: Map<LogChannel, Set<String>> = mapOf(
+        LogChannel.FOREST to setOf(
+            "AntForest",
+            "AntForestRpcCall",
+            "AntCooperate",
+            "Reserve",
+            "EcoProtection",
+            "ForestUtil",
+            "ForestChouChouLe",
+            "EnergyWaitingPersistence",
+            "EnergyWaitingManager",
+            "EnergyRain",
+            "EcoLife",
+            "GreenLife",
+            "Healthcare",
+            "Privilege",
+            "RebornEnergyWeekly",
+            "UserEnergyPatternManager",
+            "Vitality",
+            "WhackMole"
+        ),
+        LogChannel.ORCHARD to setOf(
+            "AntOrchard",
+            "XLightRpcCall"
+        ),
+        LogChannel.FARM to setOf(
+            "AntFarm",
+            "AntFarmRpcCall",
+            "FarmGame",
+            "ChouChouLe",
+            "AntFarmFamily"
+        ),
+        LogChannel.STALL to setOf(
+            "AntStall",
+            "ReadingDada"
+        ),
+        LogChannel.OCEAN to setOf(
+            "AntOcean"
+        ),
+        LogChannel.DODO to setOf(
+            "AntDodo"
+        ),
+        LogChannel.MEMBER to setOf(
+            "AntMember"
+        ),
+        LogChannel.FISHPOND to setOf(
+            "AntFishPond"
+        ),
+        LogChannel.SPORTS to setOf(
+            "AntSports",
+            "Neverland"
+        ),
+        LogChannel.GREEN_FINANCE to setOf(
+            "GreenFinance"
+        ),
+        LogChannel.SESAME_CREDIT to setOf(
+            "AntSesameCredit"
+        )
+    )
 
     @JvmStatic
     fun loggerNames(): List<String> = channels.map { it.loggerName }.distinct()
@@ -279,6 +347,16 @@ object LogCatalog {
     @JvmStatic
     fun findByLoggerName(loggerName: String?): LogChannel? {
         return channels.firstOrNull { it.matchesLoggerName(loggerName) }
+    }
+
+    @JvmStatic
+    fun findBySourceTagAlias(sourceTag: String?): LogChannel? {
+        return channels.firstOrNull { it.matchesSourceTagAlias(sourceTag) }
+    }
+
+    @JvmStatic
+    fun sourceTagAliases(channel: LogChannel): Set<String> {
+        return channelSourceTagAliases[channel].orEmpty()
     }
 
     @JvmStatic

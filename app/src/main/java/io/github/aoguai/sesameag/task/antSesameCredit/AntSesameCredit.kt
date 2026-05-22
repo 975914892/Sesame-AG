@@ -578,7 +578,7 @@ class AntSesameCredit : ModelTask() {
                 skippedCount = overallSkippedTasks
             )
         } catch (t: Throwable) {
-            Log.printStackTrace(TAG + "doAllAvailableSesameTask err", t)
+            Log.printStackTrace(TAG, "doAllAvailableSesameTask err", t)
             return@run SesameTaskRunSummary(
                 completedCount = overallCompletedTasks,
                 skippedCount = overallSkippedTasks,
@@ -917,7 +917,7 @@ class AntSesameCredit : ModelTask() {
 
             val queryResp = JSONObject(queryRespStr)
             val queryData = queryResp.optJSONObject("data")
-            if (!ResChecker.checkRes(TAG + "查询时段任务失败:", queryResp) || !ResChecker.checkRes(
+            if (!ResChecker.checkRes(TAG, "查询时段任务失败:", queryResp) || !ResChecker.checkRes(
                     TAG, queryResp
                 ) || queryData == null
             ) {
@@ -1971,7 +1971,7 @@ class AntSesameCredit : ModelTask() {
                     Thread.sleep(1200)
                 }
             } catch (e: Exception) {
-                Log.printStackTrace(TAG + "queryAndCollect err", e)
+                Log.printStackTrace(TAG, "queryAndCollect err", e)
             }
         }
 

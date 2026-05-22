@@ -2168,7 +2168,7 @@ class AntFarm : ModelTask() {
             if (Status.hasFlagToday(StatusFlags.FLAG_FARM_QUESTION_ANSWERED)) {
                 if (!Status.hasFlagToday(StatusFlags.FLAG_FARM_QUESTION_CACHE)) {
                     val jo = JSONObject(DadaDailyRpcCall.home(activityId))
-                    if (ResChecker.checkRes(TAG + "查询答题活动失败:", jo)) {
+                    if (ResChecker.checkRes(TAG, "查询答题活动失败:", jo)) {
                         val operationConfigList = jo.getJSONArray("operationConfigList")
                         updateTomorrowAnswerCache(operationConfigList, tomorrow)
                         Status.setFlagToday(StatusFlags.FLAG_FARM_QUESTION_CACHE)
@@ -2179,7 +2179,7 @@ class AntFarm : ModelTask() {
 
             // 获取题目信息
             val jo = JSONObject(DadaDailyRpcCall.home(activityId))
-            if (!ResChecker.checkRes(TAG + "获取答题题目失败:", jo)) return
+            if (!ResChecker.checkRes(TAG, "获取答题题目失败:", jo)) return
 
             val question = jo.getJSONObject("question")
             val questionId = question.getLong("questionId")
@@ -2232,7 +2232,7 @@ class AntFarm : ModelTask() {
             // 提交答案
             val joDailySubmit = JSONObject(DadaDailyRpcCall.submit(activityId, answer, questionId))
             Status.setFlagToday(StatusFlags.FLAG_FARM_QUESTION_ANSWERED)
-            if (ResChecker.checkRes(TAG + "提交答题答案失败:", joDailySubmit)) {
+            if (ResChecker.checkRes(TAG, "提交答题答案失败:", joDailySubmit)) {
                 val extInfo = joDailySubmit.getJSONObject("extInfo")
                 val correct = joDailySubmit.getBoolean("correct")
                 if (correct) {
@@ -2858,7 +2858,7 @@ class AntFarm : ModelTask() {
                     return
                 }
                 val jo = JSONObject(response)
-                if (ResChecker.checkRes(TAG + "查询庄园任务失败:", jo)) {
+                if (ResChecker.checkRes(TAG, "查询庄园任务失败:", jo)) {
                     val farmTaskList = jo.getJSONArray("farmTaskList")
                     val signList = jo.getJSONObject("signList")
                     val needFarmGame = recordFarmGame!!.value == true && !Status.hasFlagToday(StatusFlags.FLAG_FARM_GAME_FINISHED)
@@ -2977,7 +2977,7 @@ class AntFarm : ModelTask() {
 
 
                         val receiveTaskAwardjo = JSONObject(AntFarmRpcCall.receiveFarmTaskAward(taskId))
-                        if (ResChecker.checkRes(TAG + "领取庄园任务奖励失败:", receiveTaskAwardjo)) {
+                        if (ResChecker.checkRes(TAG, "领取庄园任务奖励失败:", receiveTaskAwardjo)) {
                             add2FoodStock(awardCount)
                             Log.farm("收取庄园任务奖励[$taskTitle]🍪${awardCount}g (剩余容量: ${foodStockLimit - foodStock}g)")
                             val nextFoodStockLeft = foodStockLimit - foodStock

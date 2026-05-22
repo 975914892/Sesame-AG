@@ -5,6 +5,7 @@ import io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.model.ModelFields
+import io.github.aoguai.sesameag.model.ModelGroup
 import io.github.aoguai.sesameag.model.ModelType
 import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.util.Log
@@ -100,6 +101,34 @@ abstract class ModelTask : Model() {
     /** 获取任务字段配置，子类必须实现  */
     abstract override fun getFields(): ModelFields?
 
+    private fun recordModuleCheckMessage(msg: String) {
+        when (getName()) {
+            "蚂蚁森林", "蚂蚁森林合种", "保护地", "生态保护" -> Log.forest(msg)
+            "农场", "芭芭农场" -> Log.orchard(msg)
+            "蚂蚁庄园" -> Log.farm(msg)
+            "新村", "蚂蚁新村" -> Log.stall(msg)
+            "海洋", "神奇海洋" -> Log.ocean(msg)
+            "神奇物种" -> Log.dodo(msg)
+            "会员" -> Log.member(msg)
+            "福气鱼池" -> Log.fishpond(msg)
+            "运动" -> Log.sports(msg)
+            "绿色经营" -> Log.greenFinance(msg)
+            "芝麻信用" -> Log.sesame(msg)
+            else -> when (getGroup()) {
+                ModelGroup.FOREST -> Log.forest(msg)
+                ModelGroup.ORCHARD -> Log.orchard(msg)
+                ModelGroup.FARM -> Log.farm(msg)
+                ModelGroup.STALL -> Log.stall(msg)
+                ModelGroup.DODO -> Log.dodo(msg)
+                ModelGroup.FISHPOND -> Log.fishpond(msg)
+                ModelGroup.SPORTS -> Log.sports(msg)
+                ModelGroup.MEMBER -> Log.member(msg)
+                ModelGroup.SESAME_CREDIT -> Log.sesame(msg)
+                else -> Log.record(getName() ?: "Task", msg)
+            }
+        }
+    }
+
     /** 检查任务是否可以执行  */
     open fun check(): Boolean {
         TaskCommon.update()
@@ -109,7 +138,7 @@ abstract class ModelTask : Model() {
             val antForest = getModel(AntForest::class.java)
             if (antForest != null && antForest.isEnable()) {
                 if (TaskCommon.IS_ENERGY_TIME) {
-                    Log.record(getName() ?: "Task", "⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，停止执行${getName()}任务！")
+                    recordModuleCheckMessage("⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，停止执行${getName()}任务！")
                     return false
                 }
             }
@@ -117,7 +146,7 @@ abstract class ModelTask : Model() {
 
         // 模块休眠检查
         if (TaskCommon.IS_MODULE_SLEEP_TIME) {
-            Log.record(getName() ?: "Task", "💤 模块休眠时间【${BaseModel.modelSleepTime.value}】停止执行${getName()}任务！")
+            recordModuleCheckMessage("💤 模块休眠时间【${BaseModel.modelSleepTime.value}】停止执行${getName()}任务！")
             return false
         }
         return true

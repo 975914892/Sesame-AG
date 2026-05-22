@@ -122,8 +122,8 @@ object EcoLife {
                         Log.forest("绿色打卡🍀[$actionName]") // 成功打卡日志
                     } else {
                         // 记录失败原因
-                        Log.error(TAG + jo.getString("resultDesc"))
-                        Log.error(TAG + jo)
+                        Log.error(TAG, jo.getString("resultDesc"))
+                        Log.error(TAG, jo.toString())
                     }
                 }
             }

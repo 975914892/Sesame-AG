@@ -3317,7 +3317,7 @@ class AntSports : ModelTask() {
         if (themeId.isNullOrEmpty()) return null
         try {
             val jo = JSONObject(AntSportsRpcCall.queryWorldMap(themeId))
-            if (ResChecker.checkRes(TAG + "queryWorldMap失败： [ThemeID: $themeId]: ", jo)) {
+            if (ResChecker.checkRes(TAG, "queryWorldMap失败： [ThemeID: $themeId]: ", jo)) {
                 theme = jo.getJSONObject("data")
             } else {
                 Log.error(TAG, "queryWorldMap失败： [ThemeID: $themeId]: $jo")
@@ -5416,7 +5416,7 @@ class AntSports : ModelTask() {
                 Log.sports("健康岛 · 检查签到状态")
                 val jo = JSONObject(AntSportsRpcCall.NeverlandRpcCall.querySign(3, "jkdsportcard"))
 
-                if (!ResChecker.checkRes(TAG + "查询签到失败:", jo) ||
+                if (!ResChecker.checkRes(TAG, "查询签到失败:", jo) ||
                     !ResChecker.checkRes(TAG, jo) ||
                     jo.optJSONObject("data") == null
                 ) {
@@ -5440,7 +5440,7 @@ class AntSports : ModelTask() {
                 Log.sports("健康岛 · 正在签到…")
                 val signRes = JSONObject(AntSportsRpcCall.NeverlandRpcCall.takeSign(3, "jkdsportcard"))
 
-                if (!ResChecker.checkRes(TAG + "签到失败:", signRes) ||
+                if (!ResChecker.checkRes(TAG, "签到失败:", signRes) ||
                     !ResChecker.checkRes(TAG, signRes) ||
                     signRes.optJSONObject("data") == null
                 ) {
@@ -5661,7 +5661,7 @@ class AntSports : ModelTask() {
                         )
                     )
 
-                    if (!ResChecker.checkRes(TAG + "查询健康岛浏览任务失败:", taskInfoResp) ||
+                    if (!ResChecker.checkRes(TAG, "查询健康岛浏览任务失败:", taskInfoResp) ||
                         taskInfoResp.optJSONObject("data") == null
                     ) {
                         Log.error(TAG, "健康岛浏览任务查询失败 [$taskInfoResp] 请关闭此功能")
@@ -5735,7 +5735,7 @@ class AntSports : ModelTask() {
                                 null
                             )
                         )
-                        if (ResChecker.checkRes(TAG + "领取健康岛任务奖励:", receiveResp) &&
+                        if (ResChecker.checkRes(TAG, "领取健康岛任务奖励:", receiveResp) &&
                             ResChecker.checkRes(TAG, receiveResp)
                         ) {
                             completedEncryptValues.add(encryptValue)
@@ -5861,7 +5861,7 @@ class AntSports : ModelTask() {
                     Log.sports("健康岛 · 检查可领取泡泡[source=$source]")
                     val jo = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryBubbleTask(source))
 
-                    if (!ResChecker.checkRes(TAG + "查询泡泡失败:", jo) ||
+                    if (!ResChecker.checkRes(TAG, "查询泡泡失败:", jo) ||
                         jo.optJSONObject("data") == null
                     ) {
                         Log.error(TAG, "queryBubbleTask source=$source raw=$jo")
@@ -5943,7 +5943,7 @@ class AntSports : ModelTask() {
                             )
                         )
 
-                        if (!ResChecker.checkRes(TAG + "领取泡泡失败:", pick) ||
+                        if (!ResChecker.checkRes(TAG, "领取泡泡失败:", pick) ||
                             pick.optJSONObject("data") == null
                         ) {
                             Log.error(TAG, "pickBubbleTaskEnergy source=$source raw=$pick")
@@ -5985,7 +5985,7 @@ class AntSports : ModelTask() {
                             )
                         )
 
-                        if (ResChecker.checkRes(TAG + "领取泡泡任务奖励:", receiveResp)) {
+                        if (ResChecker.checkRes(TAG, "领取泡泡任务奖励:", receiveResp)) {
                             handledNeverlandBubbleEncryptValues.add(encryptValue)
                             Log.sports("✅ 浏览任务[$title]完成，获得能量+$energyNum")
                         } else {
@@ -6074,7 +6074,7 @@ class AntSports : ModelTask() {
             if (source != NEVERLAND_SOURCE_SPORT_HOME) return
             runCatching {
                 val quickGame = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryQuickGameList(source))
-                if (!ResChecker.checkRes(TAG + " 查询健康岛快捷入口失败:", quickGame)) {
+                if (!ResChecker.checkRes(TAG, " 查询健康岛快捷入口失败:", quickGame)) {
                     Log.error(
                         TAG,
                         "queryQuickGameList 失败[source=$source][code=${extractSportsRpcErrorCode(quickGame).ifEmpty { "UNKNOWN" }}][msg=${extractSportsRpcErrorMessage(quickGame)}] raw=$quickGame"
@@ -6090,7 +6090,7 @@ class AntSports : ModelTask() {
                 warmNeverlandQuickGameList(source)
                 val baseInfo = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryBaseinfo(source))
                 val baseData = baseInfo.optJSONObject("data")
-                if (ResChecker.checkRes(TAG + " 查询基础信息失败:", baseInfo) && baseData != null &&
+                if (ResChecker.checkRes(TAG, " 查询基础信息失败:", baseInfo) && baseData != null &&
                     (!baseData.optBoolean("newGame", false) || baseData.optString("mapId", "").isNotBlank())
                 ) {
                     rememberNeverlandSource(source)
@@ -6206,7 +6206,7 @@ class AntSports : ModelTask() {
         private fun queryUserEnergy(source: String = activeNeverlandSource): Int {
             return try {
                 val energyResp = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryUserEnergy(source))
-                if (!ResChecker.checkRes(TAG + " 查询用户能量失败:", energyResp) ||
+                if (!ResChecker.checkRes(TAG, " 查询用户能量失败:", energyResp) ||
                     energyResp.optJSONObject("data") == null
                 ) {
                     Log.error(TAG, "queryUserEnergy 失败[source=$source], 响应数据: $energyResp")
@@ -6240,7 +6240,7 @@ class AntSports : ModelTask() {
                     AntSportsRpcCall.NeverlandRpcCall.queryMapInfo(mapId, branchId, source)
                 )
 
-                if (!ResChecker.checkRes(TAG + " queryMapInfo 失败:", mapInfoResp) ||
+                if (!ResChecker.checkRes(TAG, " queryMapInfo 失败:", mapInfoResp) ||
                     mapInfoResp.optJSONObject("data") == null
                 ) {
                     Log.error(TAG, "queryMapInfo 失败，终止走路任务")
@@ -6267,7 +6267,7 @@ class AntSports : ModelTask() {
                         AntSportsRpcCall.NeverlandRpcCall.walkGrid(branchId, mapId, false, source)
                     )
 
-                    if (!ResChecker.checkRes(TAG + " walkGrid 失败:", walkResp) ||
+                    if (!ResChecker.checkRes(TAG, " walkGrid 失败:", walkResp) ||
                         walkResp.optJSONObject("data") == null
                     ) {
                         val errorCode = walkResp.optString("errorCode", "")
@@ -6427,7 +6427,7 @@ class AntSports : ModelTask() {
         private fun queryNeverlandMapList(source: String = activeNeverlandSource): JSONArray? {
             return try {
                 val mapResp = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryMapList(source))
-                if (!ResChecker.checkRes(TAG + " 查询地图失败:", mapResp)) {
+                if (!ResChecker.checkRes(TAG, " 查询地图失败:", mapResp)) {
                     Log.error(
                         TAG,
                         "queryMapList 失败[code=${extractSportsRpcErrorCode(mapResp).ifEmpty { "UNKNOWN" }}][msg=${extractSportsRpcErrorMessage(mapResp)}] raw=$mapResp"
@@ -6578,7 +6578,7 @@ class AntSports : ModelTask() {
                 val resp = JSONObject(
                     AntSportsRpcCall.NeverlandRpcCall.queryBaseinfo(branchId, mapId, fromMapId, source)
                 )
-                if (!ResChecker.checkRes(TAG + " 切岛后同步基础信息失败:", resp)) {
+                if (!ResChecker.checkRes(TAG, " 切岛后同步基础信息失败:", resp)) {
                     Log.error(
                         TAG,
                         "切岛后同步基础信息失败[mapId=$mapId][fromMapId=${fromMapId.orEmpty()}]" +
@@ -6646,7 +6646,7 @@ class AntSports : ModelTask() {
                     val mapInfo = JSONObject(
                         AntSportsRpcCall.NeverlandRpcCall.queryMapInfoNew(mapId, branchId, source)
                     )
-                    if (!ResChecker.checkRes(TAG + " 查询建造地图失败", mapInfo)) {
+                    if (!ResChecker.checkRes(TAG, " 查询建造地图失败", mapInfo)) {
                         Log.error(
                             TAG,
                             "查询建造地图失败[mapId=$mapId][branchId=$branchId][code=${extractSportsRpcErrorCode(mapInfo).ifEmpty { "UNKNOWN" }}][msg=${extractSportsRpcErrorMessage(mapInfo)}] raw=$mapInfo"
@@ -6713,7 +6713,7 @@ class AntSports : ModelTask() {
                     val buildResp = JSONObject(
                         AntSportsRpcCall.NeverlandRpcCall.build(mapId, multiNum, branchId, source)
                     )
-                    if (!ResChecker.checkRes(TAG + " build 失败:", buildResp)) {
+                    if (!ResChecker.checkRes(TAG, " build 失败:", buildResp)) {
                         val errorCode = extractSportsRpcErrorCode(buildResp)
                         val errorMsg = extractSportsRpcErrorMessage(buildResp)
                         if (isNeverlandEnergyLimit(errorCode, errorMsg)) {
@@ -6790,7 +6790,7 @@ class AntSports : ModelTask() {
                 val mapInfo = JSONObject(
                     AntSportsRpcCall.NeverlandRpcCall.queryMapInfoNew(mapId, branchId, source)
                 )
-                if (!ResChecker.checkRes(TAG + " 查询建造地图失败", mapInfo)) {
+                if (!ResChecker.checkRes(TAG, " 查询建造地图失败", mapInfo)) {
                     Log.error(
                         TAG,
                         "健康岛结束前查询地图失败[mapId=$mapId][branchId=$branchId][code=${extractSportsRpcErrorCode(mapInfo).ifEmpty { "UNKNOWN" }}][msg=${extractSportsRpcErrorMessage(mapInfo)}] raw=$mapInfo"
@@ -6858,7 +6858,7 @@ class AntSports : ModelTask() {
                 return false
             }
             val detailResp = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryMapDetail(mapId, source))
-            if (!ResChecker.checkRes(TAG + " queryMapDetail 失败:", detailResp)) {
+            if (!ResChecker.checkRes(TAG, " queryMapDetail 失败:", detailResp)) {
                 Log.error(
                     TAG,
                     "健康岛查询领奖详情失败[mapId=$mapId][code=${extractSportsRpcErrorCode(detailResp).ifEmpty { "UNKNOWN" }}][msg=${extractSportsRpcErrorMessage(detailResp)}] raw=$detailResp"

@@ -788,7 +788,7 @@ class AntMember : ModelTask() {
                 return true
             }
 
-            if (ResChecker.checkRes(TAG + "会员权益兑换失败:", jo)) {
+            if (ResChecker.checkRes(TAG, "会员权益兑换失败:", jo)) {
                 memberPointExchangeBenefitToday(benefitId)
                 return true
             }
@@ -815,7 +815,7 @@ class AntMember : ModelTask() {
                 } else {
                     val s = AntMemberRpcCall.queryMemberSigninCalendar()
                     val jo = JSONObject(s)
-                    if (ResChecker.checkRes(TAG + "会员签到失败:", jo)) {
+                    if (ResChecker.checkRes(TAG, "会员签到失败:", jo)) {
                         val currentSigned = jo.optBoolean("currentSigninStatus") || jo.optBoolean("autoSignInSuccess")
                         if (currentSigned) {
                             val signPoint = jo.optString("signinPoint", "0")
@@ -1008,7 +1008,7 @@ class AntMember : ModelTask() {
         try {
             val response = AntMemberRpcCall.queryMemberTaskProcessList()
             val taskListObject = JSONObject(response)
-            if (!ResChecker.checkRes(TAG + "查询会员阶段奖励失败:", taskListObject)) {
+            if (!ResChecker.checkRes(TAG, "查询会员阶段奖励失败:", taskListObject)) {
                 Log.member("会员任务[阶段奖励]#查询失败:" + taskListObject.optString("resultDesc", response)
                 )
                 return@run 0
@@ -1022,7 +1022,7 @@ class AntMember : ModelTask() {
                     award.taskProcessId
                 )
                 val awardObject = JSONObject(awardResponse)
-                if (!ResChecker.checkRes(TAG + "领取会员阶段奖励失败:", awardObject)) {
+                if (!ResChecker.checkRes(TAG, "领取会员阶段奖励失败:", awardObject)) {
                     Log.member("会员任务[${award.title}]#阶段奖励领取失败:" + awardObject.optString("resultDesc", awardResponse)
                     )
                     continue
@@ -1456,7 +1456,7 @@ class AntMember : ModelTask() {
                 Log.member("会员任务[${executableTask.title}]#不满足营销规则，跳过执行")
                 return@run false
             }
-            if (!ResChecker.checkRes(TAG + "执行会员任务失败:", executeObject)) {
+            if (!ResChecker.checkRes(TAG, "执行会员任务失败:", executeObject)) {
                 Log.error(TAG, "执行任务失败:" + executeObject.optString("resultDesc", executeResponse))
                 return@run false
             }
@@ -1497,7 +1497,7 @@ class AntMember : ModelTask() {
             Log.member("会员任务[${task.title}]#不满足营销规则，跳过领取")
             return null
         }
-        if (!ResChecker.checkRes(TAG + "领取会员任务失败:", applyObject)) {
+        if (!ResChecker.checkRes(TAG, "领取会员任务失败:", applyObject)) {
             Log.error(TAG, "领取会员任务失败:" + applyObject.optString("resultDesc", applyResponse))
             return null
         }
@@ -1548,7 +1548,7 @@ class AntMember : ModelTask() {
 
             val detailResponse = AntMemberRpcCall.querySingleTaskProcessDetail(task.taskProcessId)
             val detailObject = JSONObject(detailResponse)
-            if (!ResChecker.checkRes(TAG + "查询会员任务详情失败:", detailObject)) {
+            if (!ResChecker.checkRes(TAG, "查询会员任务详情失败:", detailObject)) {
                 Log.error(
                     "$TAG.checkCurrentMemberTaskFinished",
                     "会员任务详情响应失败: " + detailObject.optString("resultDesc", detailResponse)
@@ -4340,12 +4340,12 @@ class AntMember : ModelTask() {
             try {
                 var s = AntMemberRpcCall.queryPointCertV2(page, pageSize)
                 var jo = JSONObject(s)
-                if (ResChecker.checkRes(TAG + "查询会员积分证书失败:", jo) && jo.has("pointToClaim")) {
+                if (ResChecker.checkRes(TAG, "查询会员积分证书失败:", jo) && jo.has("pointToClaim")) {
                     val pointToClaim = jo.optInt("pointToClaim", 0)
                     if (pointToClaim > 0 && jo.optBoolean("showReceiveAllPointFunction")) {
                         s = AntMemberRpcCall.receiveAllPointByUser()
                         val receiveAllObject = JSONObject(s)
-                        val receiveAllSuccess = ResChecker.checkRes(TAG + "会员积分一键领取失败:", receiveAllObject)
+                        val receiveAllSuccess = ResChecker.checkRes(TAG, "会员积分一键领取失败:", receiveAllObject)
                         if (receiveAllSuccess) {
                             val receiveSumPoint = receiveAllObject.optInt("receiveSumPoint", 0)
                             val receiveStatus = receiveAllObject.optString("receiveStatus")
@@ -4369,7 +4369,7 @@ class AntMember : ModelTask() {
 
                 s = AntMemberRpcCall.queryPointCert(page, pageSize)
                 jo = JSONObject(s)
-                if (ResChecker.checkRes(TAG + "查询会员积分证书失败:", jo)) {
+                if (ResChecker.checkRes(TAG, "查询会员积分证书失败:", jo)) {
                     claimMemberPointCertList(jo, page, pageSize)
                 } else {
                     Log.member(jo.getString("resultDesc"))
@@ -4395,7 +4395,7 @@ class AntMember : ModelTask() {
                 val pointAmount = certObject.optInt("pointAmount", certObject.optInt("point", 0))
                 val response = AntMemberRpcCall.receivePointByUser(id)
                 val receiveObject = JSONObject(response)
-                if (ResChecker.checkRes(TAG + "会员积分领取失败:", receiveObject)) {
+                if (ResChecker.checkRes(TAG, "会员积分领取失败:", receiveObject)) {
                     Log.member("会员积分🎖️[领取$bizTitle]#${pointAmount}积分")
                 } else {
                     Log.member(receiveObject.optString("resultDesc"))

@@ -23,7 +23,7 @@ import java.util.Objects
 import kotlin.math.abs
 
 data object AntFarmFamily {
-    private const val TAG = "小鸡家庭"
+    private const val TAG = "AntFarmFamily"
     private const val DAILY_DONATE_TASK_ID = "DAILY_DONATE"
 
     /**
