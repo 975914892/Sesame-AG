@@ -475,6 +475,9 @@ class ApplicationHook {
             )
 
             UserMap.setCurrentUserId(safeUserId)
+            runCatching { UserMap.load(safeUserId) }.onFailure {
+                Log.printStackTrace(TAG, "刷新好友前加载本地好友快照失败", it)
+            }
             runCatching { load(safeUserId, false) }.onFailure {
                 Log.printStackTrace(TAG, "刷新好友前加载每日状态失败", it)
             }
