@@ -719,11 +719,11 @@ class AntFarm : ModelTask() {
         modelFields.addField(
             IntegerModelField(
                 "donationCompetitionOvertakeAmount",
-                "捐蛋排位赛 | 超过前一名的捐蛋数",
+                "捐蛋排位赛 | 反超目标额外捐蛋数",
                 1,
                 1,
                 10000
-            ).withDesc("在尝试反超前一名时，比对方多捐赠的爱心蛋数量。").also {
+            ).withDesc("计算反超目标时，比目标排名当前捐蛋数多捐的爱心蛋数量；激进和稳定模式均生效。").also {
                 donationCompetitionOvertakeAmount = it
             })
         modelFields.addField(
