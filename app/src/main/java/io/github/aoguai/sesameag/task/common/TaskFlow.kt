@@ -167,9 +167,10 @@ interface TaskFlowAdapter {
         var visibleTaskCount = 0
         var pendingTransitions = 0
         for (item in items) {
-            if (isBlacklisted(item) || shouldSkip(item)) continue
+            val phase = mapPhase(item)
+            if ((phase != TaskFlowPhase.REWARD_READY && isBlacklisted(item)) || shouldSkip(item)) continue
             visibleTaskCount++
-            when (mapPhase(item)) {
+            when (phase) {
                 TaskFlowPhase.REWARD_READY -> pendingTransitions += 1
                 TaskFlowPhase.READY_TO_COMPLETE -> {
                     val current = item.current ?: 0
@@ -516,7 +517,7 @@ class TaskFlowEngine(
 
             candidates.add(TaskFlowActionCandidate(index, item, action))
         }
-        // 候选动作按领奖优先排序；黑名单任务已在候选构建前统一跳过。
+        // 候选动作按领奖优先排序；黑名单仅拦截主动推进，待领奖任务继续放行。
         return candidates.sortedWith(
             compareBy<TaskFlowActionCandidate> { actionPriority(it.initialAction) }
                 .thenBy { it.index }
@@ -524,6 +525,7 @@ class TaskFlowEngine(
     }
 
     private fun shouldSkipBlacklisted(item: TaskFlowItem): Boolean {
+        if (adapter.mapPhase(item) == TaskFlowPhase.REWARD_READY) return false
         return adapter.isBlacklisted(item)
     }
 

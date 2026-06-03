@@ -133,6 +133,7 @@ class AntFarm : ModelTask() {
      * 标记农场是否已满（用于雇佣小鸡逻辑）
      */
     private var isFarmFull: Boolean = false
+    private var hireAnimalFoodInsufficient: Boolean = false
 
     /**
      * 将服务端的饲喂状态代码转换为可读中文
@@ -5761,8 +5762,9 @@ class AntFarm : ModelTask() {
 
     /* 雇佣好友小鸡 */
     internal fun hireAnimal() {
-        // 重置农场已满标志
+        // 重置本轮雇佣止损标志
         isFarmFull = false
+        hireAnimalFoodInsufficient = false
         var animals: JSONArray? = null
         try {
             val jsonObject = enterFarm() ?: return
@@ -5882,10 +5884,17 @@ class AntFarm : ModelTask() {
                             availableCount++
                             if (hireAnimalAction(userId)) {
                                 animalCount++
+                                if (hireAnimalFoodInsufficient || foodStock < 50) {
+                                    Log.farm("雇佣小鸡👷[饲料不足，停止本轮雇佣] 当前${foodStock}g，至少需要50g")
+                                    break
+                                }
                                 if (animalCount >= 3) {
                                     break
                                 }
                                 continue
+                            }
+                            if (hireAnimalFoodInsufficient) {
+                                break
                             }
                             // 检查农场是否已满
                             if (isFarmFull) {
@@ -5899,7 +5908,7 @@ class AntFarm : ModelTask() {
                     Log.farm(s)
                     break
                 }
-            } while (hasNext && animalCount < 3)
+            } while (hasNext && animalCount < 3 && !hireAnimalFoodInsufficient && foodStock >= 50)
 
             // 详细的结果报告
             val hiredCount = animalCount - initialAnimalCount
@@ -5911,7 +5920,9 @@ class AntFarm : ModelTask() {
                 Log.farm("  • 已检查好友：${checkedCount}人")
                 Log.farm("  • 可雇佣状态：${availableCount}人")
 
-                if (availableCount == 0) {
+                if (hireAnimalFoodInsufficient || foodStock < 50) {
+                    Log.farm("❌ 失败原因：饲料不足，本轮停止雇佣（当前${foodStock}g，至少需要50g）")
+                } else if (availableCount == 0) {
                     Log.farm("❌ 失败原因：好友列表中没有可雇佣的小鸡")
                     Log.farm("   建议：等待好友的小鸡回家或添加更多好友")
                 } else if (hiredCount < availableCount) {
@@ -5924,6 +5935,17 @@ class AntFarm : ModelTask() {
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "hireAnimal err:",t)
+        }
+    }
+
+    private fun syncHireAnimalFoodStock(jo: JSONObject) {
+        if (jo.has("foodStock")) {
+            foodStock = jo.optInt("foodStock", foodStock).coerceAtLeast(0)
+            return
+        }
+        val reduceFoodNum = jo.optInt("reduceFoodNum", 0)
+        if (reduceFoodNum > 0) {
+            foodStock = (foodStock - reduceFoodNum).coerceAtLeast(0)
         }
     }
 
@@ -5976,11 +5998,18 @@ class AntFarm : ModelTask() {
                 jo = JSONObject(AntFarmRpcCall.hireAnimal(farmId, animalId))
                 val resultCode = jo.optString("resultCode", "")
                 val memo = jo.optString("memo", "")
+                if (resultCode == "I01" || memo.contains("当前饲料不足支付单次雇佣")) {
+                    syncHireAnimalFoodStock(jo)
+                    hireAnimalFoodInsufficient = true
+                    Log.farm("雇佣小鸡👷[${UserMap.getMaskName(userId)}] 停止：当前饲料不足支付单次雇佣（当前${foodStock}g，至少需要50g）")
+                    return false
+                }
                 if (resultCode == "I05" || memo.contains("篱笆卡")) {
                     Log.farm("雇佣小鸡👷[${UserMap.getMaskName(userId)}] 跳过：好友使用了篱笆卡")
                     return false
                 }
                 if (ResChecker.checkRes(TAG, jo)) {
+                    syncHireAnimalFoodStock(jo)
                     Log.farm("雇佣小鸡👷[" + UserMap.getMaskName(userId) + "] 成功")
                     val newAnimals = jo.getJSONArray("animals")
                     var ii = 0
