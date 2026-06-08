@@ -1,0 +1,133 @@
+name: Sesame-AG 自动同步+构建+签名+清理
+run-name: ${{ github.actor }} 触发的构建 | ${{ github.event_name }}
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  workflow_dispatch: # 允许手动触发
+  schedule:
+    # 每天北京时间早上8点自动运行(UTC 0点)
+    - cron: '0 0 * * *'
+
+jobs:
+  # 任务1：自动同步原项目更新
+  sync-upstream:
+    runs-on: ubuntu-latest
+    # 只有定时触发或手动触发时才执行同步
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+          
+      - name: 配置Git用户
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+      - name: 添加原项目上游仓库
+        run: git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
+        
+      - name: 拉取原项目更新
+        run: git fetch upstream
+        
+      - name: 合并原项目dev分支到本地dev分支
+        run: |
+          git checkout dev
+          git merge upstream/dev --no-edit
+          
+      - name: 推送更新到你的仓库
+        run: git push origin dev
+        continue-on-error: true # 无更新时不报错
+        
+      - name: 检查是否有更新
+        id: check_update
+        run: |
+          if git log --oneline -1 | grep -q "Merge remote-tracking branch 'upstream/dev'"; then
+            echo "has_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_update=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: 如果有更新，触发构建工作流
+        if: ${{ steps.check_update.outputs.has_update == 'true' }}
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: ${{ github.workflow }}
+          token: ${{ secrets.GH_PAT }}
+          inputs:
+            triggered_by_sync: 'true'
+
+  # 任务2：构建并签名APK
+  build-and-sign:
+    runs-on: ubuntu-latest
+    # 同步任务完成后执行，或直接手动/推送触发
+    needs: sync-upstream
+    if: ${{ always() && (needs.sync-upstream.result == 'success' || needs.sync-upstream.result == 'skipped') }}
+    
+    steps:
+    - name: 检出仓库
+      uses: actions/checkout@v4
+    
+    # 1. 精确匹配官方JDK版本 17.0.1
+    - name: 设置JDK 17.0.1
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17.0.1'
+        distribution: 'temurin'
+        
+    # 2. 安装官方指定的Android SDK版本
+    - name: 设置Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 36
+        build-tools: 36.0.0
+        cmdline-tools: latest
+        
+    # 3. 赋予gradlew执行权限
+    - name: 赋予执行权限
+      run: chmod +x gradlew
+      
+    # 4. 使用官方完全一致的构建命令
+    - name: 构建Debug版APK
+      run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+      
+    - name: 构建未签名Release版APK
+      run: ./gradlew --no-daemon --stacktrace :app:assembleRelease
+      
+    # 5. 自动签名Release版APK
+    - name: 签名Release版APK
+      uses: r0adkll/sign-android-release@v1
+      id: sign_release
+      with:
+        releaseDirectory: app/build/outputs/apk/release
+        signingKeyBase64: ${{ secrets.KEYSTORE_BASE64 }}
+        alias: ${{ secrets.KEY_ALIAS }}
+        keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
+        keyPassword: ${{ secrets.KEY_PASSWORD }}
+      env:
+        BUILD_TOOLS_VERSION: "36.0.0"
+        
+    # 6. 清理7天前的旧构建产物
+    - name: 清理旧构建产物
+      uses: c-hive/gha-remove-artifacts@v1
+      with:
+        age: '7 days'
+        skip-recent: 5 # 保留最近5个版本，防止误删
+        
+    # 7. 上传最新APK
+    - name: 上传Debug版APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: Sesame-AG-Debug-可直接安装
+        path: app/build/outputs/apk/debug/app-debug.apk
+        retention-days: 7 # 保留7天
+        
+    - name: 上传已签名Release版APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: Sesame-AG-Release-已签名-可直接安装
+        path: ${{ steps.sign_release.outputs.signedReleaseFile }}
+        retention-days: 30 # Release版保留30天
