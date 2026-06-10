@@ -1,16 +1,14 @@
-name: Sesame-AG 全自动构建系统（基于官方流程）
+name: Sesame-AG 全自动构建系统（Release版）
 run-name: ${{ github.actor }} 触发的构建 | ${{ github.event_name }}
 
 on:
   push:
     branches: [ main, master, dev ]
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
   schedule:
-    # 每天北京时间早上8点自动运行(UTC 0点)
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *' # 每天北京时间早上8点
 
 env:
-  # 官方原版环境变量（完全不变）
   CI: "true"
   JAVA_DISTRIBUTION: "oracle"
   JAVA_VERSION: "17.0.1"
@@ -25,7 +23,6 @@ env:
   TARGET_SOURCE_BRANCH: dev
 
 jobs:
-  # 任务1：自动同步原仓库更新（仅定时/手动触发）
   sync-upstream:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -46,8 +43,11 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
       - name: 添加原仓库上游
-        run: git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
-        
+        run: |
+          # 先删除已存在的upstream（避免重复添加）
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
+          
       - name: 拉取原仓库更新
         run: git fetch upstream
         
@@ -57,35 +57,34 @@ jobs:
           echo "latest_commit=$(git rev-parse --short upstream/dev)" >> $GITHUB_OUTPUT
           echo "commit_message=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
           
-      - name: 合并原仓库dev分支到本地dev分支
+      # ✅ 修复：明确指定切换到origin/dev分支
+      - name: 合并原仓库dev分支
         run: |
-          git checkout dev
+          # 强制创建并切换到本地dev分支，跟踪origin/dev
+          git checkout -B dev origin/dev
+          # 合并upstream/dev的更新，自动解决冲突（优先采用原仓库代码）
           git merge upstream/dev --no-edit -X theirs
           
-      - name: 推送更新到你的仓库
+      - name: 推送更新
         run: git push origin dev
         continue-on-error: true
         
-      - name: 检查是否有更新
+      - name: 检查更新
         id: check_update
         run: |
           if git log --oneline -1 | grep -q "Merge remote-tracking branch 'upstream/dev'"; then
             echo "has_update=true" >> $GITHUB_OUTPUT
-            echo "✅ 检测到原仓库更新，将自动触发构建" >> $GITHUB_STEP_SUMMARY
+            echo "✅ 检测到原仓库更新，将自动构建并发布" >> $GITHUB_STEP_SUMMARY
           else
             echo "has_update=false" >> $GITHUB_OUTPUT
             echo "ℹ️ 原仓库无更新，跳过构建" >> $GITHUB_STEP_SUMMARY
           fi
 
-  # 任务2：官方标准构建流程
   build-and-sign:
     runs-on: ubuntu-latest
     needs: sync-upstream
-    # ✅ 修复后的条件：
-    # 1. 手动触发 或
-    # 2. 有更新自动触发 或
-    # 3. 提交代码触发 或
-    # 4. 同步任务被跳过（push事件）
+    permissions:
+      contents: write # 必须添加，否则无法创建Release
     if: |
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -93,24 +92,17 @@ jobs:
        needs.sync-upstream.outputs.has_update == 'true')
     
     steps:
-      - name: 设置时区为上海
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo timedatectl set-timezone Asia/Shanghai
-          echo "当前时间: $(date)"
-          
+      - name: 设置时区
+        run: sudo timedatectl set-timezone Asia/Shanghai
+        
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: dev # 始终构建dev分支最新代码
+          ref: dev
           
-      # ✅ 官方原版：工具链基线校验（防止版本不兼容）
-      - name: 验证项目工具链版本
-        shell: bash
+      - name: 工具链版本校验
         run: |
-          set -euo pipefail
           grep -Eq '^distributionUrl=.*gradle-'"${LOCAL_GRADLE_VERSION//./\\.}"'-bin\.zip$' gradle/wrapper/gradle-wrapper.properties
           grep -Eq '^android-plugin = "'"${LOCAL_AGP_VERSION//./\\.}"'"$' gradle/libs.versions.toml
           grep -Eq '^kotlin = "'"${LOCAL_KOTLIN_VERSION//./\\.}"'"$' gradle/libs.versions.toml
@@ -118,36 +110,25 @@ jobs:
           grep -Eq 'compileSdk = '"${ANDROID_API_LEVEL}"'$' app/build.gradle.kts
           grep -Eq 'sourceCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
           grep -Eq 'targetCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
-          echo "✅ 所有工具链版本校验通过" >> $GITHUB_STEP_SUMMARY
           
-      - name: 安装JDK 17.0.1
+      - name: 安装JDK
         uses: actions/setup-java@v5
         with:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
-          architecture: x64
-          cache: gradle # 开启Gradle缓存
+          cache: gradle
           
-      - name: 配置Gradle Java环境
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "ORG_GRADLE_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+      - name: 配置Gradle环境
+        run: echo "ORG_GRADLE_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
           
-      # ✅ 官方原版：正确的Android SDK安装方式
       - name: 安装Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: ""
           
-      - name: 安装所需SDK组件
-        shell: bash
+      - name: 安装SDK组件
         run: |
-          set -euo pipefail
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-${ANDROID_API_LEVEL}" \
-            "build-tools;${ANDROID_BUILD_TOOLS}"
+          sdkmanager --install "platform-tools" "platforms;android-${ANDROID_API_LEVEL}" "build-tools;${ANDROID_BUILD_TOOLS}"
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
@@ -158,32 +139,21 @@ jobs:
           cache-read-only: false
           gradle-version: wrapper
           
-      - name: 赋予gradlew执行权限
+      - name: 赋予执行权限
         run: chmod +x gradlew
         
-      - name: 构建Release版APK
-        shell: bash
+      - name: 构建Release APK
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
+        
+      - name: 准备APK
         run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace assembleRelease
-          
-      - name: 准备未签名APK
-        shell: bash
-        run: |
-          set -euo pipefail
           rm -rf "${STAGING_DIR}" "${ASSET_DIR}"
           mkdir -p "${STAGING_DIR}" "${ASSET_DIR}"
           mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*.apk" | sort)
-          if [[ ${#apks[@]} -eq 0 ]]; then
-            echo "❌ 在 ${RELEASE_DIR} 中未找到任何Release APK" >&2
-            exit 1
-          fi
           for apk in "${apks[@]}"; do
             cp "${apk}" "${STAGING_DIR}/"
           done
-          echo "✅ 找到 ${#apks[@]} 个APK文件" >> $GITHUB_STEP_SUMMARY
           
-      # ✅ 适配你的密钥名称（不需要修改Secrets）
       - name: 签名APK
         id: sign_apks
         uses: ilharp/sign-android-release@v2
@@ -195,69 +165,113 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
-      - name: 生成SHA256校验文件
+      - name: 生成校验文件和打包全部架构
         id: prepare_assets
-        shell: bash
         run: |
-          set -euo pipefail
           IFS=':' read -r -a files <<< "${{ steps.sign_apks.outputs.signedFiles }}"
-          copied=0
           for file in "${files[@]}"; do
-            [[ -n "${file}" ]] || continue
             cp "${file}" "${ASSET_DIR}/"
-            (
-              cd "${ASSET_DIR}"
-              sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256"
-            )
-            copied=$((copied + 1))
+            (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
           done
-          if [[ ${copied} -eq 0 ]]; then
-            echo "❌ 未生成任何已签名APK" >&2
-            exit 1
-          fi
-          echo "asset_dir=${ASSET_DIR}" >> $GITHUB_OUTPUT
-          echo "✅ 成功签名 ${copied} 个APK文件" >> $GITHUB_STEP_SUMMARY
           
-      # ✅ 自动清理7天前的旧构建产物
-      - name: 清理旧构建产物
-        uses: c-hive/gha-remove-artifacts@v1
+          # 打包全部架构APK为一个ZIP
+          (cd "${ASSET_DIR}" && zip -r Sesame-AG-全部架构.zip *.apk *.sha256)
+          
+          # 提取通用版APK路径
+          UNIVERSAL_APK=$(find "${ASSET_DIR}" -name "*-universal.apk")
+          echo "universal_apk=${UNIVERSAL_APK}" >> $GITHUB_OUTPUT
+          echo "all_zip=${ASSET_DIR}/Sesame-AG-全部架构.zip" >> $GITHUB_OUTPUT
+          
+          # 获取版本号
+          VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # 生成唯一标签名：版本号-日期-提交哈希
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date '+%Y%m%d')
+          echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          
+      # ✅ 自动创建GitHub Release
+      - name: 创建GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          age: '7 days'
-          skip-recent: 5 # 始终保留最近5个版本
+          tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
+          name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
+          generate_release_notes: false
+          make_latest: true
+          files: |
+            ${{ steps.prepare_assets.outputs.universal_apk }}
+            ${{ steps.prepare_assets.outputs.all_zip }}
+          body: |
+            ## 📦 构建信息
+            - 版本号：v${{ steps.prepare_assets.outputs.version }}
+            - 构建时间：${{ steps.prepare_assets.outputs.tag_name }}
+            - 构建来源：${{ github.event_name }}
+            
+            ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
+            ## 📥 本次更新内容
+            - 最新提交：{0}
+            - 提交信息：{1}
+            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
+            
+            ## 📥 下载说明
+            - **Sesame-AG-*-universal.apk**：通用版（推荐），所有手机都能安装
+            - **Sesame-AG-全部架构.zip**：包含arm64-v8a/armeabi-v7a/x86/x86_64/universal所有版本 + SHA256校验文件
+            
+            > 安装完成后需要在LSPosed中激活模块并重启手机
           
-      # ✅ 单独上传通用版（推荐下载）
-      - name: 上传通用版APK
-        uses: actions/upload-artifact@v7
+      # ✅ 清理旧产物（保留最近10个Release）
+      - name: 清理旧Release
+        uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
-          name: Sesame-AG-通用版-已签名（推荐）
-          path: ${{ steps.prepare_assets.outputs.asset_dir }}/*-universal.apk
-          retention-days: 30
-          
-      # ✅ 上传全部架构APK+校验文件
-      - name: 上传全部架构APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: Sesame-AG-全部架构-已签名
-          path: ${{ steps.prepare_assets.outputs.asset_dir }}/*
-          retention-days: 30
-          
-      # ✅ 构建成功总结
-      - name: 构建成功总结
-        run: |
-          echo "## 🎉 构建成功" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ needs.sync-upstream.outputs.has_update }}" == "true" ]]; then
-            echo "### 📥 本次更新内容" >> $GITHUB_STEP_SUMMARY
-            echo "- 最新提交: ${{ needs.sync-upstream.outputs.latest_commit }}" >> $GITHUB_STEP_SUMMARY
-            echo "- 提交信息: ${{ needs.sync-upstream.outputs.commit_message }}" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "### 📦 构建产物" >> $GITHUB_STEP_SUMMARY
-          echo "- 通用版APK（推荐）：所有手机通用，直接下载安装" >> $GITHUB_STEP_SUMMARY
-          echo "- 全部架构APK：包含arm64-v8a/armeabi-v7a/x86/x86_64/universal" >> $GITHUB_STEP_SUMMARY
-          echo "- 每个APK附带SHA256校验文件，可验证文件完整性" >> $GITHUB_STEP_SUMMARY
+          keep_latest: 10
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 任务3：构建失败通知
+  # ✅ 邮件通知任务
+  notify-email:
+    runs-on: ubuntu-latest
+    needs: [sync-upstream, build-and-sign]
+    if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
+    steps:
+      - name: 发送邮件通知
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com # QQ邮箱：smtp.qq.com；163邮箱：smtp.163.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }} # 邮箱授权码，不是登录密码
+          subject: >
+            ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本已发布' || '❌ Sesame-AG 构建失败' }}
+          body: |
+            ${{ needs.build-and-sign.result == 'success' && '
+            🎉 Sesame-AG 新版本已成功发布！
+            
+            🔗 下载链接：${{ github.server_url }}/${{ github.repository }}/releases/latest
+            
+            📦 版本信息：
+            - 版本号：${{ needs.build-and-sign.outputs.version }}
+            - 构建时间：${{ github.run_started_at }}
+            
+            ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
+            📥 更新内容：
+            - 最新提交：{0}
+            - 提交信息：{1}
+            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
+            
+            点击上面的链接即可直接下载APK安装使用。
+            ' || '
+            ❌ Sesame-AG 构建失败！
+            
+            🔗 查看错误日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            常见原因：网络超时、依赖下载失败
+            解决方法：点击页面右上角的「Re-run jobs」重新运行
+            ' }}
+          to: ${{ secrets.EMAIL_RECEIVER }}
+          from: GitHub Actions
+
   notify-failure:
     runs-on: ubuntu-latest
     needs: [sync-upstream, build-and-sign]
