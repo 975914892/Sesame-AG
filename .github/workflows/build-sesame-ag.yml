@@ -44,7 +44,6 @@ jobs:
           
       - name: 添加原仓库上游
         run: |
-          # 先删除已存在的upstream（避免重复添加）
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
           
@@ -57,12 +56,9 @@ jobs:
           echo "latest_commit=$(git rev-parse --short upstream/dev)" >> $GITHUB_OUTPUT
           echo "commit_message=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
           
-      # ✅ 修复：明确指定切换到origin/dev分支
       - name: 合并原仓库dev分支
         run: |
-          # 强制创建并切换到本地dev分支，跟踪origin/dev
           git checkout -B dev origin/dev
-          # 合并upstream/dev的更新，自动解决冲突（优先采用原仓库代码）
           git merge upstream/dev --no-edit -X theirs
           
       - name: 推送更新
@@ -84,7 +80,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: sync-upstream
     permissions:
-      contents: write # 必须添加，否则无法创建Release
+      contents: write
+    outputs:
+      version: ${{ steps.prepare_assets.outputs.version }}
+      tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
     if: |
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -165,7 +164,7 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
-      - name: 生成校验文件和打包全部架构
+      - name: 生成校验文件和打包
         id: prepare_assets
         run: |
           IFS=':' read -r -a files <<< "${{ steps.sign_apks.outputs.signedFiles }}"
@@ -174,24 +173,19 @@ jobs:
             (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
           done
           
-          # 打包全部架构APK为一个ZIP
           (cd "${ASSET_DIR}" && zip -r Sesame-AG-全部架构.zip *.apk *.sha256)
           
-          # 提取通用版APK路径
           UNIVERSAL_APK=$(find "${ASSET_DIR}" -name "*-universal.apk")
           echo "universal_apk=${UNIVERSAL_APK}" >> $GITHUB_OUTPUT
           echo "all_zip=${ASSET_DIR}/Sesame-AG-全部架构.zip" >> $GITHUB_OUTPUT
           
-          # 获取版本号
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
-          # 生成唯一标签名：版本号-日期-提交哈希
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           
-      # ✅ 自动创建GitHub Release
       - name: 创建GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -220,7 +214,6 @@ jobs:
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
           
-      # ✅ 清理旧产物（保留最近10个Release）
       - name: 清理旧Release
         uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
@@ -229,7 +222,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ✅ 邮件通知任务
   notify-email:
     runs-on: ubuntu-latest
     needs: [sync-upstream, build-and-sign]
@@ -238,21 +230,27 @@ jobs:
       - name: 发送邮件通知
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: smtp.qq.com # QQ邮箱：smtp.qq.com；163邮箱：smtp.163.com
+          server_address: smtp.qq.com
           server_port: 465
           username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }} # 邮箱授权码，不是登录密码
+          password: ${{ secrets.EMAIL_PASSWORD }}
           subject: >
             ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本已发布' || '❌ Sesame-AG 构建失败' }}
           body: |
-            ${{ needs.build-and-sign.result == 'success' && '
-            🎉 Sesame-AG 新版本已成功发布！
+            ${{ needs.build-and-sign.result == 'success' && '🎉 Sesame-AG 新版本已成功发布！' || '❌ Sesame-AG 构建失败！' }}
             
-            🔗 下载链接：${{ github.server_url }}/${{ github.repository }}/releases/latest
+            ${{ needs.build-and-sign.result == 'success' && format('
+            🔗 下载链接：{0}/{1}/releases/latest
             
             📦 版本信息：
-            - 版本号：${{ needs.build-and-sign.outputs.version }}
-            - 构建时间：${{ github.run_started_at }}
+            - 版本号：{2}
+            - 构建时间：{3}
+            ', github.server_url, github.repository, needs.build-and-sign.outputs.version, github.run_started_at) || format('
+            🔗 查看错误日志：{0}/{1}/actions/runs/{2}
+            
+            常见原因：网络超时、依赖下载失败
+            解决方法：点击页面右上角的「Re-run jobs」重新运行
+            ', github.server_url, github.repository, github.run_id) }}
             
             ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
             📥 更新内容：
@@ -260,15 +258,7 @@ jobs:
             - 提交信息：{1}
             ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
             
-            点击上面的链接即可直接下载APK安装使用。
-            ' || '
-            ❌ Sesame-AG 构建失败！
-            
-            🔗 查看错误日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            
-            常见原因：网络超时、依赖下载失败
-            解决方法：点击页面右上角的「Re-run jobs」重新运行
-            ' }}
+            ${{ needs.build-and-sign.result == 'success' && '点击上面的链接即可直接下载APK安装使用。' || '' }}
           to: ${{ secrets.EMAIL_RECEIVER }}
           from: GitHub Actions
 
