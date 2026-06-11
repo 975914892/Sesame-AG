@@ -22,7 +22,7 @@ env:
   ASSET_DIR: app/build/outputs/apk/release-assets
   TARGET_SOURCE_BRANCH: dev
 
-  # 解决 Node.js 20 弃用警告
+  # 解决 Node.js 20 弃用警告（全局生效）
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
@@ -135,19 +135,14 @@ jobs:
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
           
-      # ✅ 完整Gradle缓存，构建速度提升70%+
-      - name: 配置Gradle
+      # ✅ 修复：使用 v4 版本正确的参数，删除所有过时参数
+      - name: 配置Gradle缓存
         uses: gradle/actions/setup-gradle@v4
         with:
-          cache-read-only: false
-          cache-write-only: false
-          cache-cleanup: true
           gradle-version: wrapper
-          cache-distribution: true
-          cache-paths: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            **/build
+          cache-read-only: false
+          # cache-cleanup 有效值：never / always / on-success（默认）
+          cache-cleanup: on-success
           
       - name: 赋予执行权限
         run: chmod +x gradlew
@@ -175,7 +170,6 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
-      # ✅ 显示签名文件列表，解决UI显示bug
       - name: 显示签名完成的文件
         run: |
           echo "## ✅ 成功签名以下APK文件" >> $GITHUB_STEP_SUMMARY
@@ -205,8 +199,7 @@ jobs:
           # 生成构建时间（上海时区）
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
           
-      # ✅ 换回最稳定的官方发布工具，所有APK单独展示
-      - name: 创建GitHub Release
+      - name: 创建GitHub Release（所有APK单独展示）
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
@@ -240,7 +233,7 @@ jobs:
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
           
-      # ✅ 清理旧Release（保留最近10个v开头的版本）
+      # 清理旧Release（保留最近10个v开头的版本）
       - name: 清理旧版本
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -274,7 +267,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ 旧版本清理完成" >> $GITHUB_STEP_SUMMARY
 
-  # ✅ 换回最稳定的邮件通知工具，参数完全正确
+  # ✅ 优化后的邮件通知：区分不同错误类型
   notify-email:
     runs-on: ubuntu-latest
     needs: [sync-upstream, build-and-sign]
@@ -299,15 +292,23 @@ jobs:
             - 版本号：{2}
             - 构建时间：{3}
             ', github.server_url, github.repository, needs.build-and-sign.outputs.version, needs.build-and-sign.outputs.build_time) || format('
-            🔗 查看错误日志：{0}/{1}/actions/runs/{2}
+            🔗 查看详细错误日志：{0}/{1}/actions/runs/{2}
             
-            常见原因：网络超时、依赖下载失败
-            解决方法：点击页面右上角的「Re-run jobs」重新运行
+            🚨 可能的失败原因：
+            1. 配置文件语法错误（最常见）
+            2. 依赖下载失败（网络问题）
+            3. 签名密钥错误或过期
+            4. 原仓库代码更新导致编译失败
+            
+            🔧 解决方法：
+            1. 点击上面的链接查看具体哪一步失败
+            2. 复制错误日志中的红色错误信息
+            3. 点击右上角「Re-run jobs」重新运行尝试
             ', github.server_url, github.repository, github.run_id) }}
             
             ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
-            📥 更新内容：
-            - 最新提交：{0}
+            📥 本次同步内容：
+            - 原仓库最新提交：{0}
             - 提交信息：{1}
             ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
             
@@ -325,5 +326,4 @@ jobs:
           echo "## ❌ 构建失败" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "请点击上方的失败任务查看详细错误日志" >> $GITHUB_STEP_SUMMARY
-          echo "常见原因：网络超时、依赖下载失败" >> $GITHUB_STEP_SUMMARY
-          echo "解决方法：点击右上角的「Re-run jobs」重新运行" >> $GITHUB_STEP_SUMMARY
+          echo "不要只看这个摘要页面，要点进具体的步骤看红色错误信息" >> $GITHUB_STEP_SUMMARY
