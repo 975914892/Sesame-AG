@@ -173,16 +173,16 @@ jobs:
             (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
           done
           
-          # 获取版本号
+          # 获取版本号（你自己定义的版本号，从0.0.1开始）
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
-          # 生成唯一标签名：版本号-日期-提交哈希
+          # 生成唯一标签名：v+你的版本号-日期-提交哈希
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           
-      # ✅ 直接上传所有单独的APK和校验文件
+      # 直接上传所有单独的APK和校验文件
       - name: 创建GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -217,14 +217,18 @@ jobs:
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
           
-      # ✅ 清理旧Release（保留最近10个）
-      - name: 清理旧Release
-        uses: dev-drprasad/delete-older-releases@v0.3.4
+      # ✅ 优化后的清理逻辑：只清理我们自动生成的版本
+      - name: 清理旧Release（保留最近10个）
+        uses: actions-cool/delete-releases@v1
         with:
+          # 只清理v开头的标签（也就是我们自动生成的所有版本，从v0.0.1开始）
+          tag_pattern: 'v*'
+          # 保留最近10个版本
           keep_latest: 10
+          # 同时删除对应的Git标签
           delete_tags: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 使用GitHub自动提供的令牌
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   notify-failure:
     runs-on: ubuntu-latest
