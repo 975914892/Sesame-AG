@@ -217,18 +217,44 @@ jobs:
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
           
-      # ✅ 优化后的清理逻辑：只清理我们自动生成的版本
-      - name: 清理旧Release（保留最近10个）
-        uses: actions-cool/delete-releases@v1
-        with:
-          # 只清理v开头的标签（也就是我们自动生成的所有版本，从v0.0.1开始）
-          tag_pattern: 'v*'
-          # 保留最近10个版本
-          keep_latest: 10
-          # 同时删除对应的Git标签
-          delete_tags: true
-          # 使用GitHub自动提供的令牌
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # ✅ 原生脚本清理旧Release（不依赖任何第三方action）
+      - name: 清理旧Release（保留最近10个v开头的版本）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          KEEP_LATEST: 10
+        run: |
+          # 获取所有v开头的release，按创建时间降序排列
+          releases=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/releases?per_page=100" | \
+            jq -r '.[] | select(.tag_name | startswith("v")) | .id + " " + .tag_name' | \
+            sort -r)
+          
+          # 计算需要删除的数量
+          count=$(echo "$releases" | wc -l)
+          delete_count=$((count - KEEP_LATEST))
+          
+          if [ $delete_count -le 0 ]; then
+            echo "ℹ️ 只有 $count 个版本，少于等于 $KEEP_LATEST 个，无需清理"
+            exit 0
+          fi
+          
+          echo "🗑️ 共 $count 个版本，保留最近 $KEEP_LATEST 个，删除 $delete_count 个旧版本"
+          
+          # 删除旧release和对应的标签
+          echo "$releases" | tail -n $delete_count | while read -r release_id tag_name; do
+            echo "  删除版本: $tag_name (ID: $release_id)"
+            
+            # 删除release
+            curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/releases/$release_id"
+            
+            # 删除对应的标签
+            curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/git/refs/tags/$tag_name"
+          done
+          
+          echo "✅ 旧版本清理完成"
 
   notify-failure:
     runs-on: ubuntu-latest
