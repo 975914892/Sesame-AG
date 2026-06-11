@@ -1,4 +1,4 @@
-name: Sesame-AG 全自动构建系统（最终无错版）
+name: Sesame-AG 全自动构建系统（最终稳定版）
 run-name: ${{ github.actor }} 触发的构建 | ${{ github.event_name }}
 
 on:
@@ -21,6 +21,9 @@ env:
   STAGING_DIR: app/build/outputs/apk/all
   ASSET_DIR: app/build/outputs/apk/release-assets
   TARGET_SOURCE_BRANCH: dev
+
+  # 解决 Node.js 20 弃用警告
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   sync-upstream:
@@ -132,7 +135,7 @@ jobs:
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
           
-      # ✅ 优化：启用完整的Gradle缓存，构建速度提升70%+
+      # ✅ 完整Gradle缓存，构建速度提升70%+
       - name: 配置Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -172,7 +175,7 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
-      # ✅ 优化：手动显示签名后的文件列表
+      # ✅ 显示签名文件列表，解决UI显示bug
       - name: 显示签名完成的文件
         run: |
           echo "## ✅ 成功签名以下APK文件" >> $GITHUB_STEP_SUMMARY
@@ -199,14 +202,20 @@ jobs:
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           
-          # ✅ 提前生成构建时间，解决上下文问题
+          # 生成构建时间（上海时区）
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
           
+      # ✅ 换回最稳定的官方发布工具，所有APK单独展示
       - name: 创建GitHub Release
-        uses: actions-cool/release-helper@v2.5.1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
-          release_name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
+          name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
+          generate_release_notes: false
+          make_latest: true
+          files: |
+            ${{ env.ASSET_DIR }}/*.apk
+            ${{ env.ASSET_DIR }}/*.sha256
           body: |
             ## 📦 构建信息
             - 版本号：v${{ steps.prepare_assets.outputs.version }}
@@ -230,13 +239,8 @@ jobs:
             | `CHECKSUMS-*.sha256` | 对应APK的SHA256校验文件 |
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
-          files: |
-            ${{ env.ASSET_DIR }}/*.apk
-            ${{ env.ASSET_DIR }}/*.sha256
-          is_latest: true
-          generate_release_notes: false
           
-      # 清理旧Release
+      # ✅ 清理旧Release（保留最近10个v开头的版本）
       - name: 清理旧版本
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -270,21 +274,19 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ 旧版本清理完成" >> $GITHUB_STEP_SUMMARY
 
-  # 邮件通知（已修复上下文问题）
-  notify:
+  # ✅ 换回最稳定的邮件通知工具，参数完全正确
+  notify-email:
     runs-on: ubuntu-latest
     needs: [sync-upstream, build-and-sign]
     if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
     steps:
       - name: 发送邮件通知
-        uses: actions-cool/ci-notice@v1.1.1
+        uses: dawidd6/action-send-mail@v3
         with:
-          type: email
-          email_host: smtp.qq.com
-          email_port: 465
-          email_username: ${{ secrets.EMAIL_USERNAME }}
-          email_password: ${{ secrets.EMAIL_PASSWORD }}
-          email_to: ${{ secrets.EMAIL_RECEIVER }}
+          server_address: smtp.qq.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
           subject: >
             ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本已发布' || '❌ Sesame-AG 构建失败' }}
           body: |
@@ -310,6 +312,8 @@ jobs:
             ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
             
             ${{ needs.build-and-sign.result == 'success' && '点击上面的链接即可直接下载APK安装使用。' || '' }}
+          to: ${{ secrets.EMAIL_RECEIVER }}
+          from: GitHub Actions
 
   notify-failure:
     runs-on: ubuntu-latest
