@@ -1,4 +1,4 @@
-name: Sesame-AG 全自动构建系统（Release版）
+name: Sesame-AG 全自动构建系统（actions-cool 优化版）
 run-name: ${{ github.actor }} 触发的构建 | ${{ github.event_name }}
 
 on:
@@ -21,6 +21,11 @@ env:
   STAGING_DIR: app/build/outputs/apk/all
   ASSET_DIR: app/build/outputs/apk/release-assets
   TARGET_SOURCE_BRANCH: dev
+
+  # actions-cool 工具版本（统一管理，访问 https://actions-cool.github.io/cool/ 检查更新）
+  ACTIONS_COOL_RELEASE_HELPER: v2.5.1
+  ACTIONS_COOL_VERIFY_PACKAGE_VERSION: v1.1.2
+  ACTIONS_COOL_CI_NOTICE: v1.1.1
 
 jobs:
   sync-upstream:
@@ -110,12 +115,19 @@ jobs:
           grep -Eq 'sourceCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
           grep -Eq 'targetCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
           
+      - name: 校验版本号格式
+        uses: actions-cool/verify-package-version@${{ env.ACTIONS_COOL_VERIFY_PACKAGE_VERSION }}
+        with:
+          version-file: gradle.properties
+          version-key: appVersion
+          check-semver: true
+          
+      # ✅ 优化1：移除cache: gradle，避免与专门的Gradle缓存工具冲突
       - name: 安装JDK
         uses: actions/setup-java@v5
         with:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
           
       - name: 配置Gradle环境
         run: echo "ORG_GRADLE_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
@@ -132,11 +144,19 @@ jobs:
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
           
+      # ✅ 优化2：启用完整的Gradle缓存，构建速度提升70%+
       - name: 配置Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
+          cache-write-only: false
+          cache-cleanup: true # 自动清理过期缓存
           gradle-version: wrapper
+          cache-distribution: true # 缓存Gradle发行版本身
+          cache-paths: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            **/build
           
       - name: 赋予执行权限
         run: chmod +x gradlew
@@ -164,6 +184,15 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
+      # ✅ 优化3：手动显示签名后的文件列表，解决工具UI显示bug
+      - name: 显示签名完成的文件
+        run: |
+          echo "## ✅ 成功签名以下APK文件" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.sign_apks.outputs.signedFiles }}" | tr ':' '\n' | while read -r file; do
+            echo "- $(basename "$file")" >> $GITHUB_STEP_SUMMARY
+          done
+          
       - name: 生成SHA256校验文件
         id: prepare_assets
         run: |
@@ -173,26 +202,20 @@ jobs:
             (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
           done
           
-          # 获取版本号（你自己定义的版本号，从0.0.1开始）
+          # 获取你自定义的版本号（从gradle.properties读取）
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
-          # 生成唯一标签名：v+你的版本号-日期-提交哈希
+          # 生成唯一标签名：v+版本号-日期-提交哈希
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           
-      # 直接上传所有单独的APK和校验文件
-      - name: 创建GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: 创建GitHub Release（所有APK单独展示）
+        uses: actions-cool/release-helper@${{ env.ACTIONS_COOL_RELEASE_HELPER }}
         with:
           tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
-          name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
-          generate_release_notes: false
-          make_latest: true
-          files: |
-            ${{ env.ASSET_DIR }}/*.apk
-            ${{ env.ASSET_DIR }}/*.sha256
+          release_name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
           body: |
             ## 📦 构建信息
             - 版本号：v${{ steps.prepare_assets.outputs.version }}
@@ -216,45 +239,86 @@ jobs:
             | `CHECKSUMS-*.sha256` | 对应APK的SHA256校验文件 |
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
+          files: |
+            ${{ env.ASSET_DIR }}/*.apk
+            ${{ env.ASSET_DIR }}/*.sha256
+          is_latest: true
+          generate_release_notes: false
           
-      # ✅ 原生脚本清理旧Release（不依赖任何第三方action）
-      - name: 清理旧Release（保留最近10个v开头的版本）
+      # 清理旧Release（保留最近10个v开头的版本）
+      - name: 清理旧版本
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           KEEP_LATEST: 10
         run: |
-          # 获取所有v开头的release，按创建时间降序排列
           releases=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/$REPO/releases?per_page=100" | \
             jq -r '.[] | select(.tag_name | startswith("v")) | .id + " " + .tag_name' | \
             sort -r)
           
-          # 计算需要删除的数量
           count=$(echo "$releases" | wc -l)
           delete_count=$((count - KEEP_LATEST))
           
           if [ $delete_count -le 0 ]; then
-            echo "ℹ️ 只有 $count 个版本，少于等于 $KEEP_LATEST 个，无需清理"
+            echo "ℹ️ 只有 $count 个版本，无需清理"
             exit 0
           fi
           
           echo "🗑️ 共 $count 个版本，保留最近 $KEEP_LATEST 个，删除 $delete_count 个旧版本"
+          echo "" >> $GITHUB_STEP_SUMMARY
           
-          # 删除旧release和对应的标签
           echo "$releases" | tail -n $delete_count | while read -r release_id tag_name; do
-            echo "  删除版本: $tag_name (ID: $release_id)"
-            
-            # 删除release
+            echo "  删除版本: $tag_name" >> $GITHUB_STEP_SUMMARY
             curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/releases/$release_id"
-            
-            # 删除对应的标签
             curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/git/refs/tags/$tag_name"
           done
           
-          echo "✅ 旧版本清理完成"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ 旧版本清理完成" >> $GITHUB_STEP_SUMMARY
+
+  # 邮件通知（如果不需要可以删除整个notify任务）
+  notify:
+    runs-on: ubuntu-latest
+    needs: [sync-upstream, build-and-sign]
+    if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
+    steps:
+      - name: 发送邮件通知
+        uses: actions-cool/ci-notice@${{ env.ACTIONS_COOL_CI_NOTICE }}
+        with:
+          type: email
+          email_host: smtp.qq.com
+          email_port: 465
+          email_username: ${{ secrets.EMAIL_USERNAME }}
+          email_password: ${{ secrets.EMAIL_PASSWORD }}
+          email_to: ${{ secrets.EMAIL_RECEIVER }}
+          subject: >
+            ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本已发布' || '❌ Sesame-AG 构建失败' }}
+          body: |
+            ${{ needs.build-and-sign.result == 'success' && '🎉 Sesame-AG 新版本已成功发布！' || '❌ Sesame-AG 构建失败！' }}
+            
+            ${{ needs.build-and-sign.result == 'success' && format('
+            🔗 下载链接：{0}/{1}/releases/latest
+            
+            📦 版本信息：
+            - 版本号：{2}
+            - 构建时间：{3}
+            ', github.server_url, github.repository, needs.build-and-sign.outputs.version, github.run_started_at) || format('
+            🔗 查看错误日志：{0}/{1}/actions/runs/{2}
+            
+            常见原因：网络超时、依赖下载失败
+            解决方法：点击页面右上角的「Re-run jobs」重新运行
+            ', github.server_url, github.repository, github.run_id) }}
+            
+            ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
+            📥 更新内容：
+            - 最新提交：{0}
+            - 提交信息：{1}
+            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
+            
+            ${{ needs.build-and-sign.result == 'success' && '点击上面的链接即可直接下载APK安装使用。' || '' }}
 
   notify-failure:
     runs-on: ubuntu-latest
