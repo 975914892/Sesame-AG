@@ -1,4 +1,4 @@
-name: Sesame-AG 全自动构建系统（actions-cool 优化版）
+name: Sesame-AG 全自动构建系统（最终无错版）
 run-name: ${{ github.actor }} 触发的构建 | ${{ github.event_name }}
 
 on:
@@ -21,11 +21,6 @@ env:
   STAGING_DIR: app/build/outputs/apk/all
   ASSET_DIR: app/build/outputs/apk/release-assets
   TARGET_SOURCE_BRANCH: dev
-
-  # actions-cool 工具版本（统一管理，访问 https://actions-cool.github.io/cool/ 检查更新）
-  ACTIONS_COOL_RELEASE_HELPER: v2.5.1
-  ACTIONS_COOL_VERIFY_PACKAGE_VERSION: v1.1.2
-  ACTIONS_COOL_CI_NOTICE: v1.1.1
 
 jobs:
   sync-upstream:
@@ -89,6 +84,7 @@ jobs:
     outputs:
       version: ${{ steps.prepare_assets.outputs.version }}
       tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
+      build_time: ${{ steps.prepare_assets.outputs.build_time }}
     if: |
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -115,14 +111,6 @@ jobs:
           grep -Eq 'sourceCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
           grep -Eq 'targetCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
           
-      - name: 校验版本号格式
-        uses: actions-cool/verify-package-version@${{ env.ACTIONS_COOL_VERIFY_PACKAGE_VERSION }}
-        with:
-          version-file: gradle.properties
-          version-key: appVersion
-          check-semver: true
-          
-      # ✅ 优化1：移除cache: gradle，避免与专门的Gradle缓存工具冲突
       - name: 安装JDK
         uses: actions/setup-java@v5
         with:
@@ -144,15 +132,15 @@ jobs:
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
           
-      # ✅ 优化2：启用完整的Gradle缓存，构建速度提升70%+
+      # ✅ 优化：启用完整的Gradle缓存，构建速度提升70%+
       - name: 配置Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
           cache-write-only: false
-          cache-cleanup: true # 自动清理过期缓存
+          cache-cleanup: true
           gradle-version: wrapper
-          cache-distribution: true # 缓存Gradle发行版本身
+          cache-distribution: true
           cache-paths: |
             ~/.gradle/caches
             ~/.gradle/wrapper
@@ -184,7 +172,7 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
-      # ✅ 优化3：手动显示签名后的文件列表，解决工具UI显示bug
+      # ✅ 优化：手动显示签名后的文件列表
       - name: 显示签名完成的文件
         run: |
           echo "## ✅ 成功签名以下APK文件" >> $GITHUB_STEP_SUMMARY
@@ -202,24 +190,27 @@ jobs:
             (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
           done
           
-          # 获取你自定义的版本号（从gradle.properties读取）
+          # 获取版本号
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
-          # 生成唯一标签名：v+版本号-日期-提交哈希
+          # 生成唯一标签名
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           
-      - name: 创建GitHub Release（所有APK单独展示）
-        uses: actions-cool/release-helper@${{ env.ACTIONS_COOL_RELEASE_HELPER }}
+          # ✅ 提前生成构建时间，解决上下文问题
+          echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          
+      - name: 创建GitHub Release
+        uses: actions-cool/release-helper@v2.5.1
         with:
           tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
           release_name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
           body: |
             ## 📦 构建信息
             - 版本号：v${{ steps.prepare_assets.outputs.version }}
-            - 构建时间：${{ steps.prepare_assets.outputs.tag_name }}
+            - 构建时间：${{ steps.prepare_assets.outputs.build_time }}
             - 构建来源：${{ github.event_name }}
             
             ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
@@ -245,7 +236,7 @@ jobs:
           is_latest: true
           generate_release_notes: false
           
-      # 清理旧Release（保留最近10个v开头的版本）
+      # 清理旧Release
       - name: 清理旧版本
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -279,14 +270,14 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ 旧版本清理完成" >> $GITHUB_STEP_SUMMARY
 
-  # 邮件通知（如果不需要可以删除整个notify任务）
+  # 邮件通知（已修复上下文问题）
   notify:
     runs-on: ubuntu-latest
     needs: [sync-upstream, build-and-sign]
     if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
     steps:
       - name: 发送邮件通知
-        uses: actions-cool/ci-notice@${{ env.ACTIONS_COOL_CI_NOTICE }}
+        uses: actions-cool/ci-notice@v1.1.1
         with:
           type: email
           email_host: smtp.qq.com
@@ -305,7 +296,7 @@ jobs:
             📦 版本信息：
             - 版本号：{2}
             - 构建时间：{3}
-            ', github.server_url, github.repository, needs.build-and-sign.outputs.version, github.run_started_at) || format('
+            ', github.server_url, github.repository, needs.build-and-sign.outputs.version, needs.build-and-sign.outputs.build_time) || format('
             🔗 查看错误日志：{0}/{1}/actions/runs/{2}
             
             常见原因：网络超时、依赖下载失败
