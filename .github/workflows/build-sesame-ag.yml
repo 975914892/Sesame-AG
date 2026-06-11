@@ -164,7 +164,7 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
           
-      - name: 生成校验文件和打包
+      - name: 生成SHA256校验文件
         id: prepare_assets
         run: |
           IFS=':' read -r -a files <<< "${{ steps.sign_apks.outputs.signedFiles }}"
@@ -173,19 +173,16 @@ jobs:
             (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
           done
           
-          (cd "${ASSET_DIR}" && zip -r Sesame-AG-全部架构.zip *.apk *.sha256)
-          
-          UNIVERSAL_APK=$(find "${ASSET_DIR}" -name "*-universal.apk")
-          echo "universal_apk=${UNIVERSAL_APK}" >> $GITHUB_OUTPUT
-          echo "all_zip=${ASSET_DIR}/Sesame-AG-全部架构.zip" >> $GITHUB_OUTPUT
-          
+          # 获取版本号
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
+          # 生成唯一标签名：版本号-日期-提交哈希
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           
+      # ✅ 直接上传所有单独的APK和校验文件
       - name: 创建GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -194,8 +191,8 @@ jobs:
           generate_release_notes: false
           make_latest: true
           files: |
-            ${{ steps.prepare_assets.outputs.universal_apk }}
-            ${{ steps.prepare_assets.outputs.all_zip }}
+            ${{ env.ASSET_DIR }}/*.apk
+            ${{ env.ASSET_DIR }}/*.sha256
           body: |
             ## 📦 构建信息
             - 版本号：v${{ steps.prepare_assets.outputs.version }}
@@ -208,12 +205,19 @@ jobs:
             - 提交信息：{1}
             ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
             
-            ## 📥 下载说明
-            - **Sesame-AG-*-universal.apk**：通用版（推荐），所有手机都能安装
-            - **Sesame-AG-全部架构.zip**：包含arm64-v8a/armeabi-v7a/x86/x86_64/universal所有版本 + SHA256校验文件
+            ## 📥 下载说明（点击文件名直接下载）
+            | 文件名 | 适用设备 |
+            |--------|----------|
+            | `Sesame-AG-*-universal.apk` | **推荐**，所有安卓手机通用 |
+            | `Sesame-AG-*-arm64-v8a.apk` | 64位ARM设备（绝大多数新手机） |
+            | `Sesame-AG-*-armeabi-v7a.apk` | 32位ARM设备（旧款手机） |
+            | `Sesame-AG-*-x86_64.apk` | 64位x86设备（部分模拟器） |
+            | `Sesame-AG-*-x86.apk` | 32位x86设备（极少数旧模拟器） |
+            | `CHECKSUMS-*.sha256` | 对应APK的SHA256校验文件 |
             
             > 安装完成后需要在LSPosed中激活模块并重启手机
           
+      # ✅ 清理旧Release（保留最近10个）
       - name: 清理旧Release
         uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
@@ -221,46 +225,6 @@ jobs:
           delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify-email:
-    runs-on: ubuntu-latest
-    needs: [sync-upstream, build-and-sign]
-    if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
-    steps:
-      - name: 发送邮件通知
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.qq.com
-          server_port: 465
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: >
-            ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本已发布' || '❌ Sesame-AG 构建失败' }}
-          body: |
-            ${{ needs.build-and-sign.result == 'success' && '🎉 Sesame-AG 新版本已成功发布！' || '❌ Sesame-AG 构建失败！' }}
-            
-            ${{ needs.build-and-sign.result == 'success' && format('
-            🔗 下载链接：{0}/{1}/releases/latest
-            
-            📦 版本信息：
-            - 版本号：{2}
-            - 构建时间：{3}
-            ', github.server_url, github.repository, needs.build-and-sign.outputs.version, github.run_started_at) || format('
-            🔗 查看错误日志：{0}/{1}/actions/runs/{2}
-            
-            常见原因：网络超时、依赖下载失败
-            解决方法：点击页面右上角的「Re-run jobs」重新运行
-            ', github.server_url, github.repository, github.run_id) }}
-            
-            ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
-            📥 更新内容：
-            - 最新提交：{0}
-            - 提交信息：{1}
-            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
-            
-            ${{ needs.build-and-sign.result == 'success' && '点击上面的链接即可直接下载APK安装使用。' || '' }}
-          to: ${{ secrets.EMAIL_RECEIVER }}
-          from: GitHub Actions
 
   notify-failure:
     runs-on: ubuntu-latest
