@@ -2,11 +2,11 @@ package io.github.aoguai.sesameag.task.antFarm
 
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antFarm.AntFarm.Companion.TAG
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
-import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.TimeUtil
@@ -25,6 +25,7 @@ import kotlin.math.ceil
  * 捐蛋排位赛管理子模块：支持单次蹲点和轮询蹲点
  */
 
+private const val DONATION_COMPETITION_FINISHED_FLAG = "AntFarm::DonationCompetitionFinished"
 private const val DONATION_COMPETITION_FIRST_SEEN_KEY_PREFIX = "antFarmDonationCompetitionStableFirstSeen::"
 private const val DONATION_COMPETITION_SETTLE_HOUR = 20
 private const val TOP_LEVEL_STAR_SENTINEL = 10000
@@ -60,11 +61,39 @@ private data class DonationRankTarget(
     val stars: Int
 )
 
+private fun currentDonationCompetitionStore() = UserDataStoreManager.getInstance(
+    AccountSessionCoordinator.currentUserId() ?: UserMap.currentUid
+)
+
+private fun hasDonationCompetitionFinished(): Boolean {
+    return currentDonationCompetitionStore()
+        ?.hasPersistentFlag(DONATION_COMPETITION_FINISHED_FLAG) == true
+}
+
+private fun markDonationCompetitionFinished(seasonEndTime: Long) {
+    currentDonationCompetitionStore()
+        ?.setPersistentFlag(DONATION_COMPETITION_FINISHED_FLAG, seasonEndTime)
+}
+
+private fun donationCompetitionFirstSeenKey(activityId: String): String {
+    return "$DONATION_COMPETITION_FIRST_SEEN_KEY_PREFIX$activityId"
+}
+
+private fun getDonationCompetitionFirstSeen(activityId: String): Long? {
+    return currentDonationCompetitionStore()
+        ?.get(donationCompetitionFirstSeenKey(activityId), Long::class.javaObjectType)
+        ?.takeIf { it > 0L }
+}
+
+private fun putDonationCompetitionFirstSeen(activityId: String, firstSeenMs: Long) {
+    currentDonationCompetitionStore()
+        ?.put(donationCompetitionFirstSeenKey(activityId), firstSeenMs)
+}
+
 internal fun AntFarm.handleDonationCompetition() {
     if (donationCompetition?.value != true) return
 
-    val store = UserDataStoreManager.getCurrentInstance()
-    if (store?.hasPersistentFlag("AntFarm::DonationCompetitionFinished") == true) {
+    if (hasDonationCompetitionFinished()) {
         return
     }
 
@@ -122,7 +151,7 @@ internal fun AntFarm.handleDonationCompetition() {
                 Log.record(TAG, "🏆 已到达最高段位并拿满奖励，本赛季不再参与排名竞争")
                 if (seasonEndTime > now) {
                     Log.record(TAG, "📅 已设置持久化拦截，本赛季结束前将不再运行捐蛋排位赛")
-                    store?.setPersistentFlag("AntFarm::DonationCompetitionFinished", seasonEndTime)
+                    markDonationCompetitionFinished(seasonEndTime)
                 }
                 return
             }
@@ -248,7 +277,7 @@ private fun AntFarm.isStableDonationCompetitionMode(): Boolean {
 }
 
 private fun AntFarm.hasCompletedStableDonationCompetition(): Boolean {
-    if (UserDataStoreManager.getCurrentInstance()?.hasPersistentFlag("AntFarm::DonationCompetitionFinished") == true) return true
+    if (hasDonationCompetitionFinished()) return true
     val snapshot = queryDonationAwardSnapshot() ?: return false
     if (snapshot.hasUnclaimedAwards || snapshot.starsToHighest > 0) return false
     Log.record(TAG, "排位赛稳定模式：最高段位奖励已领取完成，跳过排位赛处理")
@@ -379,13 +408,11 @@ private fun AntFarm.buildStableDonationPlan(rankList: JSONArray): StableDonation
 private fun AntFarm.resolveDonationCompetitionFirstSeen(snapshot: DonationAwardSnapshot): Long {
     if (snapshot.startTimeMs > 0L) return snapshot.startTimeMs
 
-    val uid = UserMap.currentUid ?: ownerFarmId ?: "unknown"
-    val firstSeenKey = "$DONATION_COMPETITION_FIRST_SEEN_KEY_PREFIX$uid::${snapshot.activityId}"
-    val stored = DataStore.get(firstSeenKey, Long::class.javaObjectType)?.takeIf { it > 0L }
+    val stored = getDonationCompetitionFirstSeen(snapshot.activityId)
     if (stored != null) return stored
 
     val now = System.currentTimeMillis()
-    DataStore.put(firstSeenKey, now)
+    putDonationCompetitionFirstSeen(snapshot.activityId, now)
     return now
 }
 
@@ -570,6 +597,8 @@ private fun AntFarm.scheduleDonationCompetitionTask(endTimeMs: Long) {
         JSONObject()
             .put("end_time_ms", endTimeMs)
             .put("polling_mode", isPollingMode)
+            .put("owner_farm_id", ownerFarmId ?: "")
+            .put("created_at_ms", now)
     )
     if (finalExecTime == now) {
         Log.record(TAG, "✅ 已创建立即执行任务")
