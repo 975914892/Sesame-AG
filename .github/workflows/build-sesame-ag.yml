@@ -6,7 +6,7 @@ on:
     branches: [ main, master, dev ]
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # 每天北京时间早上8点
+    - cron: '0 0 * * *' # 每天北京时间早上8点自动检测更新
 
 env:
   CI: "true"
@@ -22,11 +22,11 @@ env:
   ASSET_DIR: app/build/outputs/apk/release-assets
   TARGET_SOURCE_BRANCH: dev
 
-  # 彻底消除 Node.js 弃用警告
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 消除Node版本弃用警告，仅保留这一个，避免冲突
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
+  # 任务1：同步原仓库代码，检测是否有更新
   sync-upstream:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -35,36 +35,35 @@ jobs:
       latest_commit: ${{ steps.get_commit.outputs.latest_commit }}
       commit_message: ${{ steps.get_commit.outputs.commit_message }}
     steps:
-      - name: 检出仓库
+      - name: 检出仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
-          ref: dev # 明确检出dev分支，避免分支歧义
-          
-      - name: 配置Git用户
+          ref: dev
+
+      - name: 配置Git用户信息
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # 配置推送权限，避免exit code 128
+          # 配置推送权限，避免权限报错
           git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
-          
-      - name: 添加原仓库上游
+
+      - name: 添加原仓库上游地址
         run: |
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
-          
-      - name: 拉取原仓库更新
+
+      - name: 拉取原仓库最新代码
         run: git fetch upstream dev
-          
+
       - name: 获取原仓库最新提交信息
         id: get_commit
         run: |
           echo "latest_commit=$(git rev-parse --short upstream/dev)" >> $GITHUB_OUTPUT
           echo "commit_message=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
-          
-      # ✅ 修复：用提交哈希对比检测更新，兼容快进合并和普通合并
-      - name: 合并原仓库更新并检测是否有变化
+
+      - name: 合并代码并检测是否有更新
         id: check_update
         run: |
           # 记录合并前的本地提交哈希
@@ -75,7 +74,7 @@ jobs:
           
           # 记录合并后的本地提交哈希
           AFTER_COMMIT=$(git rev-parse HEAD)
-          
+
           # 对比前后哈希，判断是否有更新
           if [ "$BEFORE_COMMIT" != "$AFTER_COMMIT" ]; then
             echo "has_update=true" >> $GITHUB_OUTPUT
@@ -86,11 +85,12 @@ jobs:
             echo "has_update=false" >> $GITHUB_OUTPUT
             echo "ℹ️ 原仓库无更新，跳过构建" >> $GITHUB_STEP_SUMMARY
           fi
-          
-      - name: 推送更新到自己的仓库
+
+      - name: 推送更新到本地仓库
         if: steps.check_update.outputs.has_update == 'true'
         run: git push origin dev
-          
+
+  # 任务2：构建APK、签名、发布Release、清理旧版本
   build-and-sign:
     runs-on: ubuntu-latest
     needs: sync-upstream
@@ -105,18 +105,17 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        github.event_name == 'push' ||
        needs.sync-upstream.outputs.has_update == 'true')
-    
     steps:
-      - name: 设置时区
+      - name: 设置时区为上海
         run: sudo timedatectl set-timezone Asia/Shanghai
-        
-      - name: 检出代码
+
+      - name: 检出仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: dev
-          
-      - name: 工具链版本校验
+
+      - name: 校验工具链版本一致性
         run: |
           grep -Eq '^distributionUrl=.*gradle-'"${LOCAL_GRADLE_VERSION//./\\.}"'-bin\.zip$' gradle/wrapper/gradle-wrapper.properties
           grep -Eq '^android-plugin = "'"${LOCAL_AGP_VERSION//./\\.}"'"$' gradle/libs.versions.toml
@@ -125,51 +124,51 @@ jobs:
           grep -Eq 'compileSdk = '"${ANDROID_API_LEVEL}"'$' app/build.gradle.kts
           grep -Eq 'sourceCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
           grep -Eq 'targetCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
-          
-      - name: 安装JDK
+
+      - name: 安装JDK环境
         uses: actions/setup-java@v5
         with:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
-          
-      - name: 配置Gradle环境
+
+      - name: 配置Gradle的Java路径
         run: echo "ORG_GRADLE_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
-          
-      - name: 安装Android SDK
+
+      - name: 安装Android SDK工具
         uses: android-actions/setup-android@v3
         with:
           packages: ""
-          
-      - name: 安装SDK组件
+
+      - name: 安装SDK组件并接受协议
         run: |
           sdkmanager --install "platform-tools" "platforms;android-${ANDROID_API_LEVEL}" "build-tools;${ANDROID_BUILD_TOOLS}"
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
-          
-      - name: 配置Gradle缓存
+
+      - name: 配置Gradle缓存（加速构建）
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: wrapper
           cache-read-only: false
           cache-cleanup: on-success
-          
-      - name: 赋予执行权限
+
+      - name: 赋予Gradle执行权限
         run: chmod +x gradlew
-        
-      - name: 构建Release APK
+
+      - name: 执行Release构建
         run: ./gradlew --no-daemon --stacktrace assembleRelease
-        
-      - name: 准备APK
+
+      - name: 准备待签名的APK文件
         run: |
           rm -rf "${STAGING_DIR}" "${ASSET_DIR}"
-          mkdir -p "${STAGING_DIR}" "${ASSET_DIR}"
+          mkdir -p "${STAGING_DIR}"
           mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*.apk" | sort)
           for apk in "${apks[@]}"; do
             cp "${apk}" "${STAGING_DIR}/"
           done
-          
-      - name: 签名APK
+
+      - name: 对APK进行签名
         id: sign_apks
         uses: ilharp/sign-android-release@v2
         with:
@@ -179,43 +178,47 @@ jobs:
           keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
-          
-      - name: 显示签名完成的文件
+
+      - name: 显示签名完成的文件列表
         run: |
           echo "## ✅ 成功签名以下APK文件" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.sign_apks.outputs.signedFiles }}" | tr ':' '\n' | while read -r file; do
             echo "- $(basename "$file")" >> $GITHUB_STEP_SUMMARY
           done
-          
-      - name: 生成SHA256校验文件
+
+      - name: 生成SHA256校验文件与版本信息
         id: prepare_assets
         run: |
+          mkdir -p "${ASSET_DIR}"
           IFS=':' read -r -a files <<< "${{ steps.sign_apks.outputs.signedFiles }}"
           for file in "${files[@]}"; do
             cp "${file}" "${ASSET_DIR}/"
-            (cd "${ASSET_DIR}" && sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256")
+            (
+              cd "${ASSET_DIR}"
+              sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256"
+            )
           done
-          
-          # 获取版本号
+
+          # 读取自定义版本号
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          
-          # 生成唯一标签名
+
+          # 生成唯一Release标签
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-          
-          # 生成构建时间（上海时区）
+
+          # 生成本地时间格式的构建时间
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
-          
+
       - name: 创建GitHub Release（所有APK单独展示）
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
-          name: Sesame-AG v${{ steps.prepare_assets.outputs.version }} (${{ steps.prepare_assets.outputs.tag_name }})
-          generate_release_notes: false
+          name: Sesame-AG v${{ steps.prepare_assets.outputs.version }}
           make_latest: true
+          generate_release_notes: false
           files: |
             ${{ env.ASSET_DIR }}/*.apk
             ${{ env.ASSET_DIR }}/*.sha256
@@ -223,26 +226,25 @@ jobs:
             ## 📦 构建信息
             - 版本号：v${{ steps.prepare_assets.outputs.version }}
             - 构建时间：${{ steps.prepare_assets.outputs.build_time }}
-            - 构建来源：${{ github.event_name }}
-            
+            - 触发来源：${{ github.event_name }}
+
             ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
-            ## 📥 本次更新内容
+            ## 📥 本次同步更新
             - 原仓库最新提交：{0}
-            - 提交信息：{1}
+            - 提交说明：{1}
             ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
-            
-            ## 📥 下载说明（点击文件名直接下载）
-            | 文件名 | 适用设备 |
+
+            ## 📱 下载说明
+            | 架构版本 | 适用设备 |
             |--------|----------|
-            | `Sesame-AG-*-universal.apk` | **推荐**，所有安卓手机通用 |
-            | `Sesame-AG-*-arm64-v8a.apk` | 64位ARM设备（绝大多数新手机） |
-            | `Sesame-AG-*-armeabi-v7a.apk` | 32位ARM设备（旧款手机） |
-            | `Sesame-AG-*-x86_64.apk` | 64位x86设备（部分模拟器） |
-            | `Sesame-AG-*-x86.apk` | 32位x86设备（极少数旧模拟器） |
-            | `CHECKSUMS-*.sha256` | 对应APK的SHA256校验文件 |
-            
-            > 安装完成后需要在LSPosed中激活模块并重启手机
-          
+            | `universal` | ✅ 推荐所有用户使用，兼容全部安卓设备 |
+            | `arm64-v8a` | 64位ARM架构，绝大多数新款安卓手机 |
+            | `armeabi-v7a` | 32位ARM架构，老旧安卓设备 |
+            | `x86_64` | 64位x86架构，部分安卓模拟器 |
+            | `x86` | 32位x86架构，极少老旧模拟器 |
+
+            > 安装完成后，请在LSPosed框架中激活模块并重启设备生效。
+
       - name: 清理旧版本（保留最近10个）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -253,85 +255,85 @@ jobs:
             "https://api.github.com/repos/$REPO/releases?per_page=100" | \
             jq -r '.[] | select(.tag_name | startswith("v")) | .id + " " + .tag_name' | \
             sort -r)
-          
+
           count=$(echo "$releases" | wc -l)
           delete_count=$((count - KEEP_LATEST))
-          
+
           if [ $delete_count -le 0 ]; then
-            echo "ℹ️ 只有 $count 个版本，无需清理"
+            echo "ℹ️ 当前只有 $count 个版本，无需清理"
             exit 0
           fi
-          
-          echo "🗑️ 共 $count 个版本，保留最近 $KEEP_LATEST 个，删除 $delete_count 个旧版本"
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "$releases" | tail -n $delete_count | while read -r release_id tag_name; do
-            echo "  删除版本: $tag_name" >> $GITHUB_STEP_SUMMARY
-            curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$REPO/releases/$release_id"
-            curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$REPO/git/refs/tags/$tag_name"
-          done
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ 旧版本清理完成" >> $GITHUB_STEP_SUMMARY
 
+          echo "🗑️ 共 $count 个版本，保留最近 $KEEP_LATEST 个，删除 $delete_count 个旧版本"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$releases" | tail -n $delete_count | while read -r release_id tag_name; do
+            echo "  删除版本: $tag_name" >> "$GITHUB_STEP_SUMMARY"
+            # 增加容错，失败不中断流程
+            curl -s -f -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/releases/$release_id" || true
+            curl -s -f -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/git/refs/tags/$tag_name" || true
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ 旧版本清理完成" >> "$GITHUB_STEP_SUMMARY"
+
+  # 任务3：发送邮件通知
   notify-email:
     runs-on: ubuntu-latest
-    needs: [sync-upstream, build-and-sign]
+    needs: [ sync-upstream, build-and-sign ]
     if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
     steps:
-      - name: 发送邮件通知
+      - name: 发送构建结果邮件
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com
           server_port: 465
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
+          to: ${{ secrets.EMAIL_RECEIVER }}
+          from: GitHub Actions 自动构建
           subject: >
-            ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本已发布' || '❌ Sesame-AG 构建失败' }}
+            ${{ needs.build-and-sign.result == 'success' && '✅ Sesame-AG 新版本构建发布成功' || '❌ Sesame-AG 构建失败' }}
           body: |
-            ${{ needs.build-and-sign.result == 'success' && '🎉 Sesame-AG 新版本已成功发布！' || '❌ Sesame-AG 构建失败！' }}
-            
+            ${{ needs.build-and-sign.result == 'success' && '🎉 Sesame-AG 新版本已成功构建并发布！' || '❌ Sesame-AG 构建流程出现失败，请查看详情排查。' }}
+
             ${{ needs.build-and-sign.result == 'success' && format('
-            🔗 下载链接：{0}/{1}/releases/latest
+            🔗 下载地址：{0}/{1}/releases/tag/{2}
             
-            📦 版本信息：
-            - 版本号：{2}
-            - 构建时间：{3}
-            ', github.server_url, github.repository, needs.build-and-sign.outputs.version, needs.build-and-sign.outputs.build_time) || format('
-            🔗 查看详细错误日志：{0}/{1}/actions/runs/{2}
+            📦 版本信息
+            - 版本号：{3}
+            - 构建时间：{4}
+            ', github.server_url, github.repository, needs.build-and-sign.outputs.tag_name, needs.build-and-sign.outputs.version, needs.build-and-sign.outputs.build_time) || format('
+            🔗 错误日志：{0}/{1}/actions/runs/{2}
             
-            🚨 可能的失败原因：
+            🚨 常见失败原因
             1. 配置文件语法错误
             2. 依赖下载失败（网络问题）
-            3. 签名密钥错误或过期
-            4. 原仓库代码更新导致编译失败
+            3. 签名密钥配置错误
+            4. 原仓库代码变更导致编译失败
             
-            🔧 解决方法：
-            1. 点击上面的链接查看具体哪一步失败
-            2. 复制错误日志中的红色错误信息
-            3. 点击右上角「Re-run jobs」重新运行尝试
+            🔧 排查建议
+            点击上方链接进入构建详情，查看红色报错步骤的具体日志
+            若为网络问题，点击右上角「Re-run jobs」重新执行即可
             ', github.server_url, github.repository, github.run_id) }}
-            
-            ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
-            📥 本次同步内容：
-            - 原仓库最新提交：{0}
-            - 提交信息：{1}
-            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
-            
-            ${{ needs.build-and-sign.result == 'success' && '点击上面的链接即可直接下载APK安装使用。' || '' }}
-          to: ${{ secrets.EMAIL_RECEIVER }}
-          from: GitHub Actions
 
+            ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
+            📥 本次同步信息
+            - 原仓库提交：{0}
+            - 提交说明：{1}
+            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
+
+  # 任务4：构建失败摘要补充
   notify-failure:
     runs-on: ubuntu-latest
-    needs: [sync-upstream, build-and-sign]
+    needs: [ sync-upstream, build-and-sign ]
     if: ${{ failure() }}
     steps:
-      - name: 构建失败通知
+      - name: 输出失败提示
         run: |
-          echo "## ❌ 构建失败" >> $GITHUB_STEP_SUMMARY
+          echo "## ❌ 构建执行失败" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "请点击上方的失败任务查看详细错误日志" >> $GITHUB_STEP_SUMMARY
-          echo "不要只看这个摘要页面，要点进具体的步骤看红色错误信息" >> $GITHUB_STEP_SUMMARY
+          echo "请点击左侧失败的任务步骤，查看红色报错的详细日志信息。" >> $GITHUB_STEP_SUMMARY
+          echo "若为网络/临时环境问题，可点击右上角「Re-run all jobs」重试。" >> $GITHUB_STEP_SUMMARY
