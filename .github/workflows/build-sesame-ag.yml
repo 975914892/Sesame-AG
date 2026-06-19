@@ -22,7 +22,7 @@ env:
   ASSET_DIR: app/build/outputs/apk/release-assets
   TARGET_SOURCE_BRANCH: dev
 
-  # 消除Node版本弃用警告，仅保留这一个，避免冲突
+  # 消除剩余Node版本弃用警告
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       commit_message: ${{ steps.get_commit.outputs.commit_message }}
     steps:
       - name: 检出仓库代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5 # 已升级到v5最新正式版
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
@@ -110,7 +110,7 @@ jobs:
         run: sudo timedatectl set-timezone Asia/Shanghai
 
       - name: 检出仓库代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5 # 已升级到v5最新正式版
         with:
           fetch-depth: 0
           ref: dev
@@ -135,7 +135,7 @@ jobs:
         run: echo "ORG_GRADLE_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: 安装Android SDK工具
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4 # 已升级到v4最新正式版
         with:
           packages: ""
 
@@ -286,7 +286,7 @@ jobs:
     if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
     steps:
       - name: 发送构建结果邮件
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v6 # 已升级到v6最新正式版
         with:
           server_address: smtp.qq.com
           server_port: 465
