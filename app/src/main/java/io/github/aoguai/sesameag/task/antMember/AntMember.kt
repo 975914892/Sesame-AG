@@ -270,6 +270,18 @@ class AntMember : ModelTask() {
         val canMarkDone: Boolean
     )
 
+    private data class GameCenterPlatformTaskSnapshot(
+        val taskId: String,
+        val title: String,
+        val subTitle: String,
+        val status: String,
+        val buttonText: String,
+        val needSignUp: Boolean,
+        val gameId: String,
+        val appId: String,
+        val pointAmount: Int
+    )
+
     private val insuredTaskCenterConfigs = listOf(
         InsuredTaskCenterConfig("AP16236844", "TASK_LIST", "GIFT_GOLD_NORMAL_TASK_CONTROL"),
         InsuredTaskCenterConfig("AP19236833", "TOP_LIST", "GIFT_GOLD_TOP_TASK_CONTROL"),
@@ -5207,7 +5219,7 @@ class AntMember : ModelTask() {
                         status = status,
                         type = if (task.optBoolean("needSignUp", false)) "SIGNUP_TASK" else "PLATFORM_TASK",
                         actionType = "doTaskSend",
-                        blacklistKeys = listOf(taskId, title).filter { it.isNotBlank() },
+                        blacklistKeys = buildGameCenterPlatformBlacklistKeys(taskId, task),
                         raw = task,
                         progress = "pointAmount=${task.optInt("pointAmount", 0)}"
                     )
@@ -5250,6 +5262,21 @@ class AntMember : ModelTask() {
                 logSkipOnce(item, "黑名单任务，跳过")
             }
             return blacklisted
+        }
+
+        override fun blacklist(item: TaskFlowItem, result: TaskFlowActionResult) {
+            val task = item.raw ?: JSONObject()
+            val persistKeys = buildGameCenterPlatformPersistKeys(item.id, task)
+            if (persistKeys.isEmpty()) {
+                super<TaskFlowAdapter>.blacklist(item, result)
+                return
+            }
+            val primaryKey = persistKeys.first()
+            if (result.code.isNotBlank()) {
+                TaskBlacklist.autoAddToBlacklist(moduleName, primaryKey, errorCode = result.code)
+            }
+            TaskBlacklist.addToBlacklist(moduleName, primaryKey)
+            persistKeys.drop(1).forEach { TaskBlacklist.addToBlacklist(moduleName, it) }
         }
 
         override fun signup(item: TaskFlowItem): TaskFlowActionResult {
@@ -5332,35 +5359,175 @@ class AntMember : ModelTask() {
             Log.error(TAG, message)
         }
 
+        private fun buildGameCenterPlatformBlacklistKeys(taskId: String, task: JSONObject): List<String> {
+            val snapshot = toGameCenterPlatformTaskSnapshot(taskId, task)
+            val stableKeys = LinkedHashSet<String>()
+            buildGameCenterPlatformPersistKeys(taskId, task).forEach(stableKeys::add)
+            listOf(
+                snapshot.gameId,
+                snapshot.appId,
+                snapshot.title,
+                snapshot.subTitle,
+                snapshot.taskId
+            ).filter { it.isNotBlank() }.forEach(stableKeys::add)
+            return stableKeys.toList()
+        }
+
+        private fun buildGameCenterPlatformPersistKeys(taskId: String, task: JSONObject): List<String> {
+            val snapshot = toGameCenterPlatformTaskSnapshot(taskId, task)
+            return LinkedHashSet<String>().apply {
+                buildStableGameCenterPlatformKey(snapshot.gameId, snapshot.title, snapshot.subTitle)?.let(::add)
+                buildStableGameCenterPlatformKey(snapshot.appId, snapshot.title, snapshot.subTitle)?.let(::add)
+                buildGameCenterPlatformTaskIdKey(snapshot.taskId, snapshot.title)?.let(::add)
+            }.toList()
+        }
+
+        private fun buildStableGameCenterPlatformKey(identifier: String, title: String, subTitle: String): String? {
+            if (identifier.isBlank() || title.isBlank() || subTitle.isBlank()) {
+                return null
+            }
+            return "$identifier|$title|$subTitle"
+        }
+
+        private fun buildGameCenterPlatformTaskIdKey(taskId: String, title: String): String? {
+            if (taskId.isBlank() || title.isBlank() || taskId == title) {
+                return null
+            }
+            return "$taskId|$title"
+        }
+
+        private fun toGameCenterPlatformTaskSnapshot(taskId: String, task: JSONObject): GameCenterPlatformTaskSnapshot {
+            val title = task.optString("title").ifBlank {
+                task.optString("subTitle").ifBlank { taskId }
+            }
+            return GameCenterPlatformTaskSnapshot(
+                taskId = taskId,
+                title = title,
+                subTitle = task.optString("subTitle"),
+                status = task.optString("taskStatus"),
+                buttonText = task.optString("buttonText"),
+                needSignUp = task.optBoolean("needSignUp", false),
+                gameId = task.optString("gameId"),
+                appId = task.optString("appId"),
+                pointAmount = task.optInt("pointAmount", 0)
+            )
+        }
+
+        private fun findGameCenterPlatformTaskById(response: JSONObject, taskId: String): GameCenterPlatformTaskSnapshot? {
+            val data = response.optJSONObject("data") ?: return null
+            val platformTaskModule = data.optJSONObject("gameTaskModule")
+                ?: data.optJSONObject("platformTaskModule")
+                ?: return null
+            val platformTaskList = platformTaskModule.optJSONArray("gameTaskList")
+                ?: platformTaskModule.optJSONArray("platformTaskList")
+                ?: return null
+            for (i in 0 until platformTaskList.length()) {
+                val task = platformTaskList.optJSONObject(i) ?: continue
+                if (taskId == task.optString("taskId")) {
+                    return toGameCenterPlatformTaskSnapshot(taskId, task)
+                }
+            }
+            return null
+        }
+
+        private fun isGameCenterPlatformTaskTerminal(snapshot: GameCenterPlatformTaskSnapshot): Boolean {
+            return snapshot.status.uppercase(Locale.ROOT) in setOf(
+                "DONE",
+                "FINISHED",
+                "COMPLETED",
+                "COMPLETE",
+                "SUCCESS",
+                "RECEIVED"
+            ) || snapshot.buttonText.contains("领取")
+        }
+
+        private fun buildGameCenterPlatformRecheckDetail(
+            item: TaskFlowItem,
+            snapshot: GameCenterPlatformTaskSnapshot?
+        ): String {
+            val baseDetail = gameCenterTaskActionDetail(item, "send+recheck")
+            if (snapshot == null) {
+                return "$baseDetail recheckTask=MISSING"
+            }
+            return "$baseDetail recheckStatus=${snapshot.status.ifBlank { "UNKNOWN" }}" +
+                " recheckButton=${snapshot.buttonText.ifBlank { "UNKNOWN" }}" +
+                " recheckTitle=${snapshot.title.ifBlank { "UNKNOWN" }}" +
+                " recheckSubTitle=${snapshot.subTitle.ifBlank { "UNKNOWN" }}"
+        }
+
+        private fun buildGameCenterPlatformFakeSuccessMessage(
+            item: TaskFlowItem,
+            snapshot: GameCenterPlatformTaskSnapshot
+        ): String {
+            return "doTaskSend仅ACK，复查仍未完成" +
+                "(before=${item.status.ifBlank { "UNKNOWN" }}" +
+                ",after=${snapshot.status.ifBlank { "UNKNOWN" }}" +
+                ",button=${snapshot.buttonText.ifBlank { "UNKNOWN" }})"
+        }
+
+        private fun buildGameCenterPlatformCombinedRaw(sendResponse: String, recheckRaw: String): String {
+            return "send=$sendResponse recheck=$recheckRaw"
+        }
+
         private fun sendGameCenterTask(item: TaskFlowItem): TaskFlowActionResult {
-            val response = AntMemberRpcCall.doTaskSend(item.id)
-            val responseObject = JSONObject(response)
-            if (!ResChecker.checkRes(TAG, responseObject)) {
+            val sendResponse = AntMemberRpcCall.doTaskSend(item.id)
+            val sendResponseObject = JSONObject(sendResponse)
+            if (!ResChecker.checkRes(TAG, sendResponseObject)) {
                 return gameCenterTaskFailureResult(
                     item = item,
-                    responseObject = responseObject,
-                    rawResponse = response,
+                    responseObject = sendResponseObject,
+                    rawResponse = sendResponse,
                     rpc = "AntMemberRpcCall.doTaskSend"
                 )
             }
-            val resultStatus = responseObject.optJSONObject("data")?.optString("taskStatus").orEmpty()
-            if (resultStatus == "SIGNUP_COMPLETE" || resultStatus == "NOT_DONE") {
-                return TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.RETRYABLE_RPC,
-                    code = "STATUS_UNCHANGED",
-                    message = "任务状态未变更",
-                    rpc = "AntMemberRpcCall.doTaskSend",
-                    raw = response,
-                    detail = gameCenterTaskActionDetail(item, "send"),
+
+            // doTaskSend 在最新抓包里经常只返回 transport ACK，必须立刻复查任务列表确认真实进度。
+            val recheckResponse = query()
+            val recheckRaw = recheckResponse.optString("_rawResponse", recheckResponse.toString())
+            if (!isQuerySuccess(recheckResponse)) {
+                val recheckFailure = gameCenterTaskFailureResult(
+                    item = item,
+                    responseObject = recheckResponse,
+                    rawResponse = recheckRaw,
+                    rpc = "AntMemberRpcCall.queryGameCenterTaskList"
+                )
+                return recheckFailure.copy(
+                    rpc = "AntMemberRpcCall.doTaskSend+AntMemberRpcCall.queryGameCenterTaskList",
+                    raw = buildGameCenterPlatformCombinedRaw(sendResponse, recheckRaw),
+                    detail = buildGameCenterPlatformRecheckDetail(item, null),
                     stopCurrentRound = true
                 )
             }
-            val task = item.raw ?: JSONObject()
-            val title = task.optString("subTitle").ifBlank { item.title }
-            val pointAmount = task.optInt("pointAmount", 0)
+
+            val snapshot = findGameCenterPlatformTaskById(recheckResponse, item.id)
+            if (snapshot == null) {
+                return TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                    code = "POST_SEND_QUERY_MISS",
+                    message = "doTaskSend后复查未找到目标任务",
+                    rpc = "AntMemberRpcCall.doTaskSend+AntMemberRpcCall.queryGameCenterTaskList",
+                    raw = buildGameCenterPlatformCombinedRaw(sendResponse, recheckRaw),
+                    detail = buildGameCenterPlatformRecheckDetail(item, null),
+                    stopCurrentRound = true
+                )
+            }
+
+            if (!isGameCenterPlatformTaskTerminal(snapshot)) {
+                return TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
+                    code = "FAKE_SUCCESS",
+                    message = buildGameCenterPlatformFakeSuccessMessage(item, snapshot),
+                    rpc = "AntMemberRpcCall.doTaskSend+AntMemberRpcCall.queryGameCenterTaskList",
+                    raw = buildGameCenterPlatformCombinedRaw(sendResponse, recheckRaw),
+                    detail = buildGameCenterPlatformRecheckDetail(item, snapshot),
+                    stopCurrentRound = true
+                )
+            }
+
+            val title = snapshot.subTitle.ifBlank { snapshot.title }
             Log.member(
-                "游戏中心🎮任务[$title]#完成,奖励${pointAmount}玩乐豆" +
-                    if (task.optBoolean("needSignUp", false)) "(签到任务)" else ""
+                "游戏中心🎮任务[$title]#完成,奖励${snapshot.pointAmount}玩乐豆" +
+                    if (snapshot.needSignUp) "(签到任务)" else ""
             )
             return TaskFlowActionResult.success()
         }
@@ -5705,7 +5872,11 @@ class AntMember : ModelTask() {
     private fun gameCenterTaskActionDetail(item: TaskFlowItem, action: String): String {
         val task = item.raw ?: JSONObject()
         return "taskId=${item.id.ifBlank { "UNKNOWN" }} taskName=${item.title.ifBlank { "UNKNOWN" }} " +
+            "subTitle=${task.optString("subTitle").ifBlank { "UNKNOWN" }} " +
             "status=${item.status.ifBlank { "UNKNOWN" }} action=$action " +
+            "gameId=${task.optString("gameId").ifBlank { "UNKNOWN" }} " +
+            "appId=${task.optString("appId").ifBlank { "UNKNOWN" }} " +
+            "buttonText=${task.optString("buttonText").ifBlank { "UNKNOWN" }} " +
             "needSignUp=${task.optBoolean("needSignUp", false)} pointAmount=${task.optInt("pointAmount", 0)}"
     }
 

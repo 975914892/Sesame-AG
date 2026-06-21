@@ -3172,6 +3172,10 @@ class AntSesameCredit : ModelTask() {
             val code = errorCode.trim()
             val message = resultView.trim()
             return when {
+                code == "ILLEGAL_ARGUMENT" &&
+                    containsAnySesame(message, "promiseActivityExtCheck") ->
+                    TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
+
                 code in setOf("TASK_ALREADY_FINISHED", "TASK_HAS_FINISHED", "REPEAT_FINISH", "REPEAT_REWARD") ||
                     containsAnySesame(message, "已完成", "已领取", "已经领取", "重复领取", "重复领奖", "重复完成") ->
                     TaskRpcFailureType.TERMINAL_DONE
