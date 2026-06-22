@@ -5469,7 +5469,55 @@ class AntMember : ModelTask() {
             return "send=$sendResponse recheck=$recheckRaw"
         }
 
+        private fun buildUnsupportedGameCenterGameplayResult(item: TaskFlowItem): TaskFlowActionResult? {
+            if (!isRealGameCenterGameplayTask(item)) {
+                return null
+            }
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
+                code = "UNSUPPORTED_GAMEPLAY_TASK",
+                message = "普通真实游戏任务无稳定RPC闭环，跳过doTaskSend伪成功链路",
+                rpc = "<none>",
+                raw = item.raw?.toString().orEmpty(),
+                detail = gameCenterTaskActionDetail(item, "precheck")
+            )
+        }
+
+        private fun isRealGameCenterGameplayTask(item: TaskFlowItem): Boolean {
+            val task = item.raw ?: return false
+            if (!task.optString("actionType").equals("NORMAL", ignoreCase = true)) {
+                return false
+            }
+            if (task.optBoolean("needSignUp", false)) {
+                return false
+            }
+            if (task.optString("buttonText") != "去完成") {
+                return false
+            }
+            val gameId = task.optString("gameId")
+            val appId = task.optString("appId")
+            val jumpLink = task.optString("jumpLink")
+            if (gameId.isBlank() || appId.isBlank() || !jumpLink.contains("platformapi/startapp", ignoreCase = true)) {
+                return false
+            }
+            val taskText = "${item.title} ${task.optString("subTitle")}"
+            return containsAny(
+                taskText,
+                "通过",
+                "完成",
+                "击杀",
+                "挑战",
+                "订单",
+                "庙会",
+                "夜市",
+                "主线",
+                "boss"
+            )
+        }
+
         private fun sendGameCenterTask(item: TaskFlowItem): TaskFlowActionResult {
+            buildUnsupportedGameCenterGameplayResult(item)?.let { return it }
+
             val sendResponse = AntMemberRpcCall.doTaskSend(item.id)
             val sendResponseObject = JSONObject(sendResponse)
             if (!ResChecker.checkRes(TAG, sendResponseObject)) {
@@ -7145,7 +7193,7 @@ class AntMember : ModelTask() {
 
     companion object {
         private val TAG: String = AntMember::class.java.getSimpleName()
-        private const val memberTaskBlacklistModule = "目标应用会员"
+        private const val memberTaskBlacklistModule = "会员"
         private const val insuredTaskBlacklistModule = "蚂蚁保"
         private const val memberFloatingBallAdTaskTitle = "会员浮球广告浏览任务"
         private const val MERCHANT_EXAM_TASK_CODE = "JYMWDDJF_TASK"
