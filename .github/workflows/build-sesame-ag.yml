@@ -32,11 +32,11 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     outputs:
       has_update: ${{ steps.check_update.outputs.has_update }}
-      latest_commit: ${{ steps.get_commit.outputs.latest_commit }}
-      commit_message: ${{ steps.get_commit.outputs.commit_message }}
+      latest_commit: ${{ steps.check_update.outputs.latest_commit }}
+      change_log: ${{ steps.check_update.outputs.change_log }}
     steps:
       - name: 检出仓库代码
-        uses: actions/checkout@v5 # 已升级到v5最新正式版
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
@@ -46,7 +46,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # 配置推送权限，避免权限报错
           git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
 
       - name: 添加原仓库上游地址
@@ -57,33 +56,45 @@ jobs:
       - name: 拉取原仓库最新代码
         run: git fetch upstream dev
 
-      - name: 获取原仓库最新提交信息
-        id: get_commit
-        run: |
-          echo "latest_commit=$(git rev-parse --short upstream/dev)" >> $GITHUB_OUTPUT
-          echo "commit_message=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
-
-      - name: 合并代码并检测是否有更新
+      # ✅ 修复：对比前后提交，生成完整的更新日志（包含所有提交）
+      - name: 合并代码并生成完整更新日志
         id: check_update
         run: |
-          # 记录合并前的本地提交哈希
-          BEFORE_COMMIT=$(git rev-parse HEAD)
+          # 记录合并前的本地最新提交
+          BEFORE_SHA=$(git rev-parse HEAD)
           
           # 执行合并，优先采用原仓库代码
           git merge upstream/dev --no-edit -X theirs
           
-          # 记录合并后的本地提交哈希
-          AFTER_COMMIT=$(git rev-parse HEAD)
+          # 记录合并后的最新提交
+          AFTER_SHA=$(git rev-parse HEAD)
+          SHORT_AFTER=$(git rev-parse --short "$AFTER_SHA")
 
           # 对比前后哈希，判断是否有更新
-          if [ "$BEFORE_COMMIT" != "$AFTER_COMMIT" ]; then
-            echo "has_update=true" >> $GITHUB_OUTPUT
-            echo "✅ 检测到原仓库更新，将自动构建并发布" >> $GITHUB_STEP_SUMMARY
-            echo "更新前提交: $BEFORE_COMMIT" >> $GITHUB_STEP_SUMMARY
-            echo "更新后提交: $AFTER_COMMIT" >> $GITHUB_STEP_SUMMARY
+          if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+            echo "latest_commit=${SHORT_AFTER}" >> "$GITHUB_OUTPUT"
+            
+            # 生成完整的提交日志（短哈希 + 提交信息，每行一条）
+            CHANGE_LOG=$(git log --oneline "${BEFORE_SHA}..${AFTER_SHA}")
+            
+            # 多行输出写入GITHUB_OUTPUT（关键修复：支持多行内容）
+            {
+              echo 'change_log<<CHANGE_LOG_EOF'
+              echo "$CHANGE_LOG"
+              echo 'CHANGE_LOG_EOF'
+            } >> "$GITHUB_OUTPUT"
+            
+            echo "✅ 检测到原仓库更新，共 $(echo "$CHANGE_LOG" | wc -l) 条提交" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "$CHANGE_LOG" | while read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done
           else
-            echo "has_update=false" >> $GITHUB_OUTPUT
-            echo "ℹ️ 原仓库无更新，跳过构建" >> $GITHUB_STEP_SUMMARY
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            echo "change_log=" >> "$GITHUB_OUTPUT"
+            echo "latest_commit=${SHORT_AFTER}" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ 原仓库无更新，跳过构建" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: 推送更新到本地仓库
@@ -110,7 +121,7 @@ jobs:
         run: sudo timedatectl set-timezone Asia/Shanghai
 
       - name: 检出仓库代码
-        uses: actions/checkout@v5 # 已升级到v5最新正式版
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: dev
@@ -135,7 +146,7 @@ jobs:
         run: echo "ORG_GRADLE_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: 安装Android SDK工具
-        uses: android-actions/setup-android@v4 # 已升级到v4最新正式版
+        uses: android-actions/setup-android@v4
         with:
           packages: ""
 
@@ -202,17 +213,17 @@ jobs:
 
           # 读取自定义版本号
           VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
           # 生成唯一Release标签
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date '+%Y%m%d')
-          echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
           # 生成本地时间格式的构建时间
-          echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
 
-      - name: 创建GitHub Release（所有APK单独展示）
+      - name: 创建GitHub Release（所有APK单独展示 + 完整更新日志）
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
@@ -227,12 +238,12 @@ jobs:
             - 版本号：v${{ steps.prepare_assets.outputs.version }}
             - 构建时间：${{ steps.prepare_assets.outputs.build_time }}
             - 触发来源：${{ github.event_name }}
+            - 最新提交：${{ needs.sync-upstream.outputs.latest_commit }}
 
             ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
-            ## 📥 本次同步更新
-            - 原仓库最新提交：{0}
-            - 提交说明：{1}
-            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
+            ## 📥 本次同步更新（全部提交）
+            {0}
+            ', needs.sync-upstream.outputs.change_log) || '' }}
 
             ## 📱 下载说明
             | 架构版本 | 适用设备 |
@@ -269,7 +280,6 @@ jobs:
 
           echo "$releases" | tail -n $delete_count | while read -r release_id tag_name; do
             echo "  删除版本: $tag_name" >> "$GITHUB_STEP_SUMMARY"
-            # 增加容错，失败不中断流程
             curl -s -f -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/releases/$release_id" || true
             curl -s -f -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
@@ -279,14 +289,14 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "✅ 旧版本清理完成" >> "$GITHUB_STEP_SUMMARY"
 
-  # 任务3：发送邮件通知
+  # 任务3：发送邮件通知（带完整更新日志）
   notify-email:
     runs-on: ubuntu-latest
     needs: [ sync-upstream, build-and-sign ]
     if: ${{ always() && needs.build-and-sign.result != 'skipped' }}
     steps:
       - name: 发送构建结果邮件
-        uses: dawidd6/action-send-mail@v6 # 已升级到v6最新正式版
+        uses: dawidd6/action-send-mail@v6
         with:
           server_address: smtp.qq.com
           server_port: 465
@@ -305,7 +315,8 @@ jobs:
             📦 版本信息
             - 版本号：{3}
             - 构建时间：{4}
-            ', github.server_url, github.repository, needs.build-and-sign.outputs.tag_name, needs.build-and-sign.outputs.version, needs.build-and-sign.outputs.build_time) || format('
+            - 最新提交：{5}
+            ', github.server_url, github.repository, needs.build-and-sign.outputs.tag_name, needs.build-and-sign.outputs.version, needs.build-and-sign.outputs.build_time, needs.sync-upstream.outputs.latest_commit) || format('
             🔗 错误日志：{0}/{1}/actions/runs/{2}
             
             🚨 常见失败原因
@@ -320,10 +331,9 @@ jobs:
             ', github.server_url, github.repository, github.run_id) }}
 
             ${{ needs.sync-upstream.outputs.has_update == 'true' && format('
-            📥 本次同步信息
-            - 原仓库提交：{0}
-            - 提交说明：{1}
-            ', needs.sync-upstream.outputs.latest_commit, needs.sync-upstream.outputs.commit_message) || '' }}
+            📥 本次同步全部提交
+            {0}
+            ', needs.sync-upstream.outputs.change_log) || '' }}
 
   # 任务4：构建失败摘要补充
   notify-failure:
