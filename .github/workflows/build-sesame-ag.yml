@@ -378,7 +378,7 @@ jobs:
           to: ${{ secrets.EMAIL_RECEIVER }}
           from: GitHub Actions 自动构建
           subject: ${{ steps.gen_email.outputs.subject }}
-          body_path: email-body.txt
+          body: file://email-body.txt
 
   # 任务4：构建失败摘要补充
   notify-failure:
