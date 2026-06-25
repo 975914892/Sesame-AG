@@ -33,6 +33,7 @@ jobs:
     outputs:
       has_update: ${{ steps.check_update.outputs.has_update }}
       latest_commit: ${{ steps.check_update.outputs.latest_commit }}
+      latest_commit_msg: ${{ steps.check_update.outputs.latest_commit_msg }}
       change_log: ${{ steps.check_update.outputs.change_log }}
     steps:
       - name: 检出仓库代码
@@ -68,6 +69,7 @@ jobs:
           if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
             echo "has_update=true" >> "$GITHUB_OUTPUT"
             echo "latest_commit=${SHORT_AFTER}" >> "$GITHUB_OUTPUT"
+            echo "latest_commit_msg=$(git log --oneline -1 "$AFTER_SHA" | cut -d' ' -f2-)" >> "$GITHUB_OUTPUT"
 
             CHANGE_LOG=$(git log --oneline "${BEFORE_SHA}..${AFTER_SHA}")
 
@@ -87,6 +89,7 @@ jobs:
             echo "has_update=false" >> "$GITHUB_OUTPUT"
             echo "change_log=" >> "$GITHUB_OUTPUT"
             echo "latest_commit=${SHORT_AFTER}" >> "$GITHUB_OUTPUT"
+            echo "latest_commit_msg=$(git log --oneline -1 "$AFTER_SHA" | cut -d' ' -f2-)" >> "$GITHUB_OUTPUT"
             echo "ℹ️ 原仓库无更新，跳过构建" >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -220,6 +223,7 @@ jobs:
           BUILD_TIME: ${{ steps.prepare_assets.outputs.build_time }}
           EVENT_NAME: ${{ github.event_name }}
           LATEST_COMMIT: ${{ needs.sync-upstream.outputs.latest_commit }}
+          LATEST_COMMIT_MSG: ${{ needs.sync-upstream.outputs.latest_commit_msg }}
           HAS_UPDATE: ${{ needs.sync-upstream.outputs.has_update }}
           CHANGE_LOG: ${{ needs.sync-upstream.outputs.change_log }}
         run: |
@@ -230,7 +234,7 @@ jobs:
           echo "- 版本号：v${VERSION}" >> release-body.md
           echo "- 构建时间：${BUILD_TIME}" >> release-body.md
           echo "- 触发来源：${EVENT_NAME}" >> release-body.md
-          echo "- 最新提交：${LATEST_COMMIT}" >> release-body.md
+          echo "- 最新提交：\`${LATEST_COMMIT}\` ${LATEST_COMMIT_MSG}" >> release-body.md
 
           if [ "$HAS_UPDATE" == "true" ]; then
             echo "" >> release-body.md
@@ -323,6 +327,7 @@ jobs:
           VERSION: ${{ needs.build-and-sign.outputs.version }}
           BUILD_TIME: ${{ needs.build-and-sign.outputs.build_time }}
           LATEST_COMMIT: ${{ needs.sync-upstream.outputs.latest_commit }}
+          LATEST_COMMIT_MSG: ${{ needs.sync-upstream.outputs.latest_commit_msg }}
           HAS_UPDATE: ${{ needs.sync-upstream.outputs.has_update }}
           CHANGE_LOG: ${{ needs.sync-upstream.outputs.change_log }}
         run: |
@@ -336,7 +341,7 @@ jobs:
               echo "📦 版本信息"
               echo "- 版本号：${VERSION}"
               echo "- 构建时间：${BUILD_TIME}"
-              echo "- 最新提交：${LATEST_COMMIT}"
+              echo "- 最新提交：${LATEST_COMMIT} ${LATEST_COMMIT_MSG}"
             } > email-body.txt
           else
             SUBJECT="❌ Sesame-AG 构建失败"
