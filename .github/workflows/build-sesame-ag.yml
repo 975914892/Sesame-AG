@@ -32,8 +32,6 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     outputs:
       has_update: ${{ steps.check_update.outputs.has_update }}
-      latest_commit: ${{ steps.check_update.outputs.latest_commit }}
-      latest_commit_msg: ${{ steps.check_update.outputs.latest_commit_msg }}
       change_log: ${{ steps.check_update.outputs.change_log }}
     steps:
       - name: 检出仓库代码
@@ -68,8 +66,6 @@ jobs:
 
           if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
             echo "has_update=true" >> "$GITHUB_OUTPUT"
-            echo "latest_commit=${SHORT_AFTER}" >> "$GITHUB_OUTPUT"
-            echo "latest_commit_msg=$(git log --oneline -1 "$AFTER_SHA" | cut -d' ' -f2-)" >> "$GITHUB_OUTPUT"
 
             CHANGE_LOG=$(git log --oneline "${BEFORE_SHA}..${AFTER_SHA}")
 
@@ -88,8 +84,6 @@ jobs:
           else
             echo "has_update=false" >> "$GITHUB_OUTPUT"
             echo "change_log=" >> "$GITHUB_OUTPUT"
-            echo "latest_commit=${SHORT_AFTER}" >> "$GITHUB_OUTPUT"
-            echo "latest_commit_msg=$(git log --oneline -1 "$AFTER_SHA" | cut -d' ' -f2-)" >> "$GITHUB_OUTPUT"
             echo "ℹ️ 原仓库无更新，跳过构建" >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -107,8 +101,12 @@ jobs:
       version: ${{ steps.prepare_assets.outputs.version }}
       tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
       build_time: ${{ steps.prepare_assets.outputs.build_time }}
-      latest_commit: ${{ steps.prepare_assets.outputs.latest_commit }}
-      latest_commit_msg: ${{ steps.prepare_assets.outputs.latest_commit_msg }}
+      dev_latest_commit: ${{ steps.prepare_assets.outputs.dev_latest_commit }}
+      dev_latest_commit_msg: ${{ steps.prepare_assets.outputs.dev_latest_commit_msg }}
+      dev_latest_commit_time: ${{ steps.prepare_assets.outputs.dev_latest_commit_time }}
+      main_latest_commit: ${{ steps.prepare_assets.outputs.main_latest_commit }}
+      main_latest_commit_msg: ${{ steps.prepare_assets.outputs.main_latest_commit_msg }}
+      main_latest_commit_time: ${{ steps.prepare_assets.outputs.main_latest_commit_time }}
     if: |
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -218,14 +216,26 @@ jobs:
 
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-          # 获取原仓库最新提交哈希和说明（永远显示原仓库的最新提交，不是我们自己的）
+          # 获取原仓库 main 和 dev 分支的最新提交信息（永远显示原仓库的，不是我们自己的）
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
-          git fetch upstream dev --quiet
+          git fetch upstream --quiet
           
-          UPSTREAM_SHA=$(git rev-parse --short upstream/dev)
-          echo "latest_commit=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
-          echo "latest_commit_msg=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
+          # dev 分支
+          DEV_SHA=$(git rev-parse --short upstream/dev)
+          DEV_MSG=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)
+          DEV_TIME=$(git log -1 --format="%ci" upstream/dev)
+          echo "dev_latest_commit=${DEV_SHA}" >> $GITHUB_OUTPUT
+          echo "dev_latest_commit_msg=${DEV_MSG}" >> $GITHUB_OUTPUT
+          echo "dev_latest_commit_time=${DEV_TIME}" >> $GITHUB_OUTPUT
+          
+          # main 分支
+          MAIN_SHA=$(git rev-parse --short upstream/main)
+          MAIN_MSG=$(git log --oneline -1 upstream/main | cut -d' ' -f2-)
+          MAIN_TIME=$(git log -1 --format="%ci" upstream/main)
+          echo "main_latest_commit=${MAIN_SHA}" >> $GITHUB_OUTPUT
+          echo "main_latest_commit_msg=${MAIN_MSG}" >> $GITHUB_OUTPUT
+          echo "main_latest_commit_time=${MAIN_TIME}" >> $GITHUB_OUTPUT
 
       # ✅ 修复：用shell脚本生成Release说明文件，避免YAML多行字符串问题
       - name: 生成Release说明文件
@@ -233,8 +243,12 @@ jobs:
           VERSION: ${{ steps.prepare_assets.outputs.version }}
           BUILD_TIME: ${{ steps.prepare_assets.outputs.build_time }}
           EVENT_NAME: ${{ github.event_name }}
-          LATEST_COMMIT: ${{ steps.prepare_assets.outputs.latest_commit }}
-          LATEST_COMMIT_MSG: ${{ steps.prepare_assets.outputs.latest_commit_msg }}
+          DEV_LATEST_COMMIT: ${{ steps.prepare_assets.outputs.dev_latest_commit }}
+          DEV_LATEST_COMMIT_MSG: ${{ steps.prepare_assets.outputs.dev_latest_commit_msg }}
+          DEV_LATEST_COMMIT_TIME: ${{ steps.prepare_assets.outputs.dev_latest_commit_time }}
+          MAIN_LATEST_COMMIT: ${{ steps.prepare_assets.outputs.main_latest_commit }}
+          MAIN_LATEST_COMMIT_MSG: ${{ steps.prepare_assets.outputs.main_latest_commit_msg }}
+          MAIN_LATEST_COMMIT_TIME: ${{ steps.prepare_assets.outputs.main_latest_commit_time }}
           HAS_UPDATE: ${{ needs.sync-upstream.outputs.has_update }}
           CHANGE_LOG: ${{ needs.sync-upstream.outputs.change_log }}
         run: |
@@ -245,7 +259,18 @@ jobs:
           echo "- 版本号：v${VERSION}" >> release-body.md
           echo "- 构建时间：${BUILD_TIME}" >> release-body.md
           echo "- 触发来源：${EVENT_NAME}" >> release-body.md
-          echo "- 最新提交：\`${LATEST_COMMIT}\` ${LATEST_COMMIT_MSG}" >> release-body.md
+          echo "" >> release-body.md
+          echo "## 📝 原仓库最新提交" >> release-body.md
+          echo "" >> release-body.md
+          echo "### dev 分支" >> release-body.md
+          echo "- 提交哈希：\`${DEV_LATEST_COMMIT}\`" >> release-body.md
+          echo "- 提交说明：${DEV_LATEST_COMMIT_MSG}" >> release-body.md
+          echo "- 提交时间：${DEV_LATEST_COMMIT_TIME}" >> release-body.md
+          echo "" >> release-body.md
+          echo "### main 分支" >> release-body.md
+          echo "- 提交哈希：\`${MAIN_LATEST_COMMIT}\`" >> release-body.md
+          echo "- 提交说明：${MAIN_LATEST_COMMIT_MSG}" >> release-body.md
+          echo "- 提交时间：${MAIN_LATEST_COMMIT_TIME}" >> release-body.md
 
           if [ "$HAS_UPDATE" == "true" ]; then
             echo "" >> release-body.md
@@ -337,8 +362,12 @@ jobs:
           TAG_NAME: ${{ needs.build-and-sign.outputs.tag_name }}
           VERSION: ${{ needs.build-and-sign.outputs.version }}
           BUILD_TIME: ${{ needs.build-and-sign.outputs.build_time }}
-          LATEST_COMMIT: ${{ needs.build-and-sign.outputs.latest_commit }}
-          LATEST_COMMIT_MSG: ${{ needs.build-and-sign.outputs.latest_commit_msg }}
+          DEV_LATEST_COMMIT: ${{ needs.build-and-sign.outputs.dev_latest_commit }}
+          DEV_LATEST_COMMIT_MSG: ${{ needs.build-and-sign.outputs.dev_latest_commit_msg }}
+          DEV_LATEST_COMMIT_TIME: ${{ needs.build-and-sign.outputs.dev_latest_commit_time }}
+          MAIN_LATEST_COMMIT: ${{ needs.build-and-sign.outputs.main_latest_commit }}
+          MAIN_LATEST_COMMIT_MSG: ${{ needs.build-and-sign.outputs.main_latest_commit_msg }}
+          MAIN_LATEST_COMMIT_TIME: ${{ needs.build-and-sign.outputs.main_latest_commit_time }}
           HAS_UPDATE: ${{ needs.sync-upstream.outputs.has_update }}
           CHANGE_LOG: ${{ needs.sync-upstream.outputs.change_log }}
         run: |
@@ -352,7 +381,18 @@ jobs:
               echo "📦 版本信息"
               echo "- 版本号：${VERSION}"
               echo "- 构建时间：${BUILD_TIME}"
-              echo "- 最新提交：${LATEST_COMMIT} ${LATEST_COMMIT_MSG}"
+              echo ""
+              echo "📝 原仓库最新提交"
+              echo ""
+              echo "【dev 分支】"
+              echo "- 提交哈希：${DEV_LATEST_COMMIT}"
+              echo "- 提交说明：${DEV_LATEST_COMMIT_MSG}"
+              echo "- 提交时间：${DEV_LATEST_COMMIT_TIME}"
+              echo ""
+              echo "【main 分支】"
+              echo "- 提交哈希：${MAIN_LATEST_COMMIT}"
+              echo "- 提交说明：${MAIN_LATEST_COMMIT_MSG}"
+              echo "- 提交时间：${MAIN_LATEST_COMMIT_TIME}"
             } > email-body.txt
           else
             SUBJECT="❌ Sesame-AG 构建失败"
