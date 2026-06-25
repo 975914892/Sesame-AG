@@ -107,6 +107,8 @@ jobs:
       version: ${{ steps.prepare_assets.outputs.version }}
       tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
       build_time: ${{ steps.prepare_assets.outputs.build_time }}
+      latest_commit: ${{ steps.prepare_assets.outputs.latest_commit }}
+      latest_commit_msg: ${{ steps.prepare_assets.outputs.latest_commit_msg }}
     if: |
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -216,14 +218,18 @@ jobs:
 
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
+          # 获取最新提交哈希和说明（不依赖sync-upstream，push事件也能正常显示）
+          echo "latest_commit=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "latest_commit_msg=$(git log --oneline -1 | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
+
       # ✅ 修复：用shell脚本生成Release说明文件，避免YAML多行字符串问题
       - name: 生成Release说明文件
         env:
           VERSION: ${{ steps.prepare_assets.outputs.version }}
           BUILD_TIME: ${{ steps.prepare_assets.outputs.build_time }}
           EVENT_NAME: ${{ github.event_name }}
-          LATEST_COMMIT: ${{ needs.sync-upstream.outputs.latest_commit }}
-          LATEST_COMMIT_MSG: ${{ needs.sync-upstream.outputs.latest_commit_msg }}
+          LATEST_COMMIT: ${{ steps.prepare_assets.outputs.latest_commit }}
+          LATEST_COMMIT_MSG: ${{ steps.prepare_assets.outputs.latest_commit_msg }}
           HAS_UPDATE: ${{ needs.sync-upstream.outputs.has_update }}
           CHANGE_LOG: ${{ needs.sync-upstream.outputs.change_log }}
         run: |
@@ -326,8 +332,8 @@ jobs:
           TAG_NAME: ${{ needs.build-and-sign.outputs.tag_name }}
           VERSION: ${{ needs.build-and-sign.outputs.version }}
           BUILD_TIME: ${{ needs.build-and-sign.outputs.build_time }}
-          LATEST_COMMIT: ${{ needs.sync-upstream.outputs.latest_commit }}
-          LATEST_COMMIT_MSG: ${{ needs.sync-upstream.outputs.latest_commit_msg }}
+          LATEST_COMMIT: ${{ needs.build-and-sign.outputs.latest_commit }}
+          LATEST_COMMIT_MSG: ${{ needs.build-and-sign.outputs.latest_commit_msg }}
           HAS_UPDATE: ${{ needs.sync-upstream.outputs.has_update }}
           CHANGE_LOG: ${{ needs.sync-upstream.outputs.change_log }}
         run: |
