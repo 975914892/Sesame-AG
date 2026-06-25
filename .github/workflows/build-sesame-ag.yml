@@ -218,9 +218,14 @@ jobs:
 
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-          # 获取最新提交哈希和说明（不依赖sync-upstream，push事件也能正常显示）
-          echo "latest_commit=${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "latest_commit_msg=$(git log --oneline -1 | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
+          # 获取原仓库最新提交哈希和说明（永远显示原仓库的最新提交，不是我们自己的）
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/Sesame-AG/Sesame-AG.git
+          git fetch upstream dev --quiet
+          
+          UPSTREAM_SHA=$(git rev-parse --short upstream/dev)
+          echo "latest_commit=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
+          echo "latest_commit_msg=$(git log --oneline -1 upstream/dev | cut -d' ' -f2-)" >> $GITHUB_OUTPUT
 
       # ✅ 修复：用shell脚本生成Release说明文件，避免YAML多行字符串问题
       - name: 生成Release说明文件
