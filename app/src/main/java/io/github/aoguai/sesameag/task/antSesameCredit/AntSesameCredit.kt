@@ -105,6 +105,7 @@ class AntSesameCredit : ModelTask() {
         val status: String,
         val taskId: String?,
         val taskIdCandidates: List<String>,
+        val needSignUp: Boolean,
         val needManuallyReceiveAward: Boolean
     ) {
         fun describeCandidates(): String {
@@ -1849,6 +1850,13 @@ class AntSesameCredit : ModelTask() {
                     homeQueryResult.optJSONArray("taskStatusList"),
                     "home.taskStatusList"
                 )
+                appendZhimaTreeTaskItems(
+                    items,
+                    currentTaskRefs,
+                    seenTaskKeys,
+                    homeQueryResult.optJSONArray("staticSceneGuideTaskList"),
+                    "home.staticSceneGuideTaskList"
+                )
             }
 
             val rentTaskDetailList = response.optJSONObject("rentTaskDetailList")
@@ -1875,6 +1883,7 @@ class AntSesameCredit : ModelTask() {
                 return TaskFlowPhase.READY_TO_COMPLETE
             }
             val needManualReceive = item.raw?.optBoolean("needManuallyReceiveAward", true) ?: true
+            val needSignUp = item.raw?.optBoolean("needSignUp", false) ?: false
             return when (item.status) {
                 "TO_RECEIVE" -> TaskFlowPhase.REWARD_READY
                 "RECEIVE_SUCCESS" -> if (needManualReceive) {
@@ -1882,8 +1891,16 @@ class AntSesameCredit : ModelTask() {
                 } else {
                     TaskFlowPhase.TERMINAL
                 }
+                "NONE_SIGNUP",
+                "UN_SIGNUP" -> if (needSignUp) {
+                    TaskFlowPhase.SIGNUP_REQUIRED
+                } else {
+                    TaskFlowPhase.READY_TO_COMPLETE
+                }
                 "NOT_DONE",
-                "SIGNUP_COMPLETE" -> TaskFlowPhase.SIGNUP_COMPLETE
+                "SIGNUP_COMPLETE",
+                "SIGNUP_COMPLETED" -> TaskFlowPhase.SIGNUP_COMPLETE
+                "WAIT_COMPLETE" -> TaskFlowPhase.READY_TO_COMPLETE
                 "DONE",
                 "COMPLETE",
                 "FINISHED",
@@ -1897,7 +1914,11 @@ class AntSesameCredit : ModelTask() {
                 return item.id in handledAdBizIds
             }
             val phase = mapPhase(item)
-            if ((phase == TaskFlowPhase.SIGNUP_COMPLETE || phase == TaskFlowPhase.REWARD_READY) && item.id.isBlank()) {
+            if ((phase == TaskFlowPhase.SIGNUP_REQUIRED ||
+                    phase == TaskFlowPhase.SIGNUP_COMPLETE ||
+                    phase == TaskFlowPhase.REWARD_READY) &&
+                item.id.isBlank()
+            ) {
                 logZhimaTreeSkipOnce(item, "跳过无有效任务ID")
                 return true
             }
@@ -1928,6 +1949,21 @@ class AntSesameCredit : ModelTask() {
                 spaceCode = item.raw?.optString("spaceCode").orEmpty().takeIf { it.isNotBlank() }
             )
             return finishZhimaTreeAdTaskResult(taskRef)
+        }
+
+        override fun signup(item: TaskFlowItem): TaskFlowActionResult {
+            val taskRef = item.toZhimaTreeTaskRef()
+            val taskId = taskRef.taskId
+            if (taskId.isNullOrBlank()) {
+                return missingZhimaTreeTaskIdResult(item, "signup")
+            }
+            val signupResult = doTaskActionResult(taskId, "signup")
+            if (signupResult.success) {
+                val rewardSuffix = taskRef.prizeName.takeIf { it.isNotBlank() }?.let { " #$it" }.orEmpty()
+                Log.sesame("芝麻树🌳[报名成功] ${taskRef.title}$rewardSuffix")
+                return TaskFlowActionResult.success()
+            }
+            return zhimaTreeActionFailureResult(item, "signup", signupResult)
         }
 
         override fun send(item: TaskFlowItem): TaskFlowActionResult {
@@ -2096,6 +2132,7 @@ class AntSesameCredit : ModelTask() {
                 .put("status", status)
                 .put("taskId", taskId ?: "")
                 .put("taskIdCandidates", JSONArray(taskIdCandidates))
+                .put("needSignUp", needSignUp)
                 .put("needManuallyReceiveAward", needManuallyReceiveAward)
                 .put("_sourceList", sourceName)
                 .put("_syntheticReceive", syntheticReceive)
@@ -2145,6 +2182,7 @@ class AntSesameCredit : ModelTask() {
                 status = status,
                 taskId = normalizeZhimaTreeTaskId(raw.optString("taskId").ifBlank { id }),
                 taskIdCandidates = candidates.ifEmpty { listOf(id) },
+                needSignUp = raw.optBoolean("needSignUp", false),
                 needManuallyReceiveAward = raw.optBoolean("needManuallyReceiveAward", true)
             )
         }
@@ -2357,17 +2395,10 @@ class AntSesameCredit : ModelTask() {
     }
 
     private fun buildZhimaTreeTaskRef(task: JSONObject): ZhimaTreeTaskRef? {
-        val sendCampTriggerType = task.optString("sendCampTriggerType")
-        if ("EVENT_TRIGGER" == sendCampTriggerType) {
-            return null
-        }
         val taskBaseInfo = task.optJSONObject("taskBaseInfo") ?: return null
         val taskIdCandidates = collectZhimaTreeTaskIdCandidates(task, taskBaseInfo)
         val taskId = taskIdCandidates.mapNotNull { normalizeZhimaTreeTaskId(it) }.firstOrNull()
-        var title = taskBaseInfo.optString("appletName")
-        if (title.isEmpty()) {
-            title = taskBaseInfo.optString("title", taskId ?: "未知任务")
-        }
+        val title = resolveZhimaTreeTaskTitle(task, taskBaseInfo, taskId ?: "未知任务")
         if (title.contains("邀请") || title.contains("下单") || title.contains("开通")) {
             return null
         }
@@ -2377,8 +2408,36 @@ class AntSesameCredit : ModelTask() {
             status = task.optString("taskProcessStatus"),
             taskId = taskId,
             taskIdCandidates = taskIdCandidates,
+            needSignUp = resolveZhimaTreeNeedSignUp(task),
             needManuallyReceiveAward = task.optBoolean("needManuallyReceiveAward", true)
         )
+    }
+
+    private fun resolveZhimaTreeTaskTitle(task: JSONObject, taskBaseInfo: JSONObject, defaultTitle: String): String {
+        val taskMaterial = task.optJSONObject("taskMaterial")
+        val morphoDetail = task.optJSONObject("taskExtProps")
+            ?.opt("TASK_MORPHO_DETAIL")
+            ?.let { detail ->
+                when (detail) {
+                    is JSONObject -> detail
+                    is String -> parseJSONObjectOrNull(detail)
+                    else -> null
+                }
+            }
+        return taskMaterial?.optString("title").orEmpty()
+            .ifBlank { morphoDetail?.optString("title").orEmpty() }
+            .ifBlank { taskBaseInfo.optString("appletName") }
+            .ifBlank { taskBaseInfo.optString("title") }
+            .ifBlank { defaultTitle }
+    }
+
+    private fun resolveZhimaTreeNeedSignUp(task: JSONObject): Boolean {
+        if (task.optBoolean("needSignUp", false)) {
+            return true
+        }
+        val taskExtProps = task.optJSONObject("taskExtProps") ?: return false
+        return taskExtProps.optBoolean("needSignUp", false) ||
+            taskExtProps.optString("needSignUp").equals("true", ignoreCase = true)
     }
 
     private fun normalizeZhimaTreeTaskId(rawTaskId: String?): String? {
