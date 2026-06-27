@@ -40,7 +40,7 @@ private val sesameCreditDefaultBlacklist = setOf(
     "zml_xiangjiangshikaipao_renwu", // 参数错误：promiseActivityExtCheck
     "去玩向僵尸开炮",          // 参数错误：promiseActivityExtCheck
     "AP17345296|芝麻树-蚂蚁阿福逛一逛唤活任务", // 芝麻树 NONE_SIGNUP 未知状态
-    "zml_eleme_diaoyu_erfang|去淘宝闪购果园", // OP_REPEAT_CHECK 频控任务
+    "zml_diantao_renwu_sanfang|去点淘逛一逛", // pushActivity 参数错误：promiseActivityExtCheck
     "zml_longjizhicheng_renwu|去玩龙迹之城", // 参数错误：promiseActivityExtCheck
     "zml_jihewangguo_renwu|去玩几何王国", // 参数错误：promiseActivityExtCheck
     "zml_langmancanting_renwu|去玩浪漫餐厅", // 参数错误：promiseActivityExtCheck；taskFeedback成功不代表pushActivity闭环成功
@@ -50,6 +50,17 @@ private val sesameCreditDefaultBlacklist = setOf(
     "zml_fengkuangshuishijie_renwu|去玩疯狂水世界", // 参数错误：promiseActivityExtCheck
     "zml_baoweixiangrikui_renwu|去玩保卫向日葵", // 参数错误：promiseActivityExtCheck
     "zml_sanguobingheshidai_renwu|去玩三国冰河时代", // 参数错误：promiseActivityExtCheck
+    // 芝麻树 SIGNUP_SEND 游戏/导流任务
+    "AP11327686|秒杀浏览",
+    "AP18344041|去玩我的***世界",
+    "AP15358968|去玩斗破苍穹",
+    "AP14359058|去玩青云诀之伏魔",
+    "AP18344357|去玩梦幻消除战",
+    "AP13358931|去玩寻道大千",
+    "AP16358982|去玩时光杂货店",
+    "AP13358969|去玩烈焰觉醒",
+    "AP17344131|去玩生存33天",
+    "AP17359071|去玩灵画师",
     "AP11313161|首次订阅养老金动态及福利", // 成长锦囊新任务中心 NORMAL_TASK，需真实订阅/社保业务
     "AP13350341|去查看我的借呗额度", // 成长锦囊新任务中心 NORMAL_TASK，借贷业务
     "AP11327894|完成1笔借呗支用", // 成长锦囊新任务中心 NORMAL_TASK，借贷支用
@@ -105,6 +116,7 @@ private val orchardDefaultBlacklist = setOf(
     "babafarm_cjmk_xdujdd15",           // 去游戏中心玩游戏：不支持rpc调用
     "LINGHUOTIAOKONG",                  // 逛一逛新浪微博
     "ORCHARD_NORMAL_XIANYU_DUAN",       // 逛一逛闲鱼
+    "ANTFARM_ORCHARD_NORMAL_YITAO",     // 逛一逛一淘
     "ORCHARD_NORMAL_TAOBAOTAOLIPAI_VISIT|逛一逛淘宝拍照", // 不支持rpc调用
     "ORCHARD_NORMAL_TAOBAO26_618|去淘金币赢20亿", // 不支持rpc调用，缺少稳定完成RPC闭环
     "TAOBAO|逛一逛签到领现金", // 不支持rpc调用，缺少稳定完成RPC闭环
@@ -232,6 +244,7 @@ private val forestDefaultBlacklist = setOf(
     "FKSSJ_LJRWdiaoyu_HUOLI", // 水世界手动钓鱼成功10次：不支持rpc调用
     "YBLB_TASK_QUDONG",    // 玩一步两步通关1次：不支持rpc调用
     "MHXCZ_TASK_QUDONG|梦幻消除战做1个订单", // 不支持rpc调用，缺少稳定完成RPC闭环
+    "XJSKP_TASK_QUDONG|玩向僵尸开炮通关1次", // 400000040 不支持rpc调用，缺少稳定完成RPC闭环
     "GYG_AQapp_202511|去蚂蚁阿福揭秘真相", // 不支持rpc调用，缺少稳定完成RPC闭环
     "BWXRK_TASK_QUDONG|保卫向日葵通过1关", // 不支持rpc调用，缺少稳定完成RPC闭环
     "GYG_TAOBAOzhibo_202606|去淘宝花花乐领红包", // 不支持rpc调用，缺少稳定完成RPC闭环
@@ -293,7 +306,6 @@ private val stallDefaultBlacklist = setOf(
 
 private val yuebaoDefaultBlacklist = setOf(
     // 余额宝
-    "余额宝体验金签到(10元)",
     "添加余额宝小组件",
     "让余额宝自动赚更多",
     "去余额宝攒一笔钱",
@@ -352,10 +364,7 @@ private val memberDefaultBlacklist = setOf(
     "2021003184609526#pplwg_game_pass_level_every_1#5|玩泡泡龙王国",
     "JYMJFTE_TASK", // 商家真实业务/外跳任务
     "TJZMZJ_TASK",
-    "TJBLLRWX_TASK",
-    "TBSGLLRW_TASK",
     "HHKLLRW_TASK",
-    "WSYLBLLRW_TASK",
     "ZMSLLRW_TASK",
     "zzsjxyx|玩主宰世界|通过8关主线关卡",
     "yzsc|玩约战沙城|完成5个日常活动",
@@ -366,10 +375,7 @@ private val memberDefaultBlacklist = setOf(
     "zcylt|玩这城有良田|举办4次庙会",
     "hlxxx|玩欢乐消消消|完成6个夜市任务",
     "营业执照",
-    "淘宝闪购",
-    "淘金币",
-    "花花卡",
-    "网商银行"
+    "花花卡"
 )
 
 private val insuredDefaultBlacklist = setOf(

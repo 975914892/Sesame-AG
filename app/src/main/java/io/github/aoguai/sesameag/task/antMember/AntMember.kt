@@ -286,7 +286,8 @@ class AntMember : ModelTask() {
         InsuredTaskCenterConfig("AP16236844", "TASK_LIST", "GIFT_GOLD_NORMAL_TASK_CONTROL"),
         InsuredTaskCenterConfig("AP19236833", "TOP_LIST", "GIFT_GOLD_TOP_TASK_CONTROL"),
         InsuredTaskCenterConfig("AP19301319", "BZJ_SWAP_TASK_CONSULT_CONTROL", "BZJ_SWAP_TASK_CONSULT_CONTROL"),
-        InsuredTaskCenterConfig("AP12301346", "BZJ_SOFT_TASK_CONSULT_CONTROL", "BZJ_SOFT_TASK_CONSULT_CONTROL")
+        InsuredTaskCenterConfig("AP12301346", "BZJ_SOFT_TASK_CONSULT_CONTROL", "BZJ_SOFT_TASK_CONSULT_CONTROL"),
+        InsuredTaskCenterConfig("AP14273842", "BZJ_XUBAO_TASK_CONSULT")
     )
 
     override fun getFields(): ModelFields {
@@ -4325,7 +4326,6 @@ class AntMember : ModelTask() {
     private fun isGoldTicketKnownWelfareAutoTask(task: JSONObject): Boolean {
         return when (task.optString("taskId")) {
             "AP11249033", // 逛蛋定生财去签到
-            "AP10247402", // 逛逛稳健理财领红包
             "AP13250426", // 逛定期市场领红包
             "AP15280470", // 逛蚂蚁投教基地
             "AP16338809"  // 去芝麻攒粒兑权益
@@ -4415,7 +4415,7 @@ class AntMember : ModelTask() {
             val task = todoTasks.optJSONObject(i) ?: continue
             if (isGoldTicketKnownWelfareAutoTask(task) &&
                 isGoldTicketTaskPendingAutoStatus(task) &&
-                (isGoldTicketTaskRewardReady(task) || !isGoldTicketTaskBlacklisted(task))
+                !isGoldTicketTaskBlacklisted(task)
             ) {
                 pendingCount++
             }
@@ -4487,10 +4487,6 @@ class AntMember : ModelTask() {
             }
 
             val pendingRetryCount = countGoldTicketPendingWelfareAutoTasks(refreshedTodoTasks)
-            val confirmedAutoReceivedCount = (trackedAutoTaskCount - pendingRetryCount).coerceAtLeast(0)
-            if (confirmedAutoReceivedCount > 0) {
-                Log.member("黄金票🎫[福利中心任务自动领取] ${confirmedAutoReceivedCount}项")
-            }
             if (pendingRetryCount > 0) {
                 Log.member("黄金票🎫[福利中心任务保留下次重试] ${pendingRetryCount}项")
             }
@@ -4522,7 +4518,6 @@ class AntMember : ModelTask() {
         private var firstQueryConsumed = false
         private var autoReceivedCount = 0
         private val unsupportedTaskKeys = LinkedHashSet<String>()
-
         override fun query(): JSONObject {
             val todoTasks = if (!firstQueryConsumed) {
                 firstQueryConsumed = true
@@ -7477,6 +7472,7 @@ class AntMember : ModelTask() {
          */
         private suspend fun doMerchantMoreTask(): Unit = CoroutineUtils.run {
             try {
+                reconcileMerchantTaskBlacklist()
                 val adapter = MerchantMoreTaskFlowAdapter()
                 val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
                 if (adapter.taskListObserved && adapter.taskCount == 0) {
@@ -7568,11 +7564,16 @@ class AntMember : ModelTask() {
                 if (taskKey in receivedTaskKeys) {
                     return TaskFlowPhase.TERMINAL
                 }
-                return when (item.status.uppercase(Locale.ROOT)) {
-                    "NEED_RECEIVE" -> TaskFlowPhase.REWARD_READY
-                    "PROCESSING" -> if (resolveMerchantBizId(item.raw ?: JSONObject()).isNotBlank()) {
-                        TaskFlowPhase.REWARD_READY
-                    } else if (taskKey in handledTaskKeys) {
+                val rawTask = item.raw ?: JSONObject()
+                val normalizedStatus = item.status.uppercase(Locale.ROOT)
+                if (isMerchantRewardReadyStatus(rawTask, normalizedStatus)) {
+                    return TaskFlowPhase.REWARD_READY
+                }
+                return when (normalizedStatus) {
+                    "PROCESSING",
+                    "PROCESS",
+                    "WAIT_COMPLETE",
+                    "EXCHANGE_PENDING" -> if (taskKey in handledTaskKeys) {
                         TaskFlowPhase.TERMINAL
                     } else {
                         TaskFlowPhase.READY_TO_COMPLETE
@@ -7731,8 +7732,8 @@ class AntMember : ModelTask() {
 
                         val refreshedTask = queryMerchantTaskByCode(item.type) ?: break
                         val refreshedStatus = refreshedTask.optString("status")
-                        if ("NEED_RECEIVE" == refreshedStatus ||
-                            ("PROCESSING" != refreshedStatus && "UNRECEIVED" != refreshedStatus)
+                        if (isMerchantRewardReadyStatus(refreshedTask, refreshedStatus) ||
+                            !isMerchantCompletionPendingStatus(refreshedTask, refreshedStatus)
                         ) {
                             break
                         }
@@ -7900,7 +7901,7 @@ class AntMember : ModelTask() {
             targetCount: Int = 1
         ): Boolean = CoroutineUtils.run {
             try {
-                if ("UNRECEIVED" == taskStatus && !receiveMerchantTask(taskCode)) {
+                if ("UNRECEIVED" == taskStatus.uppercase(Locale.ROOT) && !receiveMerchantTask(taskCode)) {
                     return@run false
                 }
 
@@ -7931,7 +7932,9 @@ class AntMember : ModelTask() {
 
                         val refreshedTask = queryMerchantTaskByCode(taskCode) ?: break
                         val refreshedStatus = refreshedTask.optString("status")
-                        if ("NEED_RECEIVE" == refreshedStatus || ("PROCESSING" != refreshedStatus && "UNRECEIVED" != refreshedStatus)) {
+                        if (isMerchantRewardReadyStatus(refreshedTask, refreshedStatus) ||
+                            !isMerchantCompletionPendingStatus(refreshedTask, refreshedStatus)
+                        ) {
                             break
                         }
 
@@ -7967,6 +7970,40 @@ class AntMember : ModelTask() {
                 }
             }
             return null
+        }
+
+        private fun reconcileMerchantTaskBlacklist() {
+            clearMerchantTaskBlacklist("WSYLBLLRW_TASK", "逛网商银行，领福利金抵现金", "网商银行")
+            clearMerchantTaskBlacklist("TJBLLRWX_TASK", "去淘金币逛逛更省钱", "淘金币")
+            clearMerchantTaskBlacklist("TBSGLLRW_TASK", "去淘宝闪购抽免单卡", "淘宝闪购")
+        }
+
+        private fun clearMerchantTaskBlacklist(taskCode: String, taskTitle: String, legacyKeyword: String) {
+            TaskBlacklist.removeFromBlacklist(memberTaskBlacklistModule, taskCode)
+            TaskBlacklist.removeFromBlacklist(memberTaskBlacklistModule, taskCode, taskTitle)
+            TaskBlacklist.removeFromBlacklist(memberTaskBlacklistModule, taskTitle)
+            TaskBlacklist.removeFromBlacklist(memberTaskBlacklistModule, legacyKeyword)
+        }
+
+        private fun isMerchantRewardReadyStatus(task: JSONObject, status: String = task.optString("status")): Boolean {
+            return when (status.uppercase(Locale.ROOT)) {
+                "NEED_RECEIVE" -> true
+                "PROCESSING",
+                "EXCHANGE_PENDING" -> task.optString("pointBallId").isNotBlank() ||
+                    resolveMerchantBizId(task).isNotBlank()
+                else -> false
+            }
+        }
+
+        private fun isMerchantCompletionPendingStatus(task: JSONObject, status: String = task.optString("status")): Boolean {
+            return when (status.uppercase(Locale.ROOT)) {
+                "UNRECEIVED",
+                "PROCESS",
+                "WAIT_COMPLETE" -> true
+                "PROCESSING",
+                "EXCHANGE_PENDING" -> !isMerchantRewardReadyStatus(task, status)
+                else -> false
+            }
         }
 
         private enum class MerchantRpcFailureType {
@@ -8324,20 +8361,15 @@ class AntMember : ModelTask() {
                 return@run false
             }
 
-            if ("NEED_RECEIVE" == taskStatus) {
+            if (isMerchantRewardReadyStatus(task, taskStatus)) {
                 val pointBallId = task.optString("pointBallId")
                 if (pointBallId.isNotEmpty()) {
                     return@run receiveMerchantPointBall(pointBallId, title, reward)
                 }
-                return@run false
-            }
-
-            if ("PROCESSING" != taskStatus && "UNRECEIVED" != taskStatus) {
-                return@run false
-            }
-
-            val bizId = resolveMerchantBizId(task)
-            if ("PROCESSING" == taskStatus && bizId.isNotEmpty()) {
+                val bizId = resolveMerchantBizId(task)
+                if (bizId.isBlank()) {
+                    return@run false
+                }
                 val jo = JSONObject(AntMemberRpcCall.taskFinish(bizId))
                 val evaluation = evaluateMerchantRpc(jo)
                 if (evaluation.success) {
@@ -8346,6 +8378,10 @@ class AntMember : ModelTask() {
                 }
                 logMerchantRpcFailure("领取积分[$title]", jo, evaluation)
                 return@run evaluation.failureType == MerchantRpcFailureType.DUPLICATE_REWARD
+            }
+
+            if (!isMerchantCompletionPendingStatus(task, taskStatus)) {
+                return@run false
             }
 
             val actionCodes = resolveMerchantActionCodes(task)
