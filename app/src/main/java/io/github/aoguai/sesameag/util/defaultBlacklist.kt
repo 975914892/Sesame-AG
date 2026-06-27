@@ -364,8 +364,6 @@ private val memberDefaultBlacklist = setOf(
     "2021003184609526#pplwg_game_pass_level_every_1#5|玩泡泡龙王国",
     "JYMJFTE_TASK", // 商家真实业务/外跳任务
     "TJZMZJ_TASK",
-    "HHKLLRW_TASK",
-    "ZMSLLRW_TASK",
     "zzsjxyx|玩主宰世界|通过8关主线关卡",
     "yzsc|玩约战沙城|完成5个日常活动",
     "yblb2060170000359285|玩一步两步|通过2关",
@@ -374,8 +372,7 @@ private val memberDefaultBlacklist = setOf(
     "zlgz2060170000375112|玩猪了个猪|通过8关",
     "zcylt|玩这城有良田|举办4次庙会",
     "hlxxx|玩欢乐消消消|完成6个夜市任务",
-    "营业执照",
-    "花花卡"
+    "营业执照"
 )
 
 private val insuredDefaultBlacklist = setOf(

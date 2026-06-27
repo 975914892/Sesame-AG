@@ -10,6 +10,8 @@ import org.json.JSONObject
 
 private const val YEB_TASK_BLACKLIST_MODULE = "余额宝"
 private const val YEB_TASK_SOURCE_KEY = "_taskSource"
+private const val YEB_RECONCILED_SIGN_TASK_ID = "AP19348114"
+private const val YEB_RECONCILED_SIGN_TASK_TITLE = "去天天秒杀下1单"
 
 private enum class YebExpGoldTaskSource {
     PROMO_TASK_LIST,
@@ -18,6 +20,7 @@ private enum class YebExpGoldTaskSource {
 
 internal fun AntMember.handleYebExpGoldTasks() {
     try {
+        reconcileYebExpGoldTaskBlacklist()
         var handledTask = handleYebExpGoldCertVouchers()
         var queryResponse = JSONObject(AntMemberYebExpGoldRpcCall.queryYebExpGoldMain())
         if (!isYebExpGoldSuccess(queryResponse)) {
@@ -49,11 +52,6 @@ internal fun AntMember.handleYebExpGoldTasks() {
                 Log.member("任务在自动跳过列表(黑名单)中，跳过[$title]")
                 continue
             }
-            val unsupportedReason = getUnsupportedYebExpGoldTaskReason(task, title)
-            if (unsupportedReason != null) {
-                blacklistUnsupportedYebExpGoldTask(title, taskId, unsupportedReason)
-                continue
-            }
             val successFlag = StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_TASK_PREFIX + taskId
             if (Status.hasFlagToday(successFlag)) {
                 continue
@@ -71,6 +69,17 @@ internal fun AntMember.handleYebExpGoldTasks() {
                 "not_sign" -> {
                     if (shouldAutoReceiveYebExpGoldTask(task) &&
                         tryCompleteYebExpGoldTask(taskId, task, taskMap)
+                    ) {
+                        handledTask = true
+                        CoroutineUtils.sleepCompat(500L)
+                    } else {
+                        manualTaskTitles.add(title)
+                    }
+                }
+
+                "sign" -> {
+                    if (shouldAutoTriggerYebExpGoldTask(task) &&
+                        tryTriggerYebExpGoldTask(taskId, task, taskMap)
                     ) {
                         handledTask = true
                         CoroutineUtils.sleepCompat(500L)
@@ -233,15 +242,13 @@ private fun collectYebExpGoldManualTasks(
         if (isYebExpGoldTaskBlacklisted(title, taskId)) {
             continue
         }
-        val unsupportedReason = getUnsupportedYebExpGoldTaskReason(task, title)
-        if (unsupportedReason != null) {
-            blacklistUnsupportedYebExpGoldTask(title, taskId, unsupportedReason)
-            continue
-        }
-        if (getYebExpGoldTaskRunStatus(task) == "not_sign" &&
-            !shouldAutoReceiveYebExpGoldTask(task)
-        ) {
-            manualTaskTitles.add(title)
+        when (getYebExpGoldTaskRunStatus(task)) {
+            "not_sign" -> if (!shouldAutoReceiveYebExpGoldTask(task)) {
+                manualTaskTitles.add(title)
+            }
+            "sign" -> if (!shouldAutoTriggerYebExpGoldTask(task)) {
+                manualTaskTitles.add(title)
+            }
         }
     }
 }
@@ -343,49 +350,21 @@ private fun getYebExpGoldTodaySignItem(queryResponse: JSONObject): JSONObject? {
     return null
 }
 
-private fun getUnsupportedYebExpGoldTaskReason(task: JSONObject, title: String): String? {
-    val morphoDetail = getYebExpGoldMorphoDetail(task)
-    val link = task.optString("link")
-        .ifBlank { morphoDetail?.optString("link").orEmpty() }
-        .ifBlank { morphoDetail?.optString("taskGotoUrl").orEmpty() }
-    val buttonText = task.optString("buttonText")
-        .ifBlank { morphoDetail?.optString("buttonText").orEmpty() }
-    val taskMainTitle = morphoDetail?.optString("taskMainTitle").orEmpty()
-    val riskText = "$title $taskMainTitle $buttonText $link"
-    return when {
-        containsAnyYebExpGold(riskText, "widget", "小组件", "组件") ->
-            "小组件任务无自动闭环"
-        containsAnyYebExpGold(riskText, "存入", "攒入", "攒一笔", "开户", "开通", "下1单") ->
-            "存入/开户/下单类任务无自动闭环"
-        containsAnyYebExpGold(riskText, "app-download", "download", "下载", "外部app") ->
-            "外部App/下载任务无自动闭环"
-        containsAnyYebExpGold(riskText, "理财", "基金", "证券", "股票", "银行卡") ->
-            "理财/证券/绑卡引导无自动闭环"
-        else -> null
-    }
-}
-
-private fun getYebExpGoldMorphoDetail(task: JSONObject): JSONObject? {
-    val taskExtProps = task.optJSONObject("taskExtProps") ?: return null
-    return when (val detail = taskExtProps.opt("TASK_MORPHO_DETAIL")) {
-        is JSONObject -> detail
-        is String -> runCatching { JSONObject(detail) }.getOrNull()
-        else -> null
-    }
-}
-
-private fun containsAnyYebExpGold(value: String, vararg keywords: String): Boolean {
-    return keywords.any { value.contains(it, ignoreCase = true) }
-}
-
-private fun blacklistUnsupportedYebExpGoldTask(title: String, taskId: String, reason: String) {
-    TaskBlacklist.addToBlacklist(YEB_TASK_BLACKLIST_MODULE, taskId, title)
-    Log.member("余额宝体验金💰[当前暂无稳定自动完成闭环，已加入自动跳过列表(黑名单)]#$title(taskId=$taskId, reason=$reason)")
-}
-
 private fun shouldAutoReceiveYebExpGoldTask(task: JSONObject): Boolean {
     val buttonText = task.optString("buttonText")
     return buttonText.contains("领取") || buttonText.contains("领奖") || buttonText.contains("领")
+}
+
+private fun shouldAutoTriggerYebExpGoldTask(task: JSONObject): Boolean {
+    return getYebExpGoldTaskSource(task) == YebExpGoldTaskSource.MAIN_QUERY
+}
+
+private fun reconcileYebExpGoldTaskBlacklist() {
+    TaskBlacklist.removeFromBlacklist(
+        YEB_TASK_BLACKLIST_MODULE,
+        YEB_RECONCILED_SIGN_TASK_ID,
+        YEB_RECONCILED_SIGN_TASK_TITLE
+    )
 }
 
 private fun tryCompleteYebExpGoldTask(
@@ -397,11 +376,7 @@ private fun tryCompleteYebExpGoldTask(
     if (taskId.isBlank()) {
         return false
     }
-    val unsupportedReason = getUnsupportedYebExpGoldTaskReason(task, title)
-    if (unsupportedReason != null) {
-        blacklistUnsupportedYebExpGoldTask(title, taskId, unsupportedReason)
-        return false
-    }
+    val source = getYebExpGoldTaskSource(task)
 
     val prepareResponse = JSONObject(AntMemberYebExpGoldRpcCall.queryYebExpGoldMain(true, taskId))
     if (!isYebExpGoldSuccess(prepareResponse)) {
@@ -410,35 +385,35 @@ private fun tryCompleteYebExpGoldTask(
     }
 
     collectYebExpGoldTasks(prepareResponse, taskMap, YebExpGoldTaskSource.MAIN_QUERY)
-    val claimedByCompleteList = claimPendingYebExpGoldRewards(prepareResponse, taskMap)
-    if (claimedByCompleteList) {
+    if (claimPendingYebExpGoldRewards(prepareResponse, taskMap)) {
         return true
     }
 
-    val completeResponse = JSONObject(AntMemberYebExpGoldRpcCall.completeYebExpGoldTask(taskId))
-    if (!isYebExpGoldSuccess(completeResponse)) {
-        queryYebExpGoldTaskById(taskId)?.let { verifiedTask ->
-            taskMap[taskId] = verifiedTask
-            if (isYebExpGoldTaskReceived(verifiedTask)) {
-                Status.setFlagToday(StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_TASK_PREFIX + taskId)
-                return true
-            }
-        }
-        Log.member("余额宝体验金任务领取失败[$title]: ${getYebExpGoldErrorDesc(completeResponse)}")
+    val completeResponse = completeYebExpGoldTaskBySource(taskId, source)
+    return handleYebExpGoldTaskActionResult(taskId, title, source, taskMap, completeResponse)
+}
+
+private fun tryTriggerYebExpGoldTask(
+    taskId: String,
+    task: JSONObject,
+    taskMap: MutableMap<String, JSONObject>
+): Boolean {
+    if (taskId.isBlank()) {
+        return false
+    }
+    val source = getYebExpGoldTaskSource(task)
+    if (source != YebExpGoldTaskSource.MAIN_QUERY) {
         return false
     }
 
-    logYebExpGoldRewards(title, completeResponse)
-    Status.setFlagToday(StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_TASK_PREFIX + taskId)
-    queryYebExpGoldTaskById(taskId)?.let { verifiedTask ->
-        taskMap[taskId] = verifiedTask
-    }
-    return true
+    val title = getYebExpGoldTaskTitle(task, taskId)
+    val triggerResponse = triggerYebExpGoldTaskBySource(taskId, source)
+    return handleYebExpGoldTaskActionResult(taskId, title, source, taskMap, triggerResponse)
 }
 
 private fun claimPendingYebExpGoldRewards(
     queryResponse: JSONObject,
-    taskMap: Map<String, JSONObject>
+    taskMap: MutableMap<String, JSONObject>
 ): Boolean {
     val completeList = getYebExpGoldCompleteList(queryResponse)
     var claimed = false
@@ -458,23 +433,47 @@ private fun claimPendingYebExpGoldRewards(
             Log.member("任务在自动跳过列表(黑名单)中，跳过[$title]")
             continue
         }
-        val completeResponse = JSONObject(AntMemberYebExpGoldRpcCall.completeYebExpGoldTask(taskId))
-        if (isYebExpGoldSuccess(completeResponse)) {
-            logYebExpGoldRewards(title, completeResponse)
-            Status.setFlagToday(successFlag)
-            claimed = true
+        val source = getYebExpGoldRewardSource(taskId, taskMap)
+        val completeResponse = if (source == YebExpGoldTaskSource.MAIN_QUERY) {
+            triggerYebExpGoldTaskBySource(taskId, source)
         } else {
-            val verifiedTask = queryYebExpGoldTaskById(taskId)
-            if (verifiedTask != null && isYebExpGoldTaskReceived(verifiedTask)) {
-                Status.setFlagToday(successFlag)
-                claimed = true
-                continue
-            }
-            Log.member("余额宝体验金任务领取失败[$title]: ${getYebExpGoldErrorDesc(completeResponse)}")
+            completeYebExpGoldTaskBySource(taskId, source)
+        }
+        if (handleYebExpGoldTaskActionResult(taskId, title, source, taskMap, completeResponse)) {
+            claimed = true
         }
         CoroutineUtils.sleepCompat(500L)
     }
     return claimed
+}
+
+private fun handleYebExpGoldTaskActionResult(
+    taskId: String,
+    title: String,
+    source: YebExpGoldTaskSource,
+    taskMap: MutableMap<String, JSONObject>,
+    actionResponse: JSONObject
+): Boolean {
+    val successFlag = StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_TASK_PREFIX + taskId
+    if (isYebExpGoldSuccess(actionResponse)) {
+        logYebExpGoldRewards(title, actionResponse)
+        Status.setFlagToday(successFlag)
+        queryYebExpGoldTaskById(taskId, source)?.let { verifiedTask ->
+            taskMap[taskId] = verifiedTask
+        }
+        return true
+    }
+
+    queryYebExpGoldTaskById(taskId, source)?.let { verifiedTask ->
+        taskMap[taskId] = verifiedTask
+        if (isYebExpGoldTaskReceived(verifiedTask)) {
+            Status.setFlagToday(successFlag)
+            return true
+        }
+    }
+
+    Log.member("余额宝体验金任务领取失败[$title]: ${getYebExpGoldErrorDesc(actionResponse)}")
+    return false
 }
 
 private fun getYebExpGoldCompleteList(queryResponse: JSONObject): JSONArray {
@@ -634,25 +633,40 @@ private fun queryYebExpGoldTaskMap(
     return taskMap
 }
 
-private fun queryYebExpGoldTaskById(taskId: String): JSONObject? {
+private fun queryYebExpGoldTaskById(taskId: String, source: YebExpGoldTaskSource): JSONObject? {
     if (taskId.isBlank()) {
         return null
     }
 
     return try {
-        val queryResponse = JSONObject(AntMemberYebExpGoldRpcCall.queryYebExpGoldTaskById(taskId))
-        if (!isYebExpGoldSuccess(queryResponse)) {
-            return null
-        }
+        when (source) {
+            YebExpGoldTaskSource.PROMO_TASK_LIST -> {
+                val queryResponse = JSONObject(AntMemberYebExpGoldRpcCall.queryYebExpGoldTaskById(taskId))
+                if (!isYebExpGoldSuccess(queryResponse)) {
+                    return null
+                }
 
-        val taskDetailList = queryResponse.optJSONObject("result")
-            ?.optJSONArray("taskDetailList")
-            ?: return null
-        for (index in 0 until taskDetailList.length()) {
-            val task = taskDetailList.optJSONObject(index) ?: continue
-            if (taskId == task.optString("taskId")) {
-                markYebExpGoldTaskSource(task, YebExpGoldTaskSource.PROMO_TASK_LIST)
-                return task
+                val taskDetailList = queryResponse.optJSONObject("result")
+                    ?.optJSONArray("taskDetailList")
+                    ?: return null
+                for (index in 0 until taskDetailList.length()) {
+                    val task = taskDetailList.optJSONObject(index) ?: continue
+                    if (taskId == task.optString("taskId")) {
+                        markYebExpGoldTaskSource(task, YebExpGoldTaskSource.PROMO_TASK_LIST)
+                        return task
+                    }
+                }
+            }
+
+            YebExpGoldTaskSource.MAIN_QUERY -> {
+                val queryResponse = JSONObject(AntMemberYebExpGoldRpcCall.queryYebExpGoldMain(true, taskId))
+                if (!isYebExpGoldSuccess(queryResponse)) {
+                    return null
+                }
+
+                val taskMap = LinkedHashMap<String, JSONObject>()
+                collectYebExpGoldTasks(queryResponse, taskMap, YebExpGoldTaskSource.MAIN_QUERY)
+                return taskMap[taskId]
             }
         }
         null
@@ -691,6 +705,47 @@ private fun collectYebExpGoldTasks(
 
 private fun markYebExpGoldTaskSource(task: JSONObject, source: YebExpGoldTaskSource) {
     task.put(YEB_TASK_SOURCE_KEY, source.name)
+}
+
+private fun getYebExpGoldTaskSource(task: JSONObject?): YebExpGoldTaskSource {
+    val sourceName = task?.optString(YEB_TASK_SOURCE_KEY).orEmpty()
+    YebExpGoldTaskSource.values().firstOrNull { it.name == sourceName }?.let { return it }
+    if (task?.optString("appletId") == AntMemberYebExpGoldRpcCall.YEB_EXP_GOLD_MAIN_QUERY_APPLET_ID) {
+        return YebExpGoldTaskSource.MAIN_QUERY
+    }
+    return YebExpGoldTaskSource.PROMO_TASK_LIST
+}
+
+private fun getYebExpGoldRewardSource(
+    taskId: String,
+    taskMap: Map<String, JSONObject>
+): YebExpGoldTaskSource {
+    // completeList 来自 queryMain，缺少来源标记时按 MAIN_QUERY 处理。
+    return taskMap[taskId]
+        ?.let(::getYebExpGoldTaskSource)
+        ?: YebExpGoldTaskSource.MAIN_QUERY
+}
+
+private fun completeYebExpGoldTaskBySource(
+    taskId: String,
+    source: YebExpGoldTaskSource
+): JSONObject {
+    val response = when (source) {
+        YebExpGoldTaskSource.PROMO_TASK_LIST -> AntMemberYebExpGoldRpcCall.completeYebExpGoldTask(taskId)
+        YebExpGoldTaskSource.MAIN_QUERY -> AntMemberYebExpGoldRpcCall.completeYebExpGoldMainQueryTask(taskId)
+    }
+    return JSONObject(response)
+}
+
+private fun triggerYebExpGoldTaskBySource(
+    taskId: String,
+    source: YebExpGoldTaskSource
+): JSONObject {
+    val response = when (source) {
+        YebExpGoldTaskSource.PROMO_TASK_LIST -> AntMemberYebExpGoldRpcCall.completeYebExpGoldTask(taskId)
+        YebExpGoldTaskSource.MAIN_QUERY -> AntMemberYebExpGoldRpcCall.triggerYebExpGoldMainQueryTask(taskId)
+    }
+    return JSONObject(response)
 }
 
 private fun hasTrackableYebExpGoldTaskStatus(task: JSONObject): Boolean {
