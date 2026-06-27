@@ -89,7 +89,7 @@ jobs:
 
       - name: 推送更新到本地仓库
         if: steps.check_update.outputs.has_update == 'true'
-        run: git push origin dev
+        run: git push origin dev -o ci.skip
 
   # 任务2：构建APK、签名、发布Release、清理旧版本
   build-and-sign:
