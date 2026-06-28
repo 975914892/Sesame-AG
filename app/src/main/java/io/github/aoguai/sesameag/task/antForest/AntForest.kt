@@ -298,7 +298,6 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private var bubbleBoostTime: TimeTriggerModelField? = null
 
     private val forestTaskTryCount: ConcurrentHashMap<String, AtomicInteger> = ConcurrentHashMap<String, AtomicInteger>()
-    private var lastPatrolId: Int = 0
 
     private var jsonCollectMap: Set<String> = emptySet()
 
@@ -6503,6 +6502,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun isNormalPatrolAnimal(animal: JSONObject): Boolean {
+        if (animal.optInt("id", -1) <= 0) {
+            return false
+        }
         val status = animal.optString("status", "ONLINE")
         if (status.isNotBlank() && !status.equals("ONLINE", true)) {
             return false
@@ -6521,14 +6523,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         ) {
             return false
         }
-        val markerText = listOf(
-            animal.optString("type"),
-            animal.optString("name"),
-            animal.optString("propType"),
-            extInfo?.toString().orEmpty()
-        ).joinToString("|").lowercase(Locale.ROOT)
-        return listOf("limited", "limit", "special", "activity", "限定", "限时", "活動", "活动", "特殊")
-            .none { markerText.contains(it) }
+        return true
     }
 
     private fun normalPatrolAnimalIds(patrolConfig: JSONObject): Set<Int> {
@@ -6610,14 +6605,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return null
         }
 
-        sortedRecords.firstOrNull { hasUnreachedPatrolNode(it.userPatrol) }?.let {
-            return PatrolTargetRecord(it.patrolId, it.reserveName, "旧到新未走完")
-        }
-
         for (record in sortedRecords) {
             if (hasMissingAnimalPieces(record)) {
                 return PatrolTargetRecord(record.patrolId, record.reserveName, "普通动物碎片未齐")
             }
+        }
+
+        sortedRecords.firstOrNull { hasUnreachedPatrolNode(it.userPatrol) }?.let {
+            return PatrolTargetRecord(it.patrolId, it.reserveName, "旧到新未走完")
         }
 
         val latestRecord = sortedRecords.maxWithOrNull(compareBy<PatrolRecordInfo> { it.startDate }.thenBy { it.patrolId })
@@ -6702,7 +6697,6 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     val currentNode = userPatrol.getInt("currentNode")
                     val currentStatus = userPatrol.getString("currentStatus")
                     val patrolId = userPatrol.getInt("patrolId")
-                    lastPatrolId = patrolId
                     val chance = userPatrol.getJSONObject("chance")
                     val leftChance = chance.getInt("leftChance")
                     val leftStep = chance.getInt("leftStep")
@@ -6720,8 +6714,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     }
                     if ("STANDING" == currentStatus) { // 当前巡护状态为"STANDING"
                         if (leftChance > 0) { // 如果还有剩余的巡护次数，则开始巡护
-                            jo = JSONObject(AntForestRpcCall.patrolGo(currentNode, patrolId))
-                            patrolKeepGoing(jo.toString(), currentNode, patrolId) // 继续巡护
+                            jo = unwrapResData(JSONObject(AntForestRpcCall.patrolGo(currentNode, patrolId)))
+                            patrolKeepGoing(jo, patrolId) // 继续巡护
                             continue  // 跳过当前循环
                         } else if (!Status.hasFlagToday(patrolChanceLimitFlag) &&
                             leftStep >= chanceStepUnit &&
@@ -6748,7 +6742,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             }
                         }
                     } else if ("GOING" == currentStatus) {
-                        patrolKeepGoing(null, currentNode, patrolId)
+                        patrolKeepGoing(jo, patrolId)
                     }
                     if ("STANDING" == currentStatus && leftChance <= 0 &&
                         replenishPatrolChanceIfNeeded("森林保护地巡护机会不足")
@@ -6768,57 +6762,77 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     /**
      * 持续巡护森林，直到巡护状态不再是"进行中"
      *
-     * @param s         巡护请求的响应字符串，若为null将重新请求
-     * @param nodeIndex 当前节点索引
+     * @param response  当前巡护响应
      * @param patrolId  巡护任务ID
      */
-    private fun patrolKeepGoing(s: String?, nodeIndex: Int, patrolId: Int) {
-        var s = s
+    private fun patrolKeepGoing(response: JSONObject, patrolId: Int) {
+        var currentResponse = response
         try {
             do {
-                if (s == null) {
-                    s = AntForestRpcCall.patrolKeepGoing(nodeIndex, patrolId, "image")
-                }
-                val jo: JSONObject?
-                try {
-                    jo = JSONObject(s)
-                } catch (e: JSONException) {
-                    Log.printStackTrace(TAG, "JSON解析错误: " + e.message, e)
-                    return  // 解析失败，退出循环
-                }
+                val jo = currentResponse
                 if (!ResChecker.checkRes(TAG, jo)) {
-                    Log.forest(jo.getString("resultDesc"))
-                    break
-                }
-                val events = jo.optJSONArray("events")
-                if (events == null || events.length() == 0) {
-                    return  // 无事件，退出循环
-                }
-                val event = events.getJSONObject(0)
-                val userPatrol = jo.getJSONObject("userPatrol")
-                val currentNode = userPatrol.getInt("currentNode")
-                // 获取奖励信息，并处理动物碎片奖励
-                val rewardInfo = event.optJSONObject("rewardInfo")
-                if (rewardInfo != null) {
-                    val animalProp = rewardInfo.optJSONObject("animalProp")
-                    if (animalProp != null) {
-                        val animal = animalProp.optJSONObject("animal")
-                        if (animal != null) {
-                            Log.forest("巡护森林🏇🏻[" + animal.getString("name") + "碎片]")
-                        }
-                    }
-                }
-                // 如果巡护状态不是"进行中"，则退出循环
-                if ("GOING" != jo.getString("currentStatus")) {
+                    Log.forest(jo.optString("resultDesc", jo.optString("desc", "巡护失败")))
                     return
                 }
-                // 请求继续巡护
-                val materialInfo = event.getJSONObject("materialInfo")
-                val materialType = materialInfo.optString("materialType", "image")
-                s = AntForestRpcCall.patrolKeepGoing(currentNode, patrolId, materialType)
+                logPatrolRewardPiece(jo.optJSONArray("events")?.optJSONObject(0))
+                currentResponse = buildNextPatrolKeepGoingResponse(jo, patrolId) ?: return
             } while (!Thread.currentThread().isInterrupted)
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "patrolKeepGoing err", t)
+        }
+    }
+
+    private fun logPatrolRewardPiece(event: JSONObject?) {
+        val animalName = event?.optJSONObject("rewardInfo")
+            ?.optJSONObject("animalProp")
+            ?.optJSONObject("animal")
+            ?.optString("name")
+            .orEmpty()
+        if (animalName.isNotBlank()) {
+            Log.forest("巡护森林🏇🏻[${animalName}碎片]")
+        }
+    }
+
+    private fun buildNextPatrolKeepGoingResponse(response: JSONObject, patrolId: Int): JSONObject? {
+        val currentStatus = response.optString("currentStatus")
+        if ("GOING" != currentStatus) {
+            return null
+        }
+        val events = response.optJSONArray("events")
+        if (events == null || events.length() == 0) {
+            logPatrolKeepGoingStop(currentStatus, "缺少事件载荷")
+            return null
+        }
+        val event = events.optJSONObject(0)
+        if (event == null) {
+            logPatrolKeepGoingStop(currentStatus, "事件数据为空")
+            return null
+        }
+        val userPatrol = response.optJSONObject("userPatrol")
+        if (userPatrol == null) {
+            logPatrolKeepGoingStop(currentStatus, "缺少userPatrol")
+            return null
+        }
+        val currentNode = userPatrol.optInt("currentNode", -1)
+        if (currentNode < 0) {
+            logPatrolKeepGoingStop(currentStatus, "缺少当前节点")
+            return null
+        }
+        val materialType = event.optJSONObject("materialInfo")
+            ?.optString("materialType")
+            .orEmpty()
+        if (materialType.isBlank()) {
+            logPatrolKeepGoingStop(currentStatus, "缺少事件类型")
+            return null
+        }
+        return unwrapResData(
+            JSONObject(AntForestRpcCall.patrolKeepGoing(currentNode, patrolId, materialType))
+        )
+    }
+
+    private fun logPatrolKeepGoingStop(currentStatus: String, reason: String) {
+        if ("GOING" == currentStatus) {
+            Log.forest("巡护进行中但$reason，停止本轮巡护续跑")
         }
     }
 
@@ -6855,8 +6869,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
             val estimatedEnergy = estimateAnimalPropRobEnergy(animalProp)
             if (bestAnimalProp == null ||
-                holdsNum > bestHoldsNum ||
-                holdsNum == bestHoldsNum && estimatedEnergy > bestEstimatedEnergy
+                estimatedEnergy > bestEstimatedEnergy ||
+                estimatedEnergy == bestEstimatedEnergy && holdsNum > bestHoldsNum
             ) {
                 bestAnimalProp = animalProp
                 bestHoldsNum = holdsNum
@@ -6952,7 +6966,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     internal fun queryAnimalAndPiece() {
         try {
             // 调用远程接口查询动物及碎片信息
-            val response = JSONObject(AntForestRpcCall.queryAnimalAndPiece(0, lastPatrolId))
+            val response = unwrapResData(JSONObject(AntForestRpcCall.queryAnimalAndPiece(0)))
             val resultCode = response.optString("resultCode")
             // 检查接口调用是否成功
             if ("SUCCESS" != resultCode) {
@@ -6965,28 +6979,25 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 Log.forest("动物属性列表为空")
                 return
             }
-            // 遍历动物属性
-            for (i in 0..<animalProps.length()) {
-                val animalObject = animalProps.optJSONObject(i) ?: continue
-                val pieces = animalObject.optJSONArray("pieces")
-                if (pieces == null || pieces.length() == 0) {
-                    Log.forest("动物碎片列表为空")
-                    continue
-                }
-                val animalId =
-                    animalObject.optJSONObject("animal")?.optInt("id", -1) ?: -1
-                if (animalId == -1) {
-                    Log.forest("动物ID缺失")
-                    continue
-                }
-                // 检查碎片是否满足合成条件
-                if (canCombinePieces(pieces)) {
-                    combineAnimalPiece(animalId)
-                }
+            for (animalId in collectCombinableAnimalIds(animalProps)) {
+                combineAnimalPiece(animalId)
             }
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "queryAnimalAndPiece err", e)
         }
+    }
+
+    private fun collectCombinableAnimalIds(animalProps: JSONArray): List<Int> {
+        val combinableAnimalIds = mutableListOf<Int>()
+        for (i in 0..<animalProps.length()) {
+            val animalObject = animalProps.optJSONObject(i) ?: continue
+            val pieces = animalObject.optJSONArray("pieces") ?: continue
+            val animalId = animalObject.optJSONObject("animal")?.optInt("id", -1) ?: continue
+            if (animalId > 0 && canCombinePieces(pieces)) {
+                combinableAnimalIds.add(animalId)
+            }
+        }
+        return combinableAnimalIds
     }
 
     /**
@@ -7015,7 +7026,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         try {
             while (!Thread.currentThread().isInterrupted) {
                 // 查询动物及碎片信息
-                val response = JSONObject(AntForestRpcCall.queryAnimalAndPiece(animalId))
+                val response = unwrapResData(JSONObject(AntForestRpcCall.queryAnimalAndPiece(animalId)))
                 var resultCode = response.optString("resultCode")
                 if ("SUCCESS" != resultCode) {
                     Log.forest("查询失败: " + response.optString("resultDesc"))
@@ -7055,7 +7066,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 // 如果所有碎片可用，则尝试合成
                 if (canCombineAnimalPiece) {
                     val combineResponse =
-                        JSONObject(AntForestRpcCall.combineAnimalPiece(id, piecePropIds.toString()))
+                        unwrapResData(JSONObject(AntForestRpcCall.combineAnimalPiece(id, piecePropIds.toString())))
                     resultCode = combineResponse.optString("resultCode")
                     if ("SUCCESS" == resultCode) {
                         Log.forest("成功合成动物💡[$name]")

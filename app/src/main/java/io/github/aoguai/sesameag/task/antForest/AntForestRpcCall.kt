@@ -22,8 +22,9 @@ object AntForestRpcCall {
     private const val FOREST_LEYUAN_DAILY_TASK_SCENE_CODE = "ANTFOREST_LEYUAN_DAILY_TASK"
     private const val PROTECT_BUBBLE_SOURCE = HOME_TASK_SOURCE
     private const val PROTECT_BUBBLE_VERSION = "20230501"
-    private const val PATROL_SOURCE = "huolizhirenwu_xunhu"
+    private const val PATROL_SOURCE = "ant_forest"
     private const val PATROL_TIMEZONE = "Asia/Shanghai"
+    private const val PATROL_GO_VERSION = "20231123"
     private const val VITALITY_PROP_SOURCE = "vitality"
     private const val VITALITY_PROP_VERSION = "20250813"
     private const val ONE_CLICK_WATERING_SCENE_CODE = "ONE_CLICK_WATERING_V1"
@@ -1344,6 +1345,7 @@ object AntForestRpcCall {
             buildPatrolPayload {
                 put("nodeIndex", nodeIndex)
                 put("patrolId", patrolId)
+                put("version", PATROL_GO_VERSION)
             }
         )
     }
@@ -1362,6 +1364,7 @@ object AntForestRpcCall {
                 put("nodeIndex", nodeIndex)
                 put("patrolId", patrolId)
                 put("reactParam", reactParam)
+                put("version", PATROL_GO_VERSION)
             }
         )
     }
@@ -1385,7 +1388,10 @@ object AntForestRpcCall {
                     put("withDetail", "N")
                 }
 
-                animalId != 0 -> put("animalId", animalId)
+                animalId != 0 -> {
+                    put("animalId", animalId)
+                    put("withDetail", "N")
+                }
                 else -> {
                     put("withDetail", "N")
                     put("withGift", true)
