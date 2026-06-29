@@ -92,3 +92,5 @@ webui_debug*
 .kotlin/sessions/*
 /serve-debug/whackmole.py
 /serve-debug/user.py
+
+/libxposed/
