@@ -2,6 +2,7 @@ package io.github.aoguai.sesameag.hook.rpc.bridge
 
 import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.RpcEntity
+import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.util.CoroutineUtils
@@ -16,9 +17,6 @@ import java.lang.reflect.Proxy
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-
-private const val REQUEST_LOG_LIMIT = 1024
-private const val RESPONSE_LOG_LIMIT = 4096
 
 private fun truncateForLog(value: String?, limit: Int): String {
     if (value == null) return ""
@@ -122,9 +120,6 @@ class NewRpcBridge : RpcBridge {
 
     private val errorSummaryWindowStats = ConcurrentHashMap<String, ErrorSummaryWindowStat>()
     private val errorSummaryWindowMs = ERROR_SUMMARY_WINDOW_MS
-    private val lastCaptureLogAtMs = ConcurrentHashMap<String, Long>()
-    private val captureLogIntervalMs = CAPTURE_LOG_INTERVAL_MS
-
     private val lastErrorNotifyAtMs = AtomicLong(0)
     private val errorNotifyIntervalMs = ERROR_NOTIFY_INTERVAL_MS
 
@@ -349,8 +344,18 @@ class NewRpcBridge : RpcBridge {
         var localNewRpcInstance = newRpcInstance
         var localLoader = loader
         var localBridgeCallbackClazzArray = bridgeCallbackClazzArray
+        val captureMethodName = rpcEntity.requestMethod
+        val captureModuleTraffic = BaseModel.debugMode.value == true && !captureMethodName.isNullOrBlank()
+        val captureStartedAtMs = if (captureModuleTraffic) System.currentTimeMillis() else 0L
+        var captureSucceeded = false
+        var captureNote: String? = null
+
+        if (captureModuleTraffic) {
+            RpcTrafficCapture.recordModuleRequest(captureMethodName, rpcEntity.requestData)
+        }
 
         if (io.github.aoguai.sesameag.hook.ApplicationHookConstants.shouldBlockRpc()) {
+            captureNote = "blocked_by_offline"
             return null
         }
 
@@ -372,6 +377,7 @@ class NewRpcBridge : RpcBridge {
                 Log.error(TAG, "RPC重新初始化失败:")
                 Log.printStackTrace(e)
                 logNullResponse(rpcEntity, "RPC组件初始化失败", 0)
+                captureNote = "rpc_component_init_failed"
                 return null
             }
         }
@@ -380,6 +386,7 @@ class NewRpcBridge : RpcBridge {
             localNewRpcInstance == null || localLoader == null || localBridgeCallbackClazzArray == null
         ) {
             logNullResponse(rpcEntity, "RPC组件不完整", 0)
+            captureNote = "rpc_component_incomplete"
             return null
         }
 
@@ -461,13 +468,13 @@ class NewRpcBridge : RpcBridge {
                                                         append(rpcEntity.requestMethod)
                                                         append("\n")
                                                         append("args: ")
-                                                        append(truncateForLog(rpcEntity.requestData, REQUEST_LOG_LIMIT))
+                                                        append(truncateForLog(rpcEntity.requestData, 1024))
                                                         append(" |\n")
                                                         append("data: ")
                                                         append(
                                                             truncateForLog(
                                                                 rpcEntity.responseString,
-                                                                RESPONSE_LOG_LIMIT
+                                                                4096
                                                             )
                                                         )
                                                     }
@@ -590,6 +597,7 @@ class NewRpcBridge : RpcBridge {
                             }
                             return null
                         }
+                        captureSucceeded = true
                         return rpcEntity
                     } catch (e: Exception) {
                         Log.error(
@@ -597,6 +605,7 @@ class NewRpcBridge : RpcBridge {
                             "new rpc response | id: ${rpcEntity.hashCode()} | method: ${rpcEntity.requestMethod} get err:"
                         )
                         Log.printStackTrace(e)
+                        captureNote = "response_parse_exception:${e.javaClass.simpleName}"
                     }
 
                     if (count < normalizedTryCount) {
@@ -608,6 +617,7 @@ class NewRpcBridge : RpcBridge {
                         "new rpc request | id: ${rpcEntity.hashCode()} | method: ${rpcEntity.requestMethod} err:"
                     )
                     Log.printStackTrace(t)
+                    captureNote = "request_exception:${t.javaClass.simpleName}"
 
                     if (count < normalizedTryCount) {
                         CoroutineUtils.sleepCompat(computeRetryDelayMs(retryInterval, count))
@@ -616,32 +626,24 @@ class NewRpcBridge : RpcBridge {
             } while (count < normalizedTryCount)
 
             logNullResponse(rpcEntity, "重试次数耗尽", normalizedTryCount)
+            captureNote = captureNote ?: "retries_exhausted"
             return null
         } finally {
-            // 仅在调试模式下打印堆栈
-            if (BaseModel.debugMode.value == true) {
-                val methodName = rpcEntity.requestMethod ?: "unknown"
-                val now = System.currentTimeMillis()
-                val last = lastCaptureLogAtMs[methodName]
-                if (last == null || now - last >= captureLogIntervalMs) {
-                    lastCaptureLogAtMs[methodName] = now
-                    val captureMessage = buildString {
-                        append("New RPC\n")
-                        append("方法: ")
-                        append(methodName)
-                        append("\n")
-                        append("参数: ")
-                        append(truncateForLog(rpcEntity.requestData, REQUEST_LOG_LIMIT))
-                        append("\n")
-                        append("数据: ")
-                        append(
-                            truncateForLog(
-                                rpcEntity.responseString,
-                                RESPONSE_LOG_LIMIT
-                            )
-                        )
-                    }
-                    Log.capture(TAG, captureMessage)
+            if (captureModuleTraffic) {
+                val elapsedMs = if (captureStartedAtMs > 0L) {
+                    System.currentTimeMillis() - captureStartedAtMs
+                } else {
+                    -1L
+                }
+                if (captureSucceeded && !rpcEntity.hasError) {
+                    RpcTrafficCapture.recordModuleResponse(captureMethodName, rpcEntity.responseString, elapsedMs)
+                } else {
+                    RpcTrafficCapture.recordModuleError(
+                        captureMethodName,
+                        rpcEntity.responseString,
+                        elapsedMs,
+                        captureNote ?: if (rpcEntity.hasError) "rpc_entity_error" else "request_returned_null"
+                    )
                 }
             }
         }
@@ -713,7 +715,6 @@ class NewRpcBridge : RpcBridge {
         private const val ERROR_SUMMARY_WINDOW_MS: Long = 10 * 60_000L
         private const val ERROR_NOTIFY_INTERVAL_MS: Long = 60_000L
         private const val RELOGIN_INTERVAL_MS: Long = 120_000L
-        private const val CAPTURE_LOG_INTERVAL_MS: Long = 2_000L
     }
 }
 

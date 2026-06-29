@@ -12,6 +12,7 @@ import io.github.aoguai.sesameag.hook.keepalive.PersistentLaunchPolicy
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
 import io.github.aoguai.sesameag.hook.keepalive.ScheduledTaskRouter
+import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antForest.AntForest
@@ -23,6 +24,7 @@ import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.JsonUtil
+import io.github.aoguai.sesameag.util.Log.capture
 import io.github.aoguai.sesameag.util.Log.record
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
@@ -49,6 +51,7 @@ internal object ApplicationBroadcastDispatcher {
             ApplicationHookConstants.BroadcastActions.MANUAL_TASK -> handleManualTaskBroadcast(safeIntent)
             ApplicationHookConstants.BroadcastActions.HOOK_READY -> handleHookReadyBroadcast(context, safeIntent)
             ApplicationHookConstants.BroadcastActions.PERMISSION_SNAPSHOT -> handlePermissionSnapshotBroadcast(context, safeIntent)
+            ApplicationHookConstants.BroadcastActions.CAPTURE_PAGE_SNAPSHOT -> handleCapturePageSnapshotBroadcast(safeIntent)
             ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS -> handleRefreshFriendsBroadcast(context, safeIntent)
             ApplicationHookConstants.BroadcastActions.REFRESH_EXCHANGE_OPTIONS -> handleRefreshExchangeOptionsBroadcast(context, safeIntent)
         }
@@ -345,6 +348,15 @@ internal object ApplicationBroadcastDispatcher {
             (permissions?.get("targetExactAlarmAllowed") as? Boolean)?.let { putExtra("targetExactAlarmAllowed", it) }
             putExtra("timestamp", System.currentTimeMillis())
         })
+    }
+
+    private fun handleCapturePageSnapshotBroadcast(intent: Intent) {
+        if (BaseModel.debugMode.value != true) {
+            capture(TAG, "页面结构抓取被拒绝: debugMode=false")
+            return
+        }
+        val reason = intent.getStringExtra("reason")?.trim().takeUnless { it.isNullOrBlank() } ?: "broadcast_snapshot"
+        PageStructureSnapshotter.captureOnce(reason)
     }
 
     private fun handleRefreshFriendsBroadcast(context: Context?, intent: Intent) {

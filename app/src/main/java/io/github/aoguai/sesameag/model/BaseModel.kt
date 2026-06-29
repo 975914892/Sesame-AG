@@ -51,6 +51,7 @@ class BaseModel : Model() {
         modelFields.addField(newRpc) //是否启用新接口
         modelFields.addField(customRpcScheduleEnable) //自定义RPC(配置文件+定时执行)
         modelFields.addField(debugMode) //是否开启抓包调试模式
+        modelFields.addField(captureLogFileMaxSizeMb) //抓包日志文件滚动大小
         modelFields.addField(sendHookData) //启用Hook数据转发
         modelFields.addField(sendHookDataUrl) //Hook数据转发地址
 
@@ -226,8 +227,21 @@ class BaseModel : Model() {
         /**
          * 是否开启抓包调试模式
          */
-        val debugMode: BooleanModelField = BooleanModelField("debugMode", "开启抓包(基于新接口)", false).withDesc(
-            "开启后启动抓包调试链路与本地调试服务；Hook/RPC 原始请求响应主要写入抓包日志，调试工具结果写入调试日志。"
+        val debugMode: BooleanModelField = BooleanModelField("debugMode", "开启RPC抓包", false).withDesc(
+            "抓包总开关。开启后自动记录模块主动 RPC、页面自然流量 RPC，并启动本地调试服务；关闭后停止抓包日志与转发。"
+        )
+
+        /**
+         * 抓包日志文件滚动大小
+         */
+        val captureLogFileMaxSizeMb: IntegerModelField = IntegerModelField(
+            "captureLogFileMaxSizeMb",
+            "抓包日志文件大小上限(MB,-1不限)",
+            7,
+            -1,
+            null
+        ).withDesc(
+            "沿用现有日志文件滚动策略；抓包日志文件达到该大小后自动滚动清理。填 -1 表示不按文件大小切分，仅按日期归档。"
         )
 
         /**
@@ -248,7 +262,7 @@ class BaseModel : Model() {
         /**
          * 是否记录runtime日志
          */
-        val runtimeLog: BooleanModelField = BooleanModelField("runtimeLog", "技术 | 记录 runtime 日志", false).withDesc(
+        val runtimeLog: BooleanModelField = BooleanModelField("runtimeLog", "记录 runtime 日志", false).withDesc(
             "记录底层桥接、缓存命中、合流与内部诊断日志；默认建议关闭，仅排障时开启。"
         )
 
@@ -278,11 +292,11 @@ class BaseModel : Model() {
         )
 
         val sendHookData: BooleanModelField = BooleanModelField("sendHookData", "启用Hook数据转发", false).withDesc(
-            "仅在“开启抓包(基于新接口)”和新 RPC 同时启用时生效，把 Hook 到的数据转发到指定地址。"
+            "仅在抓包总开关开启时生效，把捕获到的 Host RPC 请求响应转发到指定调试地址。"
         )
 
         val sendHookDataUrl: StringModelField = StringModelField("sendHookDataUrl", "Hook数据转发地址", "http://127.0.0.1:9527/hook").withDesc(
-            "Hook 数据转发目标地址，仅在启用抓包与数据转发时使用。"
+            "Host RPC 抓包数据转发目标地址，仅在抓包总开关开启且启用数据转发时使用。"
         )
 
         /**

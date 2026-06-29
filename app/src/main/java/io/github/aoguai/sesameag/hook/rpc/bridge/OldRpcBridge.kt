@@ -3,6 +3,7 @@ package io.github.aoguai.sesameag.hook.rpc.bridge
 import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.data.RuntimeInfo
 import io.github.aoguai.sesameag.entity.RpcEntity
+import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.util.Log
@@ -117,7 +118,16 @@ class OldRpcBridge : RpcBridge {
     }
 
     override fun requestObject(rpcEntity: RpcEntity, tryCount: Int, retryInterval: Int): RpcEntity? {
+        val captureMethodName = rpcEntity.requestMethod
+        val captureModuleTraffic = BaseModel.debugMode.value == true && !captureMethodName.isNullOrBlank()
+        val captureStartedAtMs = if (captureModuleTraffic) System.currentTimeMillis() else 0L
+        var captureNote: String? = null
+        var captureRecorded = false
+        if (captureModuleTraffic) {
+            RpcTrafficCapture.recordModuleRequest(captureMethodName, rpcEntity.requestData)
+        }
         if (io.github.aoguai.sesameag.hook.ApplicationHookConstants.shouldBlockRpc()) {
+            captureNote = "blocked_by_offline"
             return null
         }
 
@@ -131,13 +141,49 @@ class OldRpcBridge : RpcBridge {
             try {
                 RpcIntervalLimit.enterIntervalLimit(rpcMethod)
                 val response = invokeRpcCall(method, args)
-                return processResponse(rpcEntity, response, id, method, args, retryInterval)
+                val result = processResponse(rpcEntity, response, id, method, args, retryInterval)
+                if (result != null && captureModuleTraffic) {
+                    if (rpcEntity.hasError) {
+                        RpcTrafficCapture.recordModuleError(
+                            captureMethodName,
+                            rpcEntity.responseString,
+                            System.currentTimeMillis() - captureStartedAtMs,
+                            "rpc_entity_error"
+                        )
+                    } else {
+                        RpcTrafficCapture.recordModuleResponse(
+                            captureMethodName,
+                            rpcEntity.responseString,
+                            System.currentTimeMillis() - captureStartedAtMs
+                        )
+                    }
+                    captureRecorded = true
+                } else if (result == null && captureModuleTraffic) {
+                    captureNote = captureNote ?: "response_returned_null"
+                    RpcTrafficCapture.recordModuleError(
+                        captureMethodName,
+                        rpcEntity.responseString,
+                        System.currentTimeMillis() - captureStartedAtMs,
+                        captureNote!!
+                    )
+                    captureRecorded = true
+                }
+                return result
             } catch (t: Throwable) {
                 handleError(rpcEntity, t, method, id, args)
+                captureNote = "request_exception:${t.javaClass.simpleName}"
                 if (it < normalizedTryCount - 1) {
                     CoroutineUtils.sleepCompat(computeRetryDelayMs(retryInterval, it + 1))
                 }
             }
+        }
+        if (captureModuleTraffic && !captureRecorded) {
+            RpcTrafficCapture.recordModuleError(
+                captureMethodName,
+                rpcEntity.responseString,
+                System.currentTimeMillis() - captureStartedAtMs,
+                captureNote ?: "retries_exhausted"
+            )
         }
         return null
     }

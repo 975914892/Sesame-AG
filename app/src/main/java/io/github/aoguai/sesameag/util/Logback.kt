@@ -11,7 +11,9 @@ import ch.qos.logback.classic.encoder.PatternLayoutEncoder
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.rolling.RollingFileAppender
 import ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy
+import ch.qos.logback.core.rolling.TimeBasedRollingPolicy
 import ch.qos.logback.core.util.FileSize
+import io.github.aoguai.sesameag.model.BaseModel
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.text.SimpleDateFormat
@@ -19,6 +21,9 @@ import java.util.Calendar
 import java.util.Locale
 
 object Logback {
+    private const val DEFAULT_LOG_FILE_MAX_SIZE_MB = 7
+    private const val DEFAULT_LOG_TOTAL_SIZE_CAP_MB = 256
+
     private var isFileInitialized = false
     private var appContext: Context? = null
     private var nextMidnightMillis: Long = 0
@@ -60,20 +65,20 @@ object Logback {
      * 这是一个“追加”操作，不会打断 Logcat 日志
      */
     @Synchronized
-    fun initFileLogging(context: Context) {
+    fun initFileLogging(context: Context, force: Boolean = false) {
         val now = System.currentTimeMillis()
         // 1. 如果已经初始化过，且还没到跨天刷新的时间，则直接跳过
-        if (isFileInitialized && now < nextMidnightMillis) return
+        if (!force && isFileInitialized && now < nextMidnightMillis) return
 
-        // 记录本次初始化是否属于“跨天自动刷新”
-        val isTriggeredByCrossDay = isFileInitialized
+        // 记录本次初始化是否属于“重建已有 appender”
+        val isRebuildingExistingAppenders = isFileInitialized
 
         // 2. 保存 Context 供后续跨天自动刷新使用
         this.appContext = context.applicationContext
 
         // 3. 如果是触发了跨天刷新，需重置上下文以彻底清除旧的 Appender 句柄
-        if (isTriggeredByCrossDay) {
-            Log.i("SesameLog", "检测到跨天，正在刷新日志重定向...")
+        if (isRebuildingExistingAppenders) {
+            Log.i("SesameLog", if (force) "检测到日志配置变更，正在刷新日志重定向..." else "检测到跨天，正在刷新日志重定向...")
             initLogcatOnly() // 内部执行 lc.reset()
         }
 
@@ -93,7 +98,7 @@ object Logback {
 
                 if (!logFile.exists() || logFile.length() == 0L) {
                     logger.info("=== $fullTimestamp ===")
-                } else if (isTriggeredByCrossDay) {
+                } else if (isRebuildingExistingAppenders) {
                     val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date())
                     logger.info("--- 日志重定向于 $time ---")
                 }
@@ -116,6 +121,12 @@ object Logback {
         if (isFileInitialized && now >= nextMidnightMillis) {
             appContext?.let { initFileLogging(it) }
         }
+    }
+
+    @Synchronized
+    fun reloadFileLogging() {
+        val context = appContext ?: return
+        initFileLogging(context, force = true)
     }
 
     private fun calculateNextMidnight(now: Long): Long {
@@ -163,17 +174,30 @@ object Logback {
             file = "$logDir$logName.log"
             isAppend = true
 
-            val policy = SizeAndTimeBasedRollingPolicy<ILoggingEvent>().apply {
-                context = lc
-                fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.%i.log"
-                setMaxFileSize(FileSize.valueOf("7MB"))
-                setTotalSizeCap(FileSize.valueOf("256MB"))
-                maxHistory = 3
-                isCleanHistoryOnStart = true
-                setParent(fileAppender)
-                start()
+            if (shouldDisableSizeRolling(logName)) {
+                val policy = TimeBasedRollingPolicy<ILoggingEvent>().apply {
+                    context = lc
+                    fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.log"
+                    setTotalSizeCap(FileSize.valueOf("${DEFAULT_LOG_TOTAL_SIZE_CAP_MB}MB"))
+                    maxHistory = 3
+                    isCleanHistoryOnStart = true
+                    setParent(fileAppender)
+                    start()
+                }
+                rollingPolicy = policy
+            } else {
+                val policy = SizeAndTimeBasedRollingPolicy<ILoggingEvent>().apply {
+                    context = lc
+                    fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.%i.log"
+                    setMaxFileSize(resolveMaxFileSize(logName))
+                    setTotalSizeCap(FileSize.valueOf("${DEFAULT_LOG_TOTAL_SIZE_CAP_MB}MB"))
+                    maxHistory = 3
+                    isCleanHistoryOnStart = true
+                    setParent(fileAppender)
+                    start()
+                }
+                rollingPolicy = policy
             }
-            rollingPolicy = policy
 
             encoder = PatternLayoutEncoder().apply {
                 context = lc
@@ -199,5 +223,21 @@ object Logback {
             isAdditive = true
             addAppender(asyncAppender)
         }
+    }
+
+    private fun shouldDisableSizeRolling(logName: String): Boolean {
+        if (logName != LogChannel.CAPTURE.loggerName) {
+            return false
+        }
+        return (BaseModel.captureLogFileMaxSizeMb.value ?: DEFAULT_LOG_FILE_MAX_SIZE_MB) == -1
+    }
+
+    private fun resolveMaxFileSize(logName: String): FileSize {
+        val sizeMb = if (logName == LogChannel.CAPTURE.loggerName) {
+            (BaseModel.captureLogFileMaxSizeMb.value ?: DEFAULT_LOG_FILE_MAX_SIZE_MB)
+        } else {
+            DEFAULT_LOG_FILE_MAX_SIZE_MB
+        }
+        return FileSize.valueOf("${sizeMb.coerceAtLeast(1)}MB")
     }
 }

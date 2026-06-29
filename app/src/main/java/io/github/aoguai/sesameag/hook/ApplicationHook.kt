@@ -43,6 +43,7 @@ import io.github.aoguai.sesameag.hook.rpc.bridge.NewRpcBridge
 import io.github.aoguai.sesameag.hook.rpc.bridge.OldRpcBridge
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcVersion
+import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit.clearIntervalLimit
 import io.github.aoguai.sesameag.hook.server.ModuleHttpServerManager.startIfNeeded
 import io.github.aoguai.sesameag.model.BaseModel.Companion.batteryPerm
@@ -52,8 +53,6 @@ import io.github.aoguai.sesameag.model.BaseModel.Companion.destroyData
 import io.github.aoguai.sesameag.model.BaseModel.Companion.execAtTimeList
 import io.github.aoguai.sesameag.model.BaseModel.Companion.manualTriggerAutoSchedule
 import io.github.aoguai.sesameag.model.BaseModel.Companion.newRpc
-import io.github.aoguai.sesameag.model.BaseModel.Companion.sendHookData
-import io.github.aoguai.sesameag.model.BaseModel.Companion.sendHookDataUrl
 import io.github.aoguai.sesameag.model.BaseModel.Companion.wakenAtTimeList
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.CoroutineTaskRunner
@@ -66,6 +65,7 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.GlobalThreadPools.shutdownAndRestart
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.Logback
 import io.github.aoguai.sesameag.util.Log.error
 import io.github.aoguai.sesameag.util.Log.printStackTrace
 import io.github.aoguai.sesameag.util.Log.record
@@ -208,10 +208,13 @@ class ApplicationHook {
             requireXposedInterface().hook(attachMethod).intercept { chain ->
                 val result = chain.proceed()
                 val context = chain.args[0] as? Context ?: return@intercept result
+                val application = chain.getThisObject() as? Application
                 appContext = context
                 mainHandler = Handler(Looper.getMainLooper())
                 Log.init(context)
                 ensureScheduler()
+                application?.let { PageStructureSnapshotter.install(it) }
+                RpcTrafficCapture.install(classLoader!!)
 
                 SecurityBodyHelper.init(classLoader!!)
                 AlipayMiniMarkHelper.init(classLoader!!)
@@ -1033,6 +1036,7 @@ class ApplicationHook {
                 record(TAG, "Sesame-AG 开始初始化...")
 
                 Config.load(userId)
+                Logback.reloadFileLogging()
                 val activeUserSnapshot = AccountSessionCoordinator.ensureActiveUserSnapshot(userId, activeClassLoader)
                 val legalAccepted = Config.isLoaded() && Config.isLegalAcceptedForCurrentVersion()
                 val workflowAllowed =
@@ -1078,11 +1082,6 @@ class ApplicationHook {
                     rpcBridge = if (newRpc.value == true) NewRpcBridge() else OldRpcBridge()
                     rpcBridge!!.load()
                     rpcVersion = rpcBridge!!.getVersion()
-                }
-
-                if (newRpc.value == true && debugMode.value == true) {
-                    HookUtil.hookRpcBridgeExtension(classLoader!!, sendHookData.value == true, sendHookDataUrl.value ?: "")
-                    HookUtil.hookDefaultBridgeCallback(classLoader!!)
                 }
 
                 start(userId)
@@ -1464,6 +1463,7 @@ class ApplicationHook {
                 filter.addAction(ApplicationHookConstants.BroadcastActions.MANUAL_TASK)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.HOOK_READY)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.PERMISSION_SNAPSHOT)
+                filter.addAction(ApplicationHookConstants.BroadcastActions.CAPTURE_PAGE_SNAPSHOT)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.REFRESH_EXCHANGE_OPTIONS)
 

@@ -1,20 +1,15 @@
 package io.github.aoguai.sesameag.hook
 
 import android.content.Context
-import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.UserEntity
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.maps.UserMap
-import org.json.JSONObject
 import java.lang.reflect.Field
 import java.lang.reflect.Method
-import java.util.concurrent.ConcurrentHashMap
 
 object HookUtil {
     private const val TAG = "HookUtil"
-
-    val rpcHookMap = ConcurrentHashMap<Any, Array<Any?>>()
 
     private var lastToastTime = 0L
 
@@ -28,104 +23,6 @@ object HookUtil {
         val groups: Int = 0
     )
 
-    /**
-     * Hook RpcBridgeExtension.rpc 方法，记录请求信息
-     */
-    fun hookRpcBridgeExtension(classLoader: ClassLoader, isdebug: Boolean, debugUrl: String) {
-        try {
-            val jsonClassName = General.JSON_OBJECT_NAME
-            val jsonClass = Class.forName(jsonClassName, false, classLoader)
-            val rpcBridgeExtensionClass = loadClass(classLoader, "com.alibaba.ariver.commonability.network.rpc.RpcBridgeExtension")
-            val rpcMethod = findMethod(
-                rpcBridgeExtensionClass,
-                "rpc",
-                String::class.java,
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                String::class.java,
-                jsonClass,
-                String::class.java,
-                jsonClass,
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                Int::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                String::class.java,
-                loadClass(classLoader, "com.alibaba.ariver.app.api.App"),
-                loadClass(classLoader, "com.alibaba.ariver.app.api.Page"),
-                loadClass(classLoader, "com.alibaba.ariver.engine.api.bridge.model.ApiContext"),
-                loadClass(classLoader, "com.alibaba.ariver.engine.api.bridge.extension.BridgeCallback")
-            )
-
-            ApplicationHook.requireXposedInterface().hook(rpcMethod).intercept { chain ->
-                val args = chain.args
-                if (args.size > 15) {
-                    val methodName = args[0] as? String
-                    val rawParams = args[4]
-                    if (methodName != null && rawParams != null) {
-                        val jsonObject = JSONObject(rawParams.toString())
-                        TokenHooker.handleRpc(methodName, jsonObject)
-                    }
-
-                    val callback = args[15]
-                    if (callback != null) {
-                        val recordArray = arrayOfNulls<Any>(4).apply {
-                            this[0] = System.currentTimeMillis()
-                            this[1] = args[0] ?: "null"
-                            this[2] = args[4] ?: "null"
-                        }
-                        rpcHookMap[callback] = recordArray
-                    }
-                }
-
-                val result = chain.proceed()
-
-                if (args.size > 15) {
-                    val callback = args[15]
-                    if (callback != null) {
-                        val recordArray = rpcHookMap.remove(callback)
-                        recordArray?.let {
-                            try {
-                                val time = it[0]
-                                val method = it.getOrNull(1)
-                                val params = it.getOrNull(2)
-                                val data = it.getOrNull(3)
-                                if (data != null) {
-                                    val res = JSONObject().apply {
-                                        put("TimeStamp", time)
-                                        put("Method", method)
-                                        put("Params", params)
-                                        put("Data", data)
-                                    }
-
-                                    val prettyRecord = """
-{
-"TimeStamp": $time,
-"Method": "$method",
-"Params": $params,
-"Data": $data
-}
-""".trimIndent()
-
-                                    if (isdebug) {
-                                        HookSender.sendHookData(res, debugUrl)
-                                    }
-                                    Log.capture(prettyRecord)
-                                }
-                            } catch (e: Exception) {
-                                Log.runtime(TAG, "JSON 构建失败: ${e.message}")
-                            }
-                        }
-                    }
-                }
-                result
-            }
-            Log.runtime(TAG, "Hook RpcBridgeExtension#rpc 成功")
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "Hook RpcBridgeExtension#rpc 失败", t)
-        }
-    }
-
     fun hookOtherService(classLoader: ClassLoader) {
         try {
             val fgBgMonitorClass = loadClass(classLoader, "com.alipay.mobile.common.fgbg.FgBgMonitorImpl")
@@ -137,30 +34,6 @@ object HookUtil {
             hookReturnConstant(findMethod(miscUtilsClass, "isAtFrontDesk", Context::class.java), true)
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "hookOtherService 失败", e)
-        }
-    }
-
-    /**
-     * Hook DefaultBridgeCallback.sendJSONResponse 方法，记录响应内容
-     */
-    fun hookDefaultBridgeCallback(classLoader: ClassLoader) {
-        try {
-            val jsonClass = Class.forName(General.JSON_OBJECT_NAME, false, classLoader)
-            val callbackClass = loadClass(classLoader, "com.alibaba.ariver.engine.common.bridge.internal.DefaultBridgeCallback")
-            val sendJsonResponseMethod = findMethod(callbackClass, "sendJSONResponse", jsonClass)
-            ApplicationHook.requireXposedInterface().hook(sendJsonResponseMethod).intercept { chain ->
-                val callback = chain.getThisObject()
-                if (callback != null) {
-                    val recordArray = rpcHookMap[callback]
-                    if (recordArray != null && chain.args.isNotEmpty()) {
-                        recordArray[3] = chain.args[0].toString()
-                    }
-                }
-                chain.proceed()
-            }
-            Log.runtime(TAG, "Hook DefaultBridgeCallback#sendJSONResponse 成功")
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "Hook DefaultBridgeCallback#sendJSONResponse 失败", t)
         }
     }
 
