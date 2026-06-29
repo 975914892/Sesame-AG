@@ -93,7 +93,8 @@ private val sesameAlchemyDefaultBlacklist = setOf(
     "hjwf_youxi_renwu_sanfang|去玩我的***世界", // 参数错误：promiseActivityExtCheck
     "hjwf_xiangjiangshikaipao_renwu|去玩向僵尸开炮", // 参数错误：promiseActivityExtCheck
     "hjwf_sanguobingheshidai_renwu|去玩三国冰河时代", // 参数错误：promiseActivityExtCheck
-    "hjwf_jihewangguo_renwu|去玩几何王国" // 参数错误：promiseActivityExtCheck
+    "hjwf_jihewangguo_renwu|去玩几何王国", // 参数错误：promiseActivityExtCheck
+    "hjwf_longjizhicheng_renwu|去玩龙迹之城" // 参数错误：promiseActivityExtCheck
 )
 
 private val orchardDefaultBlacklist = setOf(
@@ -300,6 +301,7 @@ private val stallDefaultBlacklist = setOf(
     "ANTSTALL_NORMAL_DAILY_DONATE_COUNT|助力就业岗位",
     "ANTSTALL_TASK_xcjmjyjuankuan2026|帮乡村姐妹家乡就业",
     "ANTSTALL_TASK_kuaishouhuanduan|去快手逛一逛",
+    "ANTSTALL_ELEME_VISIT|去饿了么果园逛一逛",
     "ANTSTALL_TASK_taojinbihuanduan|进入淘宝芭芭农场领免费水果",
     "ANTSTALL_P2P_DAILY_SHARER|邀请好友助力"
 )
@@ -397,7 +399,9 @@ private val sportsDefaultBlacklist = setOf(
     "AP16300608",
     "AP12300554",
     "AP13300501",
-    "AP16300571"
+    "AP16300571",
+    "AP11300601|逛好运卡翻红包", // 面板入口缺少稳定自动闭环
+    "AP10344931|逛好运卡翻红包" // 路线复活入口 completeTask 返回 CAMP_TRIGGER_ERROR
 )
 
 val DEFAULT_BLACKLIST: Map<String, Set<String>> = mapOf(
