@@ -14,6 +14,18 @@ import java.io.InputStream
 object ModuleStatus {
     private const val UNKNOWN_FRAMEWORK = "Unknown Activated"
 
+    enum class FrameworkCategory {
+        LSPOSED,
+        LEGACY_XPOSED,
+        PATCH_EMBEDDED,
+        UNKNOWN
+    }
+
+    data class FrameworkInfo(
+        val displayName: String,
+        val category: FrameworkCategory
+    )
+
     /**
      * 获取当前激活状态 (UI 层调用入口)
      *
@@ -28,18 +40,25 @@ object ModuleStatus {
     /**
      * 统一解析框架名称。
      *
-     * 现代 libxposed API 优先以官方 frameworkName 为准；只有官方字段不可用时，
+     * 现代 libxposed API 优先以官方 frameworkName 为准；只有官方字段不可用或无法分类时，
      * 才回退到旧的内部类/资源探测逻辑，以兼容 patch 或其他非标准场景。
      */
-    fun resolveFrameworkName(officialFrameworkName: String?, classLoader: ClassLoader?): String {
+    fun resolveFrameworkInfo(officialFrameworkName: String?, classLoader: ClassLoader?): FrameworkInfo {
         val normalizedOfficialName = officialFrameworkName?.trim()
         if (isUsableOfficialName(normalizedOfficialName)) {
-            return normalizedOfficialName!!
+            val category = classifyFrameworkName(normalizedOfficialName)
+            if (category != FrameworkCategory.UNKNOWN) {
+                return FrameworkInfo(normalizedOfficialName!!, category)
+            }
         }
         if (classLoader == null) {
-            return UNKNOWN_FRAMEWORK
+            return FrameworkInfo(UNKNOWN_FRAMEWORK, FrameworkCategory.UNKNOWN)
         }
-        return detectFramework(classLoader)
+        return detectFrameworkInfo(classLoader)
+    }
+
+    fun resolveFrameworkName(officialFrameworkName: String?, classLoader: ClassLoader?): String {
+        return resolveFrameworkInfo(officialFrameworkName, classLoader).displayName
     }
 
     /**
@@ -49,19 +68,38 @@ object ModuleStatus {
      * @return 框架名称字符串
      */
     fun detectFramework(classLoader: ClassLoader): String {
+        return detectFrameworkInfo(classLoader).displayName
+    }
+
+    fun detectFrameworkInfo(classLoader: ClassLoader): FrameworkInfo {
         return when {
             // 1. 优先检测 LSPatch / NPatch (因为它们通过修改 APK 实现，特征较特殊)
-            isLSPatch(classLoader) -> "LSPatch"
-            isNPatch(classLoader) -> "NPatch"
+            isLSPatch(classLoader) -> FrameworkInfo("LSPatch", FrameworkCategory.PATCH_EMBEDDED)
+            isNPatch(classLoader) -> FrameworkInfo("NPatch", FrameworkCategory.PATCH_EMBEDDED)
 
             // 2. 检测标准框架
-            checkClass(classLoader, "de.robv.android.xposed.XposedInit") -> "LSPosed"
-            checkClass(classLoader, "org.meowcat.edxposed.manager") -> "EdXposed"
-            checkClass(classLoader, "de.robv.android.xposed.XposedBridge") -> "Xposed"
+            checkClass(classLoader, "de.robv.android.xposed.XposedInit") -> FrameworkInfo("LSPosed", FrameworkCategory.LSPOSED)
+            checkClass(classLoader, "org.meowcat.edxposed.manager") -> FrameworkInfo("EdXposed", FrameworkCategory.LEGACY_XPOSED)
+            checkClass(classLoader, "de.robv.android.xposed.XposedBridge") -> FrameworkInfo("Xposed", FrameworkCategory.LEGACY_XPOSED)
 
             // 3. 兜底：虽然被 Hook 了但无法识别框架
-            else -> UNKNOWN_FRAMEWORK
+            else -> FrameworkInfo(UNKNOWN_FRAMEWORK, FrameworkCategory.UNKNOWN)
         }
+    }
+
+    fun classifyFrameworkName(frameworkName: String?): FrameworkCategory {
+        return when (frameworkName?.trim()) {
+            "LSPosed" -> FrameworkCategory.LSPOSED
+            "EdXposed", "Xposed" -> FrameworkCategory.LEGACY_XPOSED
+            "LSPatch", "NPatch" -> FrameworkCategory.PATCH_EMBEDDED
+            else -> FrameworkCategory.UNKNOWN
+        }
+    }
+
+    fun isSupportedLsposedFramework(frameworkName: String?, apiVersion: Int): Boolean {
+        return apiVersion >= 101 &&
+            frameworkName?.trim() == "LSPosed" &&
+            classifyFrameworkName(frameworkName) == FrameworkCategory.LSPOSED
     }
 
     // --- 内部检测逻辑 ---

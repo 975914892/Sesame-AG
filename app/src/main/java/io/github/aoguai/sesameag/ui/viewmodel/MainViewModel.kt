@@ -45,16 +45,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- 内部状态定义 ---
     sealed class ModuleStatus {
+        enum class UnsupportedReason {
+            API_TOO_LOW,
+            NON_LSPOSED
+        }
+
         data object Loading : ModuleStatus()
         data object NotActivated : ModuleStatus()
         data class Unsupported(
             val frameworkName: String,
             val frameworkVersion: String,
-            val apiVersion: Int
+            val apiVersion: Int,
+            val reason: UnsupportedReason
         ) : ModuleStatus()
         data class Activated(
-            val frameworkName: String,     // 框架名称 (LSPosed, LSPatch...)
-            val frameworkVersion: String,  // 版本号 (LSPosed才有，其他可能为空)
+            val frameworkName: String,     // 仅支持维护的框架名称 (LSPosed)
+            val frameworkVersion: String,  // 版本号
             val apiVersion: Int            // API版本
         ) : ModuleStatus()
     }
@@ -145,27 +151,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun refreshModuleFrameworkStatus() {
         val lspState = LsposedServiceManager.connectionState
-
-        if (lspState is ConnectionState.Connected) {
-            val service = lspState.service
-            val frameworkName = runCatching { service.frameworkName }.getOrDefault("Xposed")
-            val frameworkVersion = runCatching { service.frameworkVersion }.getOrDefault("")
-            val apiVersion = runCatching { service.apiVersion }.getOrDefault(0)
-            _moduleStatus.value = if (apiVersion >= 101) {
-                ModuleStatus.Activated(
-                    frameworkName = frameworkName,
-                    frameworkVersion = frameworkVersion,
-                    apiVersion = apiVersion
-                )
-            } else {
-                ModuleStatus.Unsupported(
-                    frameworkName = frameworkName,
-                    frameworkVersion = frameworkVersion,
-                    apiVersion = apiVersion
-                )
-            }
-        } else {
+        if (lspState !is ConnectionState.Connected) {
             _moduleStatus.value = ModuleStatus.NotActivated
+            return
+        }
+
+        val frameworkStatus = LsposedServiceManager.connectedFrameworkStatus()
+        if (frameworkStatus == null) {
+            _moduleStatus.value = ModuleStatus.NotActivated
+            return
+        }
+
+        _moduleStatus.value = if (frameworkStatus.isSupportedLsposed) {
+            ModuleStatus.Activated(
+                frameworkName = frameworkStatus.frameworkName,
+                frameworkVersion = frameworkStatus.frameworkVersion,
+                apiVersion = frameworkStatus.apiVersion
+            )
+        } else {
+            ModuleStatus.Unsupported(
+                frameworkName = frameworkStatus.frameworkName,
+                frameworkVersion = frameworkStatus.frameworkVersion,
+                apiVersion = frameworkStatus.apiVersion,
+                reason = if (frameworkStatus.apiVersion < 101) {
+                    ModuleStatus.UnsupportedReason.API_TOO_LOW
+                } else {
+                    ModuleStatus.UnsupportedReason.NON_LSPOSED
+                }
+            )
         }
     }
 

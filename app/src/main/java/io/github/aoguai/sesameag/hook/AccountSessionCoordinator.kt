@@ -207,6 +207,31 @@ object AccountSessionCoordinator {
         return updated
     }
 
+    fun blockWorkflow(
+        context: Context?,
+        reason: String,
+        legalAccepted: Boolean? = null
+    ): ActiveAccountSession? {
+        val current = currentSession ?: return null
+        val accepted = legalAccepted ?: current.legalAccepted
+        if (!current.workflowAllowed && current.legalAccepted == accepted) {
+            return current
+        }
+        val updated = current.copy(
+            legalAccepted = accepted,
+            workflowAllowed = false
+        )
+        currentSession = updated
+        if (context != null) {
+            publishAccountContextChanged(context, updated)
+        }
+        Log.record(
+            TAG,
+            "block workflow gate: user=${updated.userId} legalAccepted=$accepted allowed=false reason=$reason"
+        )
+        return updated
+    }
+
     fun bindTrigger(trigger: ApplicationHookConstants.TriggerInfo): ApplicationHookConstants.TriggerInfo {
         val ownerUserId = trigger.ownerUserId?.trim()?.takeIf { it.isNotEmpty() }
             ?: currentSession?.userId

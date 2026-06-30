@@ -39,10 +39,9 @@ import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.ScheduledTaskRouter
 import io.github.aoguai.sesameag.hook.keepalive.SystemWakeScheduler
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
-import io.github.aoguai.sesameag.hook.rpc.bridge.NewRpcBridge
-import io.github.aoguai.sesameag.hook.rpc.bridge.OldRpcBridge
+import io.github.aoguai.sesameag.hook.rpc.bridge.AriverRpcBridge
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
-import io.github.aoguai.sesameag.hook.rpc.bridge.RpcVersion
+import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit.clearIntervalLimit
 import io.github.aoguai.sesameag.hook.server.ModuleHttpServerManager.startIfNeeded
 import io.github.aoguai.sesameag.model.BaseModel.Companion.batteryPerm
@@ -51,9 +50,6 @@ import io.github.aoguai.sesameag.model.BaseModel.Companion.debugMode
 import io.github.aoguai.sesameag.model.BaseModel.Companion.destroyData
 import io.github.aoguai.sesameag.model.BaseModel.Companion.execAtTimeList
 import io.github.aoguai.sesameag.model.BaseModel.Companion.manualTriggerAutoSchedule
-import io.github.aoguai.sesameag.model.BaseModel.Companion.newRpc
-import io.github.aoguai.sesameag.model.BaseModel.Companion.sendHookData
-import io.github.aoguai.sesameag.model.BaseModel.Companion.sendHookDataUrl
 import io.github.aoguai.sesameag.model.BaseModel.Companion.wakenAtTimeList
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.CoroutineTaskRunner
@@ -66,6 +62,7 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.GlobalThreadPools.shutdownAndRestart
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.Logback
 import io.github.aoguai.sesameag.util.Log.error
 import io.github.aoguai.sesameag.util.Log.printStackTrace
 import io.github.aoguai.sesameag.util.Log.record
@@ -136,13 +133,20 @@ class ApplicationHook {
     private fun handleHookLogic(loader: ClassLoader?, packageName: String, apkPath: String) {
         val activeLoader = loader ?: return
         classLoader = activeLoader
-        val framework = resolveCurrentFrameworkName(activeLoader)
+        finalProcessName = processName
+        val frameworkInfo = resolveCurrentFrameworkInfo(activeLoader)
+        val framework = frameworkInfo.displayName
+        if (frameworkInfo.category == ModuleStatus.FrameworkCategory.PATCH_EMBEDDED) {
+            remotePreferences = null
+            ModuleStatusReporter.updateNow(framework = framework, packageName = packageName, reason = "embedded_patch_blocked")
+            record(TAG, "⛔ 检测到 $framework 内置打包/补丁注入，停止安装 Hook")
+            return
+        }
 
         // 1. 初始化配置读取
         remotePreferences = loadRemotePreferences(framework)
 
         // 2. 进程检查
-        finalProcessName = processName
         if (!shouldHookProcess()) return
 
         init(Files.CONFIG_DIR)
@@ -208,10 +212,13 @@ class ApplicationHook {
             requireXposedInterface().hook(attachMethod).intercept { chain ->
                 val result = chain.proceed()
                 val context = chain.args[0] as? Context ?: return@intercept result
+                val application = chain.getThisObject() as? Application
                 appContext = context
                 mainHandler = Handler(Looper.getMainLooper())
                 Log.init(context)
                 ensureScheduler()
+                application?.let { PageStructureSnapshotter.install(it) }
+                RpcTrafficCapture.install(classLoader!!)
 
                 SecurityBodyHelper.init(classLoader!!)
                 AlipayMiniMarkHelper.init(classLoader!!)
@@ -731,6 +738,26 @@ class ApplicationHook {
          * 快照被误判为可信全量。可按实测调大；现有“重新登录”延时为 20s 作参考。
          */
         private const val FRIEND_CENTER_FIRST_SYNC_DEFER_MS: Long = 30_000L
+        private val MIN_SUPPORTED_RPC_VERSION = AlipayVersion("10.3.96.8100")
+
+        private fun ensureRpcVersionSupported(): Boolean {
+            val currentVersion = alipayVersion
+            if (currentVersion.versionString.isBlank()) {
+                record(TAG, "⚠️ 无法识别目标应用版本，继续尝试初始化 RPC")
+                return true
+            }
+            if (currentVersion >= MIN_SUPPORTED_RPC_VERSION) {
+                return true
+            }
+
+            val message = "目标应用版本过低，不支持当前 RPC 结构，最低版本 ${MIN_SUPPORTED_RPC_VERSION.versionString}"
+            record(TAG, message)
+            Log.runtime(TAG, "rpc unsupported host version: current=$currentVersion min=${MIN_SUPPORTED_RPC_VERSION.versionString}")
+            updateRunningStatus(message)
+            ApplicationHookConstants.clearPendingTriggers("unsupported_host_version")
+            AccountSessionCoordinator.blockWorkflow(appContext, "unsupported_host_version")
+            return false
+        }
 
         /**
          * 后移“从目标应用侧获取好友实时快照”的时机：init 阶段不再同步拉取，改为延时后在后台执行，
@@ -764,8 +791,6 @@ class ApplicationHook {
         @Volatile
         var rpcBridge: RpcBridge? = null
         private val rpcBridgeLock = Any()
-
-        private var rpcVersion: RpcVersion? = null
 
         @Volatile
         var lastExecTime: Long = 0
@@ -1033,6 +1058,7 @@ class ApplicationHook {
                 record(TAG, "Sesame-AG 开始初始化...")
 
                 Config.load(userId)
+                Logback.reloadFileLogging()
                 val activeUserSnapshot = AccountSessionCoordinator.ensureActiveUserSnapshot(userId, activeClassLoader)
                 val legalAccepted = Config.isLoaded() && Config.isLegalAcceptedForCurrentVersion()
                 val workflowAllowed =
@@ -1056,6 +1082,9 @@ class ApplicationHook {
                 if (!ensureLegalAcceptanceForWorkflow()) {
                     return false
                 }
+                if (!ensureRpcVersionSupported()) {
+                    return false
+                }
 
                 // Phase 7：DataStore watcher 生命周期治理（用户切换/重载后重启 watcher，避免丢失跨进程同步能力）
                 try {
@@ -1075,14 +1104,8 @@ class ApplicationHook {
                 setWakenAtTimeAlarm()
 
                 synchronized(rpcBridgeLock) {
-                    rpcBridge = if (newRpc.value == true) NewRpcBridge() else OldRpcBridge()
+                    rpcBridge = AriverRpcBridge()
                     rpcBridge!!.load()
-                    rpcVersion = rpcBridge!!.getVersion()
-                }
-
-                if (newRpc.value == true && debugMode.value == true) {
-                    HookUtil.hookRpcBridgeExtension(classLoader!!, sendHookData.value == true, sendHookDataUrl.value ?: "")
-                    HookUtil.hookDefaultBridgeCallback(classLoader!!)
                 }
 
                 start(userId)
@@ -1203,7 +1226,6 @@ class ApplicationHook {
 
                 synchronized(rpcBridgeLock) {
                     if (rpcBridge != null) {
-                        rpcVersion = null
                         rpcBridge!!.unload()
                         rpcBridge = null
                     }
@@ -1464,6 +1486,7 @@ class ApplicationHook {
                 filter.addAction(ApplicationHookConstants.BroadcastActions.MANUAL_TASK)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.HOOK_READY)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.PERMISSION_SNAPSHOT)
+                filter.addAction(ApplicationHookConstants.BroadcastActions.CAPTURE_PAGE_SNAPSHOT)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.REFRESH_EXCHANGE_OPTIONS)
 
@@ -1539,7 +1562,11 @@ class ApplicationHook {
         }
 
         internal fun resolveCurrentFrameworkName(loader: ClassLoader? = classLoader): String {
-            return ModuleStatus.resolveFrameworkName(frameworkRuntimeInfo?.name, loader)
+            return resolveCurrentFrameworkInfo(loader).displayName
+        }
+
+        internal fun resolveCurrentFrameworkInfo(loader: ClassLoader? = classLoader): ModuleStatus.FrameworkInfo {
+            return ModuleStatus.resolveFrameworkInfo(frameworkRuntimeInfo?.name, loader)
         }
 
         private fun updateFrameworkRuntimeInfo(xposedInterface: XposedInterface?) {

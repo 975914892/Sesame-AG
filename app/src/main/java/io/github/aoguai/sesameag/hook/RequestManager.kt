@@ -222,8 +222,6 @@ object RequestManager {
         }
     }
 
-    // ================== 公开 API (保持不变) ==================
-
     @JvmStatic
     fun requestString(rpcEntity: RpcEntity): String {
         val method = rpcEntity.requestMethod
@@ -243,14 +241,7 @@ object RequestManager {
     @JvmStatic
     fun requestString(method: String?, data: String?): String {
         return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, tc, ri ->
-            bridge.requestString(method, data, tc, ri)
-        }
-    }
-
-    @JvmStatic
-    fun requestString(method: String?, data: String?, relation: String?): String {
-        return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, tc, ri ->
-            bridge.requestString(method, data, relation, tc, ri)
+            bridge.requestString(RpcEntity(method, data), tc, ri)
         }
     }
 
@@ -262,53 +253,15 @@ object RequestManager {
         methodName: String?,
         facadeName: String?
     ): String {
-        return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, _, _ ->
-            bridge.requestString(method, data, appName, methodName, facadeName)
+        return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, tc, ri ->
+            bridge.requestString(RpcEntity(method, data, appName, methodName, facadeName), tc, ri)
         }
     }
 
     @JvmStatic
     fun requestString(method: String?, data: String?, tryCount: Int, retryInterval: Int): String {
         return requestStringWithPolicy(method, tryCount, retryInterval) { bridge, tc, ri ->
-            bridge.requestString(method, data, tc, ri)
-        }
-    }
-
-    @JvmStatic
-    fun requestString(
-        method: String?,
-        data: String?,
-        relation: String?,
-        tryCount: Int,
-        retryInterval: Int
-    ): String {
-        return requestStringWithPolicy(method, tryCount, retryInterval) { bridge, tc, ri ->
-            bridge.requestString(method, data, relation, tc, ri)
-        }
-    }
-
-    @JvmStatic
-    fun requestObject(rpcEntity: RpcEntity?, tryCount: Int, retryInterval: Int) {
-        if (rpcEntity == null) return
-        // requestObject 不涉及返回值判断，但同样需要离线检查
-        if (tryBlockByOffline(rpcEntity.requestMethod ?: rpcEntity.methodName) != null) {
-            return
-        }
-
-        val bridge = getRpcBridge()
-        if (bridge == null) {
-            handleFailure("requestObject", "Bridge Unavailable")
-            return
-        }
-
-        try {
-            bridge.requestObject(rpcEntity, normalizeTryCount(tryCount), retryInterval)
-            // requestObject 没有返回值，假设只要不抛异常就算成功？
-            // 或者保守一点，不重置 errorCount，也不增加 errorCount
-            errorCount.set(0)
-        } catch (e: Throwable) {
-            Log.printStackTrace(TAG, "requestObject 异常: ${rpcEntity.methodName}", e)
-            handleFailure(rpcEntity.methodName ?: "Unknown", "Exception")
+            bridge.requestString(RpcEntity(method, data), tc, ri)
         }
     }
 }

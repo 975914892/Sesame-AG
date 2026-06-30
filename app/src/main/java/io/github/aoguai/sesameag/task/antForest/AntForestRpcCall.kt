@@ -447,6 +447,19 @@ object AntForestRpcCall {
         }
     }
 
+    private fun buildScopedRequestData(requestBody: JSONObject, vararg pathSegments: String): String {
+        // 新结构不再单独传 relationLocal，统一把路径选择和请求体并入 requestData。
+        return JSONObject().apply {
+            put(
+                "pathList",
+                JSONArray().apply {
+                    pathSegments.forEach { put(it) }
+                }
+            )
+            put("requestBody", JSONArray().put(requestBody))
+        }.toString()
+    }
+
     @JvmStatic
     fun queryFriendsEnergyRanking(): String {
         return try {
@@ -456,13 +469,11 @@ object AntForestRpcCall {
                 put("rankType", "energyRank")
                 put("version", VERSION)
             }
-            val correlationLocal = JSONObject().apply {
-                put("pathList", JSONArray().put("friendRanking").put("myself").put("totalDatas"))
-            }
             RequestManager.requestString(
-                "alipay.antmember.forest.h5.queryEnergyRanking",
-                "[$arg]",
-                "[$correlationLocal]"
+                RpcEntity(
+                    requestMethod = "alipay.antmember.forest.h5.queryEnergyRanking",
+                    requestData = buildScopedRequestData(arg, "friendRanking", "myself", "totalDatas")
+                )
             )
         } catch (e: Exception) {
             ""
@@ -548,13 +559,11 @@ object AntForestRpcCall {
                 put("source", "chInfo_ch_appcenter__chsub_9patch")
                 put("userIdList", userIdList)
             }
-            val joRelationLocal = JSONObject().apply {
-                put("pathList", JSONArray().put("friendRanking"))
-            }
             RequestManager.requestString(
-                "alipay.antforest.forest.h5.fillUserRobFlag",
-                "[$arg]",
-                "[$joRelationLocal]"
+                RpcEntity(
+                    requestMethod = "alipay.antforest.forest.h5.fillUserRobFlag",
+                    requestData = buildScopedRequestData(arg, "friendRanking")
+                )
             )
         } catch (e: Exception) {
             ""

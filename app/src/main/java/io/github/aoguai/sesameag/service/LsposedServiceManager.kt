@@ -3,6 +3,7 @@ package io.github.aoguai.sesameag.service
 
 import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.ModuleStatus
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
 import java.util.concurrent.CopyOnWriteArrayList
@@ -33,6 +34,24 @@ object LsposedServiceManager {
     val isModuleActivated: Boolean
         get() = _connectionState.get() is ConnectionState.Connected
 
+    fun connectedFrameworkStatus(): ConnectedFrameworkStatus? {
+        val activeService = service ?: return null
+        val frameworkName = runCatching { activeService.frameworkName }.getOrDefault("Xposed")
+        val frameworkVersion = runCatching { activeService.frameworkVersion }.getOrDefault("")
+        val apiVersion = runCatching { activeService.apiVersion }.getOrDefault(0)
+        return ConnectedFrameworkStatus(
+            frameworkName = frameworkName,
+            frameworkVersion = frameworkVersion,
+            apiVersion = apiVersion,
+            category = ModuleStatus.classifyFrameworkName(frameworkName)
+        )
+    }
+
+    fun isSupportedLsposedService(): Boolean {
+        val frameworkStatus = connectedFrameworkStatus() ?: return false
+        return frameworkStatus.isSupportedLsposed
+    }
+
     /** 状态监听器列表 */
     private val listeners = CopyOnWriteArrayList<(ConnectionState) -> Unit>()
 
@@ -51,7 +70,7 @@ object LsposedServiceManager {
                     Log.record(TAG, "Another Xposed service tried to connect: $frameworkName. Ignoring.")
                     return
                 }
-                Log.record(TAG, "LSPosed service connected: $frameworkName v$frameworkVersion")
+                Log.record(TAG, "Framework service connected: $frameworkName v$frameworkVersion")
                 updateState(ConnectionState.Connected(boundService))
                 refreshScope()
             }
@@ -59,7 +78,7 @@ object LsposedServiceManager {
             override fun onServiceDied(deadService: XposedService) {
                 // 检查 service 属性而不是直接比较，避免在多线程环境下的竞态条件
                 if (service == deadService) {
-                    Log.record(TAG, "LSPosed service died.")
+                    Log.record(TAG, "Framework service died.")
                     _scopePackages.set(emptySet())
                     updateState(ConnectionState.Disconnected)
                 }
@@ -82,6 +101,10 @@ object LsposedServiceManager {
     }
 
     fun refreshScope(): Set<String> {
+        if (!isSupportedLsposedService()) {
+            _scopePackages.set(emptySet())
+            return emptySet()
+        }
         val activeService = service ?: run {
             _scopePackages.set(emptySet())
             return emptySet()
@@ -96,18 +119,33 @@ object LsposedServiceManager {
     }
 
     fun hasTargetScope(packageName: String = General.PACKAGE_NAME): Boolean {
+        if (!isSupportedLsposedService()) {
+            return false
+        }
         val scope = scopePackages.ifEmpty { refreshScope() }
         return packageName in scope
     }
 
     fun requestTargetScope(onFinished: (ScopeRequestResult) -> Unit): Boolean {
-        val activeService = service ?: run {
+        val frameworkStatus = connectedFrameworkStatus() ?: run {
             onFinished(ScopeRequestResult(false, message = "LSPosed service is not connected"))
             return false
         }
-        val apiVersion = runCatching { activeService.apiVersion }.getOrDefault(0)
-        if (apiVersion < 101) {
-            onFinished(ScopeRequestResult(false, message = "Unsupported libxposed API: $apiVersion"))
+        if (frameworkStatus.apiVersion < 101) {
+            onFinished(ScopeRequestResult(false, message = "Unsupported libxposed API: ${frameworkStatus.apiVersion}"))
+            return false
+        }
+        if (!frameworkStatus.isSupportedLsposed) {
+            onFinished(
+                ScopeRequestResult(
+                    false,
+                    message = "Only official LSPosed is supported; current framework: ${frameworkStatus.frameworkName}"
+                )
+            )
+            return false
+        }
+        val activeService = service ?: run {
+            onFinished(ScopeRequestResult(false, message = "LSPosed service is not connected"))
             return false
         }
 
@@ -160,3 +198,13 @@ data class ScopeRequestResult(
     val approved: List<String> = emptyList(),
     val message: String = ""
 )
+
+data class ConnectedFrameworkStatus(
+    val frameworkName: String,
+    val frameworkVersion: String,
+    val apiVersion: Int,
+    val category: ModuleStatus.FrameworkCategory
+) {
+    val isSupportedLsposed: Boolean
+        get() = ModuleStatus.isSupportedLsposedFramework(frameworkName, apiVersion)
+}

@@ -12,7 +12,6 @@ import kotlin.concurrent.Volatile
 class RpcEntity @JvmOverloads constructor(
     val requestMethod: String? = null,
     val requestData: String? = null,
-    val requestRelation: String? = null,
     val appName: String? = null,
     val methodName: String? = "taskFeedback",
     val facadeName: String? = null,
@@ -70,7 +69,6 @@ class RpcEntity @JvmOverloads constructor(
             jo.put("methodName", this.methodName)
             jo.put("operationType", this.requestMethod)
             jo.put("requestData", this.requestData)
-            jo.put("relationLocal", this.requestRelation)
             if (!this.headers.isNullOrEmpty()) {
                 jo.put("headers", JSONObject(this.headers))
             }

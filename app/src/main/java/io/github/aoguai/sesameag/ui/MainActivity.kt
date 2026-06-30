@@ -145,7 +145,7 @@ class MainActivity : ComponentActivity() {
                 contextPackage = intent.getStringExtra("contextPackage").orEmpty(),
                 targetBatteryIgnored = intent.getBooleanExtra("targetBatteryIgnored", false),
                 targetExactAlarmAllowed = if (intent.hasExtra("targetExactAlarmAllowed")) {
-                    intent.extras?.get("targetExactAlarmAllowed") as? Boolean
+                    intent.getBooleanExtra("targetExactAlarmAllowed", false)
                 } else {
                     null
                 }
@@ -700,7 +700,7 @@ class MainActivity : ComponentActivity() {
                 status = lsposedScopeStatus(targetInstalled, requesting),
                 policy = PermissionPolicy.AUTO_CRITICAL,
                 title = "LSPosed 目标应用作用域",
-                description = "首次使用请把目标应用加入模块作用域，然后重新打开目标应用或返回本页复查",
+                description = "仅LSPosed 支持自动申请与校验作用域；首次使用请把目标应用加入作用域后重新打开目标应用或返回本页复查",
                 actionLabel = if (targetInstalled) "申请作用域" else null
             ),
             PermissionHealthItem(
@@ -787,10 +787,9 @@ class MainActivity : ComponentActivity() {
         requesting: PermissionRequirement?
     ): PermissionStatus {
         if (!targetInstalled) return PermissionStatus.UNAVAILABLE
-        val state = LsposedServiceManager.connectionState
-        if (state !is ConnectionState.Connected) return PermissionStatus.UNAVAILABLE
-        val apiVersion = runCatching { state.service.apiVersion }.getOrDefault(0)
-        if (apiVersion < 101) return PermissionStatus.UNSUPPORTED
+        val frameworkStatus = LsposedServiceManager.connectedFrameworkStatus() ?: return PermissionStatus.UNAVAILABLE
+        if (frameworkStatus.apiVersion < 101) return PermissionStatus.UNSUPPORTED
+        if (!frameworkStatus.isSupportedLsposed) return PermissionStatus.UNSUPPORTED
         if (LsposedServiceManager.hasTargetScope(General.PACKAGE_NAME)) {
             markPermissionGranted(PermissionRequirement.LSPOSED_TARGET_SCOPE)
             return PermissionStatus.GRANTED
