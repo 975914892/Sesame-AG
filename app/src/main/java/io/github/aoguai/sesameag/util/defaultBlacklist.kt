@@ -93,6 +93,7 @@ private val sesameAlchemyDefaultBlacklist = setOf(
     "hjwf_youxi_renwu_sanfang|去玩我的***世界", // 参数错误：promiseActivityExtCheck
     "hjwf_xiangjiangshikaipao_renwu|去玩向僵尸开炮", // 参数错误：promiseActivityExtCheck
     "hjwf_sanguobingheshidai_renwu|去玩三国冰河时代", // 参数错误：promiseActivityExtCheck
+    "hjwf_xundaodaqian_renwu|去玩寻道大千", // 参数错误：promiseActivityExtCheck
     "hjwf_jihewangguo_renwu|去玩几何王国", // 参数错误：promiseActivityExtCheck
     "hjwf_longjizhicheng_renwu|去玩龙迹之城" // 参数错误：promiseActivityExtCheck
 )
@@ -118,6 +119,11 @@ private val orchardDefaultBlacklist = setOf(
     "LINGHUOTIAOKONG",                  // 逛一逛新浪微博
     "ORCHARD_NORMAL_XIANYU_DUAN",       // 逛一逛闲鱼
     "ANTFARM_ORCHARD_NORMAL_YITAO",     // 逛一逛一淘
+    "ORCHARD_NCLY_GAME_multiple|继续玩消消瓜果园", // finishTask 返回 400000040，不支持rpc调用
+    "ORCHARD_NCLY_GAME_CHARGE0|任意充值得100000肥", // finishTask 返回 400000040，不支持rpc调用
+    "ANTFARM_ORCHARD_NORMAL_CAINIAO_DUAN|逛一逛菜鸟领好礼", // finishTask 返回 400000040，不支持rpc调用
+    "ORCHARD_NORMAL_GAODE_VISIT|去高德发表真实评价", // finishTask 返回 400000040，不支持rpc调用
+    "ORCHARD_NORMAL_SHANGOUMIANDAN|逛一逛淘宝闪购", // finishTask 返回 400000040，不支持rpc调用
     "ORCHARD_NORMAL_TAOBAOTAOLIPAI_VISIT|逛一逛淘宝拍照", // 不支持rpc调用
     "ORCHARD_NORMAL_TAOBAO26_618|去淘金币赢20亿", // 不支持rpc调用，缺少稳定完成RPC闭环
     "TAOBAO|逛一逛签到领现金", // 不支持rpc调用，缺少稳定完成RPC闭环
@@ -151,6 +157,7 @@ private val farmDefaultBlacklist = setOf(
     "OFFLINE_PAY",                     // 到店付款
     "ONLINE_PAY",                      // 线上支付
     "HUABEI_MAP_180",                  // 用花呗完成一笔支付
+    "wdhysj_30srw2026|试玩庄园火爆小游戏", // 最新庄园游戏任务，先默认跳过避免持续触发风控
     "【限时】玩游戏得新机会",        // 庄园装扮抽抽乐等活动中可能出现
     "限时玩游戏得新机会",            // 同上（部分任务标题不带【】）
     "茉莉雪梨卷任务",
@@ -165,8 +172,11 @@ private val oceanDefaultBlacklist = setOf(
     "玩一玩生存33天",
     "DAOLIU_SCSST_GAME_NEW",
     "LMCT_QDRW_HAIYANG",       // finishTask 返回 400000040，不支持rpc调用
+    "CNXDY_QDRW_HAIYANG|随机任务：玩一玩超能下蛋鸭", // finishTask 返回 400000040，不支持rpc调用
+    "LJZC_QDRW_HAIYANG|随机任务：玩一玩龙迹之城", // finishTask 返回 400000040，不支持rpc调用
     "mokuai_senlin_hydrw|随机任务：玩一玩得拼图", // finishTask 返回 400000040，不支持rpc调用
     "MHXCZ_QDRW_HAIYANG|随机任务：玩一玩梦幻消除战", // finishTask 返回 400000040，不支持rpc调用
+    "QYJZFM_QDRW_HAIYANG|随机任务：玩一玩青云诀之伏魔", // finishTask 返回 400000040，不支持rpc调用
     "随机任务：玩一玩浪漫餐厅", // finishTask 返回 400000040，不支持rpc调用
     "FKSSJ_QDRWCG_HAIYANG|随机任务：玩一玩疯狂水世界" // finishTask 返回 400000040，不支持rpc调用
 )

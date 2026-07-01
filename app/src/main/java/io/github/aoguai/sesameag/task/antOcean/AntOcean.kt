@@ -599,10 +599,6 @@ class AntOcean : ModelTask() {
                 taskTitle.contains("清理海域"))
     }
 
-    private fun isUnsupportedNoClosureOceanTask(taskType: String): Boolean {
-        return taskType == "CNXDY_QDRW_HAIYANG" || taskType == "mokuai_senlin_hydrw"
-    }
-
     private fun markOceanTasksDoneInvalidated() {
         oceanTasksDoneInvalidatedThisRun = true
     }
@@ -1909,7 +1905,7 @@ class AntOcean : ModelTask() {
         rpc: String,
         detail: String
     ): TaskFlowActionResult {
-        val failureType = normalizeOceanTaskFailureType(item.type, classifyOceanTaskFailure(response))
+        val failureType = classifyOceanTaskFailure(response)
         return TaskFlowActionResult.failure(
             failureType = failureType,
             code = extractOceanTaskFailureCode(response),
@@ -1918,20 +1914,6 @@ class AntOcean : ModelTask() {
             raw = response.toString(),
             detail = detail
         )
-    }
-
-    private fun normalizeOceanTaskFailureType(
-        taskType: String,
-        failureType: TaskRpcFailureType
-    ): TaskRpcFailureType {
-        if (failureType != TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE) {
-            return failureType
-        }
-        return if (isUnsupportedNoClosureOceanTask(taskType)) {
-            TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
-        } else {
-            TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW
-        }
     }
 
     private fun oceanTaskActionDetail(
@@ -2161,7 +2143,7 @@ class AntOcean : ModelTask() {
         taskTitle: String,
         response: JSONObject
     ) {
-        val failureType = normalizeOceanTaskFailureType(taskType, classifyOceanTaskFailure(response))
+        val failureType = classifyOceanTaskFailure(response)
         val code = extractOceanTaskFailureCode(response).ifBlank { "UNKNOWN" }
         val message = extractOceanTaskFailureMessage(response).ifBlank { "UNKNOWN" }
         val detail = "module=神奇海洋 taskType=$taskType taskName=$taskTitle " +

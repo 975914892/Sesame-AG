@@ -3226,7 +3226,6 @@ class AntFarm : ModelTask() {
                     ) -> FarmTaskClosureRoute.OwnerBusiness("抽抽乐")
 
             meta.taskType in setOf("XJLY_xxljy", "XJLYKBX1_sl90") ||
-                meta.tracerGroupId == "26wufuczhl" ||
                 meta.categorizationGameId == "2021005181698249" ||
                 (
                     meta.innerAction == "PARADISE" &&
