@@ -183,10 +183,11 @@ object DataStore {
      */
     private fun forceLoadFromDisk() {
         try {
-            if (!::storageFile.isInitialized || !storageFile.exists() || storageFile.length() == 0L) {
-                // 如果文件不存在或为空，我们假设内存是空的。
-                data.clear()
-                lastLoadedTime.set(0)
+            if (!::storageFile.isInitialized) {
+                return
+            }
+            if (!storageFile.exists() || storageFile.length() == 0L) {
+                // saveToDisk 可能正在跨进程替换文件；这里保留当前快照，避免把 activedUser 等键误清空。
                 return
             }
 
@@ -253,10 +254,22 @@ object DataStore {
         indentObjectsWith(DefaultIndenter("    ", DefaultIndenter.SYS_LF))
     }
 
+    private fun createWriteTempFile(): File {
+        val parentDir = storageFile.parentFile
+            ?: throw IllegalStateException("DataStore parent directory is missing")
+        if (!parentDir.exists() && !parentDir.mkdirs()) {
+            throw IllegalStateException("Failed to create DataStore directory: ${parentDir.absolutePath}")
+        }
+        setWorldReadableWritable(parentDir)
+        // 多进程共用固定 .tmp 会互相 rename/delete，临时文件必须按次唯一。
+        return File.createTempFile("${storageFile.name}.", ".tmp", parentDir)
+    }
+
     private fun saveToDisk() {
         if (!::storageFile.isInitialized) return
+        var tempFile: File? = null
         try {
-            val tempFile = File(storageFile.parentFile, storageFile.name + ".tmp")
+            tempFile = createWriteTempFile()
             // 1. 写入临时文件
             mapper.writer(prettyPrinter).writeValue(tempFile, data)
             // 2. 设置临时文件权限 (关键：确保 .tmp 也是 666)
@@ -265,23 +278,11 @@ object DataStore {
             lastWriteTime.set(System.currentTimeMillis())
             // 4. 尝试原子重命名 (Atomic Rename)
             var renameSuccess = tempFile.renameTo(storageFile)
-            // 5. 如果重命名失败 (常见于目标文件已存在或不同挂载点)
-            if (!renameSuccess) {
-                // 尝试先删除旧文件
-                if (storageFile.exists()) {
-                    storageFile.delete()
-                }
-                // 再次尝试重命名
-                renameSuccess = tempFile.renameTo(storageFile)
-            }
-            // 6. 如果依然失败，使用流复制 (Copy Stream) 作为最终手段
+            // 5. 如果重命名失败，直接 copy 覆盖，避免先删主文件造成跨进程读到“文件不存在”。
             if (!renameSuccess) {
                 Log.w(TAG, "renameTo failed, falling back to copy stream.")
                 try {
-                    // 强制复制内容
                     tempFile.copyTo(storageFile, overwrite = true)
-                    // 复制成功后删除临时文件
-                    tempFile.delete()
                     renameSuccess = true
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to copy temp file to storage file", e)
@@ -296,6 +297,10 @@ object DataStore {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save config", e)
+        } finally {
+            if (tempFile?.exists() == true) {
+                tempFile.delete()
+            }
         }
     }
 
@@ -327,7 +332,12 @@ object DataStore {
 
             watchService = watch
             runCatching {
-                path.register(watch, StandardWatchEventKinds.ENTRY_MODIFY)
+                path.register(
+                    watch,
+                    StandardWatchEventKinds.ENTRY_CREATE,
+                    StandardWatchEventKinds.ENTRY_DELETE,
+                    StandardWatchEventKinds.ENTRY_MODIFY
+                )
             }.onFailure { e ->
                 runCatching { watch.close() }
                 Log.e(TAG, "Failed to register watch service", e)

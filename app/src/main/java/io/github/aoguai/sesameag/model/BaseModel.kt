@@ -37,6 +37,7 @@ class BaseModel : Model() {
         modelFields.addField(checkInterval) //执行间隔时间
         modelFields.addField(offlineCooldown) //离线冷却时间
         modelFields.addField(taskExecutionRounds) //轮数
+        modelFields.addField(taskMaxConcurrency) //任务并发数
         modelFields.addField(taskTimeout) //单任务超时时间
         modelFields.addField(modelSleepTime) //模块休眠时间范围
         modelFields.addField(execAtTimeList) //定时执行的时间点列表
@@ -115,6 +116,13 @@ class BaseModel : Model() {
         val taskExecutionRounds: IntegerModelField = IntegerModelField("taskExecutionRounds", "任务执行轮数", 1, 1, 99).withDesc(
             "每次总调度内重复执行任务的轮数，通常 1 轮即可；调高会增加耗时和风控概率。"
         ) //1轮就好，没必要2轮
+
+        /**
+         * 任务并发数配置
+         */
+        val taskMaxConcurrency: IntegerModelField = IntegerModelField("taskMaxConcurrency", "任务并发数", 1, 1, 3).withDesc(
+            "控制每个批次最多同时运行的任务协程数；默认 1 更稳妥，调高会增加请求频率和风控概率。"
+        )
 
         /**
          * 单任务超时时间（分钟）

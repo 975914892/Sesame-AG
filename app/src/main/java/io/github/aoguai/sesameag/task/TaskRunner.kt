@@ -20,22 +20,24 @@ import io.github.aoguai.sesameag.task.antSesameCredit.AntSesameCredit
 import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.Notify.updateRunningTaskOrder
 import io.github.aoguai.sesameag.util.Notify.updateRunningNextExec
 import io.github.aoguai.sesameag.util.TimeUtil
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -52,9 +54,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         private const val TAG = "CoroutineTaskRunner"
         private const val DEFAULT_TASK_TIMEOUT = 10 * 60 * 1000L // 10分钟
 
-        // 最大并发数，防止请求过于频繁触发风控
-        // 可以做成配置项，目前硬编码为 3
-        private const val MAX_CONCURRENCY = 3
+        private const val DEFAULT_MAX_CONCURRENCY = 1
 
         private val TIMEOUT_WHITELIST = setOf("蚂蚁森林", "蚂蚁庄园", "运动")
     }
@@ -69,13 +69,25 @@ class CoroutineTaskRunner(allModels: List<Model>) {
     private val longRunningJobs = ConcurrentLinkedQueue<LongRunningJob>()
     private var runSessionOwnerUserId: String? = null
     private var runSessionEpoch: Long = 0L
+    private var maxConcurrency: Int = DEFAULT_MAX_CONCURRENCY
+    private lateinit var taskConcurrencyLimiter: Semaphore
+    private lateinit var longRunningTaskLimiter: Semaphore
 
     private data class LongRunningJob(
         val taskId: String,
         val startTime: Long,
         val task: ModelTask,
-        val job: Job
-    )
+        val job: Job,
+        val releaseResources: () -> Unit
+    ) {
+        private val released = AtomicBoolean(false)
+
+        fun releaseResourcesOnce() {
+            if (released.compareAndSet(false, true)) {
+                releaseResources()
+            }
+        }
+    }
 
     /**
      * 启动任务执行流程
@@ -107,7 +119,10 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         }
 
         try {
-            Log.record(TAG, "🚀 开始执行任务流程 (并发数: $MAX_CONCURRENCY)")
+            maxConcurrency = BaseModel.taskMaxConcurrency.value ?: DEFAULT_MAX_CONCURRENCY
+            taskConcurrencyLimiter = Semaphore(maxConcurrency)
+            longRunningTaskLimiter = Semaphore(1)
+            Log.record(TAG, "🚀 开始执行任务流程 (并发数: $maxConcurrency)")
 
             CustomSettings.loadForTaskRunner()
             val status = CustomSettings.getOnceDailyStatus(enableLog = true)
@@ -199,40 +214,43 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         }
 
         val taskBatches = buildExecutionBatches(tasksToRun)
+        updateRunningTaskOrder(taskBatches.flatten().map { it.getName() })
         Log.record(TAG, "🔄 [第 $round/$totalRounds 轮] 开始，共 ${tasksToRun.size} 个任务，分 ${taskBatches.size} 个批次")
 
-        // 2. 分批执行，每批内部保留并发能力
+        // 2. 按原顺序将各批次任务加入同一轮全局并发队列，再统一等待全部结束。
+        val deferreds = mutableListOf<Job>()
         for ((batchIndex, batchTasks) in taskBatches.withIndex()) {
             if (ApplicationHookConstants.isOffline()) {
                 Log.record(TAG, "⏸ [第 $round/$totalRounds 轮] 检测到离线模式，停止后续批次")
                 break
             }
-            executeTaskBatch(round, totalRounds, batchIndex + 1, taskBatches.size, batchTasks)
+            deferreds += scheduleTaskBatch(round, totalRounds, batchIndex + 1, taskBatches.size, batchTasks)
         }
+        deferreds.joinAll()
 
         val roundTime = System.currentTimeMillis() - roundStartTime
         Log.record(TAG, "✅ [第 $round/$totalRounds 轮] 结束，耗时: ${roundTime}ms")
     }
 
-    private suspend fun executeTaskBatch(
+    private fun CoroutineScope.scheduleTaskBatch(
         round: Int,
         totalRounds: Int,
         batchIndex: Int,
         totalBatches: Int,
         tasks: List<ModelTask>
-    ) = coroutineScope {
+    ): List<Job> {
         if (tasks.isEmpty()) {
-            return@coroutineScope
+            return emptyList()
         }
         if (!isRunSessionCurrent()) {
             logSessionInvalid("batch_${round}_$batchIndex")
             skippedCount.addAndGet(tasks.size)
-            return@coroutineScope
+            return emptyList()
         }
         if (ApplicationHookConstants.isOffline()) {
             skippedCount.addAndGet(tasks.size)
             Log.record(TAG, "⏸ [第 $round/$totalRounds 轮][批次 $batchIndex/$totalBatches] 检测到离线模式，跳过批次")
-            return@coroutineScope
+            return emptyList()
         }
 
         Log.record(
@@ -240,8 +258,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             "🧩 [第 $round/$totalRounds 轮][批次 $batchIndex/$totalBatches] ${tasks.joinToString("、") { it.getName().orEmpty() }}"
         )
 
-        val semaphore = Semaphore(MAX_CONCURRENCY)
-        val deferreds = tasks.map { task ->
+        return tasks.map { task ->
             async {
                 if (!isRunSessionCurrent()) {
                     Log.record(TAG, "⏸ 任务 ${task.getName()} 因会话切换而中止")
@@ -252,23 +269,9 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                     Log.record(TAG, "⏸ 任务 ${task.getName()} 因手动模式启动而中止")
                     return@async
                 }
-                semaphore.withPermit {
-                    if (!isRunSessionCurrent()) {
-                        Log.record(TAG, "⏸ 任务 ${task.getName()} 因会话切换而中止")
-                        skippedCount.incrementAndGet()
-                        return@withPermit
-                    }
-                    if (ApplicationHookConstants.isOffline()) {
-                        skippedCount.incrementAndGet()
-                        Log.record(TAG, "⏸ 任务 ${task.getName()} 因离线模式启动而中止")
-                        return@withPermit
-                    }
-                    executeSingleTask(task, round)
-                }
+                executeSingleTask(task, round)
             }
         }
-
-        deferreds.awaitAll()
     }
 
     private fun buildExecutionBatches(tasks: List<ModelTask>): List<List<ModelTask>> {
@@ -355,16 +358,56 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         }
 
         val isWhitelist = isLongRunningTask(task, taskName)
-
         val timeout = (BaseModel.taskTimeout.value ?: DEFAULT_TASK_TIMEOUT).toLong()
+        var acquiredConcurrencySlot = false
+        var acquiredLongRunningSlot = false
+        var trackedLongRunningJob = false
+
+        fun releaseTaskSlots() {
+            if (acquiredConcurrencySlot) {
+                taskConcurrencyLimiter.release()
+                acquiredConcurrencySlot = false
+            }
+            if (acquiredLongRunningSlot) {
+                longRunningTaskLimiter.release()
+                acquiredLongRunningSlot = false
+            }
+        }
 
         try {
+            if (isWhitelist) {
+                longRunningTaskLimiter.acquire()
+                acquiredLongRunningSlot = true
+            }
+            taskConcurrencyLimiter.acquire()
+            acquiredConcurrencySlot = true
+
+            if (!isRunSessionCurrent()) {
+                skippedCount.incrementAndGet()
+                Log.record(TAG, "⏸ 任务 ${task.getName()} 在等待并发槽位后因会话切换而中止")
+                return
+            }
+            if (ManualTask.isManualRunning) {
+                Log.record(TAG, "⏸ 任务 ${task.getName()} 在等待并发槽位后因手动模式启动而中止")
+                return
+            }
+            if (ApplicationHookConstants.isOffline()) {
+                skippedCount.incrementAndGet()
+                Log.record(TAG, "⏸ 任务 ${task.getName()} 在等待并发槽位后因离线模式启动而中止")
+                return
+            }
+
             Log.record(TAG, "▶️ 启动: $taskId")
             task.addRunCents()
 
             val job = task.startTask(force = false, rounds = 1)
             if (isWhitelist) {
-                longRunningJobs.add(LongRunningJob(taskId, startTime, task, job))
+                val longRunningJob = LongRunningJob(taskId, startTime, task, job) { releaseTaskSlots() }
+                longRunningJobs.add(longRunningJob)
+                trackedLongRunningJob = true
+                job.invokeOnCompletion {
+                    longRunningJob.releaseResourcesOnce()
+                }
                 if (job.isActive) {
                     Log.record(TAG, "✨ $taskId 启动成功 (后台运行中)")
                 }
@@ -401,6 +444,10 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             val time = System.currentTimeMillis() - startTime
             failureCount.incrementAndGet()
             Log.error(TAG, "❌ 失败: $taskId (${e.message})")
+        } finally {
+            if (!trackedLongRunningJob) {
+                releaseTaskSlots()
+            }
         }
     }
 
@@ -412,6 +459,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 Log.record(TAG, "⏸ 会话已切换，中断白名单长任务: ${longRunningJob.taskId}")
                 longRunningJob.task.stopTask()
                 longRunningJob.job.cancel()
+                longRunningJob.releaseResourcesOnce()
                 longRunningJobs.remove(longRunningJob)
                 skippedCount.incrementAndGet()
                 continue
@@ -420,6 +468,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 Log.record(TAG, "⏸ 离线模式中断白名单长任务: ${longRunningJob.taskId}")
                 longRunningJob.task.stopTask()
                 longRunningJob.job.cancel()
+                longRunningJob.releaseResourcesOnce()
                 longRunningJobs.remove(longRunningJob)
                 skippedCount.incrementAndGet()
                 continue
@@ -429,6 +478,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 Log.record(TAG, "⏳ 等待白名单长任务完成后再调度下次执行")
             }
             longRunningJob.job.join()
+            longRunningJob.releaseResourcesOnce()
             longRunningJobs.remove(longRunningJob)
             val time = System.currentTimeMillis() - longRunningJob.startTime
             if (!isRunSessionCurrent()) {

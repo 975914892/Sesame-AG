@@ -189,13 +189,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshActiveUser() {
         try {
             val activeUserEntity = DataStore.get("activedUser", UserEntity::class.java)
-            _activeUser.value = activeUserEntity
-            UserMap.setCurrentUserId(activeUserEntity?.userId?.trim()?.takeIf { it.isNotEmpty() })
+            val resolvedActiveUser = activeUserEntity ?: recoverActiveUserSnapshot()
+            _activeUser.value = resolvedActiveUser
+            UserMap.setCurrentUserId(resolvedActiveUser?.userId?.trim()?.takeIf { it.isNotEmpty() })
         } catch (e: Exception) {
             Log.e(TAG, "Read active user failed", e)
             _activeUser.value = null
             UserMap.setCurrentUserId(null)
         }
+    }
+
+    private fun recoverActiveUserSnapshot(): UserEntity? {
+        val fallbackUserId = UserMap.currentUid
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: resolveExistingUserConfigIds().singleOrNull()
+            ?: return null
+        val snapshot = UserMap.readSelf(fallbackUserId) ?: return null
+        runCatching { DataStore.put("activedUser", snapshot) }
+            .onFailure { Log.w(TAG, "Recover active user snapshot failed: ${it.message}") }
+        return snapshot
     }
 
     private fun applyAccountContext(intent: Intent) {
