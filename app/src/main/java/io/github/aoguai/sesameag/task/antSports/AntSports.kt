@@ -141,8 +141,7 @@ class AntSports : ModelTask() {
         private const val WALK_CHALLENGE_MIN_DISTANCE_METER = 100.0
         private const val WALK_CHALLENGE_WALK_CALORIE_FACTOR = 0.8214
         private const val NEVERLAND_SOURCE_SPORT_HOME = "ch_toufang__yundongshouye"
-        private const val NEVERLAND_SOURCE_LEGACY = "jkdsportcard"
-        private val NEVERLAND_SOURCE_CANDIDATES = listOf(NEVERLAND_SOURCE_SPORT_HOME, NEVERLAND_SOURCE_LEGACY)
+        private val NEVERLAND_SOURCE_CANDIDATES = listOf(NEVERLAND_SOURCE_SPORT_HOME)
         private const val SPORT_ITEM_MALL_CITY_CODE = "440100"
 
     }
@@ -2275,15 +2274,15 @@ class AntSports : ModelTask() {
             val useJumpCompleteRpc = taskAction.equals("JUMP", ignoreCase = true) && !useAdTaskFinishRpc
             val result = when {
                 useVerifiedNewCompleteRpc -> JSONObject(
-                    AntSportsRpcCall.completeTask(
+                    AntSportsRpcCall.completeAdTask(
                         taskId = taskId,
                         taskAction = taskAction,
-                        taskType = requestTaskType
+                        taskType = requestTaskType ?: "AD_TASK"
                     )
                 )
                 useAdTaskFinishRpc -> JSONObject(AntSportsRpcCall.finishAdTask(adTaskFinishPayload))
                 useJumpCompleteRpc -> JSONObject(
-                    AntSportsRpcCall.completeTask(
+                    AntSportsRpcCall.completeJumpTask(
                         taskId = taskId,
                         taskAction = taskAction
                     )

@@ -145,18 +145,37 @@ object AntSportsRpcCall {
     }
 
     /**
-     * @brief 完成运动任务（新版接口）
-     * 
-     * @param taskId 任务ID
-     * 
-     * @return RPC调用结果的 JSON 字符串
-     * 
-     * @remark 对应API：com.alipay.sportshealth.biz.rpc.SportsHealthCoinTaskRpc.completeTask
+     * @brief 完成普通跳转类运动任务
+     *
+     * @remark 对应抓包：普通 JUMP 成功包不携带 bizNo/taskType
      */
-    fun completeTask(
+    fun completeJumpTask(
         taskId: String,
         taskAction: String = "JUMP",
-        taskType: String? = null,
+        chInfo: String = "medical_health"
+    ): String {
+        val args = JSONArray().apply {
+            put(JSONObject().apply {
+                put("apiVersion", "energy")
+                put("chInfo", chInfo)
+                put("clientOS", "android")
+                put("features", JSONArray(FEATURES))
+                put("taskAction", taskAction)
+                put("taskId", taskId)
+            })
+        }
+        return RequestManager.requestString("com.alipay.sportshealth.biz.rpc.SportsHealthCoinTaskRpc.completeTask", args.toString())
+    }
+
+    /**
+     * @brief 完成广告浏览类运动任务
+     *
+     * @remark 对应抓包：SHOW_AD 成功包携带 bizNo 与 taskType=AD_TASK
+     */
+    fun completeAdTask(
+        taskId: String,
+        taskAction: String = "SHOW_AD",
+        taskType: String = "AD_TASK",
         bizNo: String = buildSportsTaskBizNo(),
         chInfo: String = "medical_health"
     ): String {
@@ -169,9 +188,7 @@ object AntSportsRpcCall {
                 put("features", JSONArray(FEATURES))
                 put("taskAction", taskAction)
                 put("taskId", taskId)
-                if (!taskType.isNullOrBlank()) {
-                    put("taskType", taskType)
-                }
+                put("taskType", taskType)
             })
         }
         return RequestManager.requestString("com.alipay.sportshealth.biz.rpc.SportsHealthCoinTaskRpc.completeTask", args.toString())
@@ -1600,7 +1617,7 @@ object AntSportsRpcCall {
      * 包括签到、任务、泡泡、建造、走路等功能。
      */
     object NeverlandRpcCall {
-        private const val DEFAULT_SOURCE = "jkdsportcard"
+        private const val DEFAULT_SOURCE = "ch_toufang__yundongshouye"
         private const val QUICK_GAME_CITY_CODE = "440100"
 
         /**
