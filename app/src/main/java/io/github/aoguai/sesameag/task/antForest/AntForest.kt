@@ -4252,6 +4252,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         val fallbackTaskBaseInfo: JSONObject
     )
 
+    private fun deferredForestRightsHandledFlag(task: DeferredForestRightsTask): String {
+        return StatusFlags.FLAG_ANTFOREST_DEFERRED_RIGHTS_HANDLED_PREFIX +
+            task.sceneCode + "::" + task.taskType
+    }
+
     private data class ForestTaskCandidate(
         val item: TaskFlowItem,
         val sourceName: String
@@ -4560,9 +4565,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return
         }
         val tasksByScene = tasks.groupBy { it.sceneCode }
-        for ((sceneCode, sceneTasks) in tasksByScene) {
+        for ((sceneCode, sceneTasksRaw) in tasksByScene) {
             if (Thread.currentThread().isInterrupted) {
                 return
+            }
+            val sceneTasks = sceneTasksRaw.filterNot { task ->
+                Status.hasFlagToday(deferredForestRightsHandledFlag(task))
+            }
+            if (sceneTasks.isEmpty()) {
+                continue
             }
             val touchIds = sceneTasks.map { it.touchId }
             val sourceCandidates = linkedSetOf<String?>().apply {
@@ -4648,10 +4659,12 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         val awardResponse = responseObj.optJSONObject("resData") ?: responseObj
         when {
             isForestTaskAlreadyHandled(awardResponse) -> {
+                Status.setFlagToday(deferredForestRightsHandledFlag(task))
                 Log.forest("森林累计奖励[${task.taskTitle}]已领取")
             }
 
             isAntiepSuccess(awardResponse) -> {
+                Status.setFlagToday(deferredForestRightsHandledFlag(task))
                 Log.forest("森林累计奖励🎖️[${task.taskTitle}]领取成功")
             }
 

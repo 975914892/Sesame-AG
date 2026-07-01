@@ -262,7 +262,14 @@ class AntMember : ModelTask() {
 
     private data class BeanTaskCenterTaskListScanResult(
         val taskCount: Int,
-        val result: DailyTaskProcessResult
+        val result: DailyTaskProcessResult,
+        val hasGuardianQuizCandidate: Boolean = false
+    )
+
+    private data class BeanTaskCenterScanResult(
+        val taskCount: Int,
+        val result: DailyTaskProcessResult,
+        val hasGuardianQuizCandidate: Boolean
     )
 
     private data class BeanGuardianQuestion(
@@ -807,11 +814,11 @@ class AntMember : ModelTask() {
      */
     private fun refreshMemberPointExchangeOptionsForSettings(): List<MapperEntity> {
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT
+            )
             if (!HookReadyChecker.isTargetAppReadyForRpc(UserMap.currentUid)) {
-                val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
-                    UserMap.currentUid,
-                    ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT
-                )
                 Log.member("会员积分🎐目标应用未就绪，设置页先展示上次缓存列表；请打开目标应用后再刷新#${cachedRows.size}")
                 return cachedRows
             }
@@ -823,15 +830,30 @@ class AntMember : ModelTask() {
                 Log.member("会员积分🎐设置页使用目标应用刷新列表#${refreshResult.options.size}")
                 return refreshResult.options
             }
-            Log.member("会员积分🎐远程刷新失败，不使用旧缓存#${refreshResult.message}")
+            if (cachedRows.isNotEmpty()) {
+                Log.member("会员积分🎐远程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${refreshResult.message}")
+                return cachedRows
+            }
+            Log.member("会员积分🎐远程刷新失败，且无可用缓存快照#${refreshResult.message}")
             return emptyList()
         }
-        val rows = runCatching {
+        val rowsResult = runCatching {
             refreshMemberPointExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshMemberPointExchangeOptionsForSettings.currentRpc err:", it)
-        }.getOrElse {
-            emptyList()
+        }
+        val rows = rowsResult.getOrElse { throwable ->
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT
+            )
+            if (cachedRows.isNotEmpty()) {
+                Log.member("会员积分🎐当前进程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${throwable.message}")
+                cachedRows
+            } else {
+                Log.member("会员积分🎐当前进程刷新失败，且无可用缓存快照#${throwable.message}")
+                emptyList()
+            }
         }
         Log.member("会员积分🎐设置页刷新结构化列表#${rows.size}")
         return rows
@@ -979,11 +1001,11 @@ class AntMember : ModelTask() {
 
     private fun refreshBeanExchangeRightOptionsForSettings(): List<MapperEntity> {
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT
+            )
             if (!HookReadyChecker.isTargetAppReadyForRpc(UserMap.currentUid)) {
-                val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
-                    UserMap.currentUid,
-                    ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT
-                )
                 Log.member("安心豆🫘目标应用未就绪，设置页先展示上次缓存列表；请打开目标应用后再刷新#${cachedRows.size}")
                 return cachedRows
             }
@@ -995,15 +1017,30 @@ class AntMember : ModelTask() {
                 Log.member("安心豆🫘设置页使用目标应用刷新列表#${refreshResult.options.size}")
                 return refreshResult.options
             }
-            Log.member("安心豆🫘远程刷新失败，不使用旧缓存#${refreshResult.message}")
+            if (cachedRows.isNotEmpty()) {
+                Log.member("安心豆🫘远程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${refreshResult.message}")
+                return cachedRows
+            }
+            Log.member("安心豆🫘远程刷新失败，且无可用缓存快照#${refreshResult.message}")
             return emptyList()
         }
-        val rows = runCatching {
+        val rowsResult = runCatching {
             refreshBeanExchangeRightOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshBeanExchangeRightOptionsForSettings.currentRpc err:", it)
-        }.getOrElse {
-            emptyList()
+        }
+        val rows = rowsResult.getOrElse { throwable ->
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT
+            )
+            if (cachedRows.isNotEmpty()) {
+                Log.member("安心豆🫘当前进程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${throwable.message}")
+                cachedRows
+            } else {
+                Log.member("安心豆🫘当前进程刷新失败，且无可用缓存快照#${throwable.message}")
+                emptyList()
+            }
         }
         Log.member("安心豆🫘设置页刷新结构化列表#${rows.size}")
         return rows
@@ -6628,9 +6665,11 @@ class AntMember : ModelTask() {
     }
 
     private fun processBeanTaskCenter(): DailyTaskProcessResult {
-        var result = DailyTaskProcessResult.HANDLED
-        result = mergeDailyTaskProcessResult(result, consultGuardianAnswerTask())
-        result = mergeDailyTaskProcessResult(result, queryBeanTaskCenterStatus())
+        val taskCenterScan = queryBeanTaskCenterStatus()
+        var result = taskCenterScan.result
+        if (taskCenterScan.hasGuardianQuizCandidate) {
+            result = mergeDailyTaskProcessResult(result, consultGuardianAnswerTask())
+        }
         return result
     }
 
@@ -6930,7 +6969,7 @@ class AntMember : ModelTask() {
         }
     }
 
-    private fun queryBeanTaskCenterStatus(): DailyTaskProcessResult {
+    private fun queryBeanTaskCenterStatus(): BeanTaskCenterScanResult {
         return try {
             val response = AntMemberRpcCall.beanTaskCenterConsult(
                 taskCenterId = "AP15241780",
@@ -6942,22 +6981,22 @@ class AntMember : ModelTask() {
                 return when (classifyBeanTaskCenterFailure(detail.first, detail.second)) {
                     GuardianBeanAwardRpcFailureType.BUSINESS_LIMIT -> {
                         Log.member("安心豆🫘[任务中心]#业务受限，本轮跳过:${detailToString(detail, response)}")
-                        DailyTaskProcessResult.HANDLED
+                        BeanTaskCenterScanResult(0, DailyTaskProcessResult.HANDLED, false)
                     }
 
                     GuardianBeanAwardRpcFailureType.DUPLICATE_REWARD -> {
                         Log.member("安心豆🫘[任务中心]#已领取或重复领取，跳过:${detailToString(detail, response)}")
-                        DailyTaskProcessResult.HANDLED
+                        BeanTaskCenterScanResult(0, DailyTaskProcessResult.HANDLED, false)
                     }
 
                     GuardianBeanAwardRpcFailureType.RETRYABLE -> {
                         Log.member("安心豆🫘[任务中心]#暂时不可查询，保留后续重试:${detailToString(detail, response)}")
-                        DailyTaskProcessResult.RETRYABLE_FAILURE
+                        BeanTaskCenterScanResult(0, DailyTaskProcessResult.RETRYABLE_FAILURE, false)
                     }
 
                     GuardianBeanAwardRpcFailureType.NON_RETRYABLE -> {
                         Log.error("$TAG.queryBeanTaskCenterStatus", "安心豆🫘[任务中心]#查询失败:${detailToString(detail, response)}")
-                        DailyTaskProcessResult.UNKNOWN_FAILURE
+                        BeanTaskCenterScanResult(0, DailyTaskProcessResult.UNKNOWN_FAILURE, false)
                     }
                 }
             }
@@ -6965,7 +7004,7 @@ class AntMember : ModelTask() {
             val resultObject = responseObject.optJSONObject("result") ?: responseObject.optJSONObject("data")
             if (resultObject == null) {
                 Log.error("$TAG.queryBeanTaskCenterStatus", "安心豆🫘[任务中心]#响应缺少result/data:$response")
-                return DailyTaskProcessResult.UNKNOWN_FAILURE
+                return BeanTaskCenterScanResult(0, DailyTaskProcessResult.UNKNOWN_FAILURE, false)
             }
             val pendingTaskScan = logBeanTaskCenterTaskList(
                 resultObject.optJSONArray("taskDetailList"),
@@ -6978,10 +7017,14 @@ class AntMember : ModelTask() {
             if (pendingTaskScan.taskCount == 0 && doneTaskScan.taskCount == 0) {
                 Log.member("安心豆🫘[任务中心]#无可识别任务")
             }
-            mergeDailyTaskProcessResult(doneTaskScan.result, pendingTaskScan.result)
+            BeanTaskCenterScanResult(
+                taskCount = pendingTaskScan.taskCount + doneTaskScan.taskCount,
+                result = mergeDailyTaskProcessResult(doneTaskScan.result, pendingTaskScan.result),
+                hasGuardianQuizCandidate = pendingTaskScan.hasGuardianQuizCandidate
+            )
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "queryBeanTaskCenterStatus err:", t)
-            DailyTaskProcessResult.UNKNOWN_FAILURE
+            BeanTaskCenterScanResult(0, DailyTaskProcessResult.UNKNOWN_FAILURE, false)
         }
     }
 
@@ -6990,10 +7033,11 @@ class AntMember : ModelTask() {
         treatTaskListAsHandled: Boolean
     ): BeanTaskCenterTaskListScanResult {
         if (taskList == null) {
-            return BeanTaskCenterTaskListScanResult(0, DailyTaskProcessResult.HANDLED)
+            return BeanTaskCenterTaskListScanResult(0, DailyTaskProcessResult.HANDLED, false)
         }
         var count = 0
         var result = DailyTaskProcessResult.HANDLED
+        var hasGuardianQuizCandidate = false
         for (i in 0 until taskList.length()) {
             val task = taskList.optJSONObject(i) ?: continue
             count++
@@ -7003,6 +7047,14 @@ class AntMember : ModelTask() {
             val normalizedStatus = status.uppercase(Locale.ROOT)
             val errorCode = task.optString("queryErrorCode").trim()
             val errorMsg = task.optString("queryErrorMsg").trim()
+            val taskMainType = task.optString("taskMainType")
+            val displayInfo = task.optJSONObject("taskDisplayInfo")
+            val customInfo = displayInfo?.optJSONObject("customInfo") ?: JSONObject()
+            val taskType = customInfo.optString("taskType").ifBlank { taskMainType }
+            val operationType = customInfo.optString("taskOperationType")
+            val taskCategory = task.optString("taskCategory").ifBlank {
+                customInfo.optString("taskCategorize")
+            }
             val detail = when {
                 errorCode.isNotBlank() && errorMsg.isNotBlank() -> "$errorCode/$errorMsg"
                 errorCode.isNotBlank() -> errorCode
@@ -7032,27 +7084,74 @@ class AntMember : ModelTask() {
                 normalizedStatus == "WAIT_RECEIVE" ||
                     normalizedStatus == "TO_RECEIVE" ||
                     normalizedStatus == "FINISHED" -> {
+                    if (!treatTaskListAsHandled &&
+                        isBeanGuardianQuizCandidate(taskMainType, taskType, operationType, taskCategory)
+                    ) {
+                        hasGuardianQuizCandidate = true
+                    }
                     Log.member("安心豆🫘[任务中心]#$title($taskId) 待领取，但当前未抓到明确领奖RPC，保留后续复核")
                     result = mergeDailyTaskProcessResult(result, DailyTaskProcessResult.PENDING)
                 }
 
                 status.isNotBlank() -> {
+                    if (!treatTaskListAsHandled &&
+                        isBeanGuardianQuizCandidate(taskMainType, taskType, operationType, taskCategory)
+                    ) {
+                        hasGuardianQuizCandidate = true
+                    }
                     Log.member("安心豆🫘[任务中心]#$title($taskId) 当前状态:$status")
                     result = mergeDailyTaskProcessResult(result, DailyTaskProcessResult.PENDING)
                 }
 
                 detail.isNotBlank() -> {
+                    if (!treatTaskListAsHandled &&
+                        isBeanGuardianQuizCandidate(taskMainType, taskType, operationType, taskCategory)
+                    ) {
+                        hasGuardianQuizCandidate = true
+                    }
                     Log.member("安心豆🫘[任务中心]#$title($taskId) 当前未收口:$detail")
                     result = mergeDailyTaskProcessResult(result, DailyTaskProcessResult.PENDING)
                 }
 
                 else -> {
+                    if (!treatTaskListAsHandled &&
+                        isBeanGuardianQuizCandidate(taskMainType, taskType, operationType, taskCategory)
+                    ) {
+                        hasGuardianQuizCandidate = true
+                    }
                     Log.member("安心豆🫘[任务中心]#$title($taskId) 当前未收口，保留后续复核")
                     result = mergeDailyTaskProcessResult(result, DailyTaskProcessResult.PENDING)
                 }
             }
         }
-        return BeanTaskCenterTaskListScanResult(count, result)
+        return BeanTaskCenterTaskListScanResult(count, result, hasGuardianQuizCandidate)
+    }
+
+    private fun isBeanGuardianQuizCandidate(
+        taskMainType: String,
+        taskType: String,
+        operationType: String,
+        taskCategory: String
+    ): Boolean {
+        if (taskCategory.equals("TRANSFER", ignoreCase = true)) {
+            return false
+        }
+        if (taskMainType == "BROWSE_PAGE" ||
+            taskType == "BROWSE_PAGE" ||
+            taskMainType == "BROWSE_TASK" ||
+            taskType == "BROWSE_TASK" ||
+            operationType == "BROWSE_TASK" ||
+            operationType == "CLICK_TASK" ||
+            operationType == "NORMAL_PENDANT_CLICK_TASK" ||
+            taskMainType == "EXPLAIN_INTELLIGENCE" ||
+            taskType == "EXPLAIN_INTELLIGENCE" ||
+            taskMainType == "COMMON_TASK" ||
+            taskType == "COMMON_TASK" ||
+            operationType == "COMMON_TASK"
+        ) {
+            return false
+        }
+        return taskMainType.isNotBlank() || taskType.isNotBlank() || operationType.isNotBlank()
     }
 
     private fun resolveBeanTaskCenterTaskId(task: JSONObject): String {
@@ -8128,11 +8227,13 @@ class AntMember : ModelTask() {
         private suspend fun doMerchantMoreTask(): Unit = CoroutineUtils.run {
             try {
                 val adapter = MerchantTaskFlowAdapter()
-                val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+                TaskFlowEngine(adapter, roundSleepMs = 500L).run()
                 if (adapter.taskListObserved && adapter.taskCount == 0) {
                     Log.member("商家服务🏬[积分任务]#未查询到任务列表")
                 }
-                if (runResult.completed || (adapter.querySucceeded && adapter.taskListObserved && adapter.taskCount == 0)) {
+                if ((adapter.querySucceeded && adapter.taskListObserved && adapter.taskCount == 0) ||
+                    adapter.canMarkTodayDone()
+                ) {
                     setFlagToday(StatusFlags.FLAG_ANTMEMBER_MERCHANT_MORE_TASK_DONE)
                 }
                 collectMerchantPointBalls()
@@ -8165,6 +8266,9 @@ class AntMember : ModelTask() {
                 private set
             var taskListObserved: Boolean = false
                 private set
+            private var latestItems: List<TaskFlowItem> = emptyList()
+            private var unknownPhaseSeen: Boolean = false
+            private var unknownFailureSeen: Boolean = false
 
             private var moreOrderTaskCode: String = ""
             private val handledTaskKeys = LinkedHashSet<String>()
@@ -8249,7 +8353,8 @@ class AntMember : ModelTask() {
                         )
                     }
                 }
-                taskCount = max(taskCount, totalTaskCount)
+                taskCount = totalTaskCount
+                latestItems = items
                 return items
             }
 
@@ -8502,6 +8607,9 @@ class AntMember : ModelTask() {
                 result: TaskFlowActionResult,
                 decision: TaskFlowDecision
             ) {
+                if (result.failureType == TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW) {
+                    unknownFailureSeen = true
+                }
                 if (decision == TaskFlowDecision.MARK_HANDLED) {
                     when (action) {
                         TaskFlowAction.RECEIVE -> receivedTaskKeys.add(buildMerchantTaskFlowKey(item))
@@ -8522,6 +8630,7 @@ class AntMember : ModelTask() {
             }
 
             override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
+                unknownPhaseSeen = true
                 Log.member(
                     "商家服务🏬[${item.title}]#未知任务状态，跳过 " +
                         "taskCode=${item.type.ifBlank { "UNKNOWN" }} status=${item.status.ifBlank { "UNKNOWN" }} raw=${item.raw}"
@@ -8534,6 +8643,32 @@ class AntMember : ModelTask() {
 
             override fun logError(message: String) {
                 Log.error(TAG, message)
+            }
+
+            fun canMarkTodayDone(): Boolean {
+                if (!querySucceeded || !taskListObserved || unknownPhaseSeen || unknownFailureSeen) {
+                    return false
+                }
+                for (item in latestItems) {
+                    val phase = mapPhase(item)
+                    if (phase == TaskFlowPhase.UNKNOWN) {
+                        return false
+                    }
+                    if (phase == TaskFlowPhase.TERMINAL) {
+                        continue
+                    }
+                    if (shouldSkip(item)) {
+                        continue
+                    }
+                    if (phase == TaskFlowPhase.REWARD_READY) {
+                        return false
+                    }
+                    if (super<TaskFlowAdapter>.isBlacklisted(item)) {
+                        continue
+                    }
+                    return false
+                }
+                return true
             }
 
             private fun queryMerchantTaskSnapshot(): MerchantTaskSnapshotQuery {

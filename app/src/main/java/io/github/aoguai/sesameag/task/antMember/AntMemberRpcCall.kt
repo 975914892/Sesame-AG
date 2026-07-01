@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.task.antMember
 
+import io.github.aoguai.sesameag.entity.RpcEntity
 import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.util.RandomUtil
 import org.json.JSONArray
@@ -15,6 +16,9 @@ object AntMemberRpcCall {
     private const val INSURED_GOLD_PRODUCT_CODE = "GIFT_UNIVERSAL_COVERAGE"
     private const val BEAN_POSITION_ENTRANCE = "insplatform_mine_anxindou"
     private const val BEAN_POSITION_SCENE = "POSITION"
+    private const val BEAN_PAGE_URL = "https://render.alipay.com/p/yuyan/180020010001266083/blueBean.html"
+    private const val BEAN_PAGE_CLIENT_VERSION = "AP/10.8.20.8000"
+    private const val BEAN_TASK_CENTER_SCENARIO = "AXD_TAK_LIST_AP15241780"
     private const val METHOD_QUERY_MULTI_SCENE_WAIT_TO_GAIN_LIST =
         "com.alipay.insgiftbff.insgiftMain.queryMultiSceneWaitToGainList"
     private const val METHOD_GAIN_MY_AND_FAMILY_SUM_INSURED =
@@ -49,6 +53,30 @@ object AntMemberRpcCall {
 
     private fun buildBeanPositionFactors(): JSONObject {
         return JSONObject().put("entrance", BEAN_POSITION_ENTRANCE)
+    }
+
+    private fun buildBeanPageHeaders(bizScenario: String? = null): Map<String, String> {
+        return linkedMapOf<String, String>().apply {
+            put("appPage", BEAN_PAGE_URL)
+            put("clientVersion", BEAN_PAGE_CLIENT_VERSION)
+            if (!bizScenario.isNullOrBlank()) {
+                put("bizScenario", bizScenario)
+            }
+        }
+    }
+
+    private fun requestBeanPageRpc(
+        method: String,
+        requestData: String,
+        bizScenario: String? = null
+    ): String {
+        return RequestManager.requestString(
+            RpcEntity(
+                requestMethod = method,
+                requestData = requestData,
+                headers = buildBeanPageHeaders(bizScenario)
+            )
+        )
     }
 
     private fun buildMemberSourcePassMap(): JSONObject {
@@ -1009,7 +1037,7 @@ object AntMemberRpcCall {
         val args = JSONObject().apply {
             put("consultScene", consultScene)
         }
-        return RequestManager.requestString(
+        return requestBeanPageRpc(
             "com.alipay.insmarketingbff.guardian.answerConsult",
             JSONArray().put(args).toString()
         )
@@ -1021,7 +1049,7 @@ object AntMemberRpcCall {
             put("channel", channel)
             put("userId", userId)
         }
-        return RequestManager.requestString(
+        return requestBeanPageRpc(
             "com.alipay.inscontentplatform.question.queryUserQuestionDrama",
             JSONArray().put(args).toString()
         )
@@ -1061,7 +1089,7 @@ object AntMemberRpcCall {
             put("userDramaId", userDramaId)
             put("userId", userId)
         }
-        return RequestManager.requestString(
+        return requestBeanPageRpc(
             "com.alipay.inscontentplatform.question.answerQuestionDrama",
             JSONArray().put(args).toString()
         )
@@ -1081,9 +1109,10 @@ object AntMemberRpcCall {
             put("sceneCode", sceneCode)
             put("taskCenterId", taskCenterId)
         }
-        return RequestManager.requestString(
+        return requestBeanPageRpc(
             "com.alipay.insmarketingbff.bean.taskCenterConsult",
-            JSONArray().put(args).toString()
+            JSONArray().put(args).toString(),
+            bizScenario = BEAN_TASK_CENTER_SCENARIO
         )
     }
 

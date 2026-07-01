@@ -4,6 +4,9 @@ import java.time.Duration
 import java.time.Instant
 
 class TimeCounter(private val name: String) {
+    companion object {
+        private const val RECORD_THRESHOLD_MS = 100L
+    }
 
     private val start: Instant = Instant.now()
     private var lastCheckpoint: Instant = start
@@ -23,29 +26,24 @@ class TimeCounter(private val name: String) {
     fun stop() {
         val end = Instant.now()
         val durationMs = Duration.between(start, end).toMillis()
-        Log.record(
-            name,
-            String.format(
-                "========================\n%s 耗时: %d ms (%s)",
-                name,
-                durationMs,
-                resultMsg
-            )
-        )
+        val detail = resultMsg.toString().removeSuffix(", ")
+        val message = if (detail.isBlank()) {
+            "$name 耗时: $durationMs ms"
+        } else {
+            "$name 耗时: $durationMs ms ($detail)"
+        }
+        if (durationMs >= RECORD_THRESHOLD_MS || unexpectedCount > 0) {
+            Log.record(name, message)
+        } else {
+            Log.debug(name, message)
+        }
         stopped = true
     }
 
     fun countDebug(msg: String) {
         val now = Instant.now()
         val durationMs = Duration.between(lastCheckpoint, now).toMillis()
-        Log.record(
-            name,
-            String.format(
-                "========================\n%s 耗时: %d ms",
-                msg,
-                durationMs
-            )
-        )
+        Log.debug(name, "$msg 耗时: $durationMs ms")
         lastCheckpoint = now
     }
 

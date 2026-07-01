@@ -120,6 +120,7 @@ class AntStall : ModelTask() {
     private val handledTaskFinishes = LinkedHashSet<String>()
     private val handledTaskAwards = LinkedHashSet<String>()
     private val loggedTaskMessages = LinkedHashSet<String>()
+    private var stallTasksDoneInvalidatedThisRun = false
 
     override fun getName(): String = "新村"
 
@@ -406,6 +407,7 @@ class AntStall : ModelTask() {
         try {
             val tc = TimeCounter(TAG)
             Log.stall("执行开始-${getName()}")
+            stallTasksDoneInvalidatedThisRun = false
 
             val homeResponse = AntStallRpcCall.home()
             val homeJson = JSONObject(homeResponse)
@@ -465,29 +467,46 @@ class AntStall : ModelTask() {
                 handledTaskFinishes.clear()
                 handledTaskAwards.clear()
                 loggedTaskMessages.clear()
-                taskList()
-                tc.countDebug("自动任务第一次")
-                GlobalThreadPools.sleepCompat(500)
-                taskList()
-                tc.countDebug("自动任务第二次")
+                val taskHandledToday = Status.hasFlagToday(StatusFlags.FLAG_ANTSTALL_TASKS_DONE) &&
+                    !stallTasksDoneInvalidatedThisRun
+                if (!taskHandledToday) {
+                    taskList(allowMarkDone = false)
+                    tc.countDebug("自动任务第一次")
+                    GlobalThreadPools.sleepCompat(500)
+                    taskList(allowMarkDone = false)
+                    tc.countDebug("自动任务第二次")
+                }
             }
 
             // 新村助力
             if (stallAssistFriend.value == true) {
-                assistFriend()
+                if (assistFriend()) {
+                    markStallTasksDoneInvalidated()
+                }
                 tc.countDebug("新村助力")
             }
 
             // 自动捐赠
             if (stallDonate.value == true && Status.canStallDonateToday()) {
-                donate()
+                if (donate()) {
+                    markStallTasksDoneInvalidated()
+                }
                 tc.countDebug("自动捐赠")
             }
 
             // 进入下一村
             if (roadmap.value == true) {
-                roadmap()
+                if (roadmap()) {
+                    markStallTasksDoneInvalidated()
+                }
                 tc.countDebug("自动进入下一村")
+            }
+
+            if (stallAutoTask.value == true &&
+                (stallTasksDoneInvalidatedThisRun || !Status.hasFlagToday(StatusFlags.FLAG_ANTSTALL_TASKS_DONE))
+            ) {
+                taskList(skipIfHandledToday = false, allowMarkDone = true)
+                tc.countDebug("自动任务最终刷新")
             }
 
             // 贴罚单
@@ -1171,17 +1190,38 @@ class AntStall : ModelTask() {
     /**
      * @brief 处理任务列表
      */
-    private fun taskList() {
+    private fun taskList(
+        skipIfHandledToday: Boolean = true,
+        allowMarkDone: Boolean = true
+    ) {
         try {
-            TaskFlowEngine(StallTaskFlowAdapter(), roundSleepMs = 500L).run()
+            val adapter = StallTaskFlowAdapter(skipIfHandledToday)
+            val result = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            if (allowMarkDone && !result.stopped && adapter.canMarkTasksDone()) {
+                Status.setFlagToday(StatusFlags.FLAG_ANTSTALL_TASKS_DONE)
+                stallTasksDoneInvalidatedThisRun = false
+            }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "taskList err:", t)
         }
     }
 
-    private inner class StallTaskFlowAdapter : TaskFlowAdapter {
+    private inner class StallTaskFlowAdapter(
+        private val skipIfHandledToday: Boolean
+    ) : TaskFlowAdapter {
+        private var querySucceeded = false
+        private var latestItems: List<TaskFlowItem> = emptyList()
+        private var unknownPhaseSeen = false
+        private var unknownFailureSeen = false
+
         override val moduleName: String = STALL_TASK_BLACKLIST_MODULE
         override val flowName: String = "新村任务"
+
+        override fun isFlowHandledToday(): Boolean {
+            return skipIfHandledToday &&
+                Status.hasFlagToday(StatusFlags.FLAG_ANTSTALL_TASKS_DONE) &&
+                !stallTasksDoneInvalidatedThisRun
+        }
 
         override fun query(): JSONObject {
             val response = AntStallRpcCall.taskList()
@@ -1191,7 +1231,8 @@ class AntStall : ModelTask() {
         }
 
         override fun isQuerySuccess(response: JSONObject): Boolean {
-            return ResChecker.checkRes(TAG, response)
+            querySucceeded = ResChecker.checkRes(TAG, response)
+            return querySucceeded
         }
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
@@ -1211,7 +1252,11 @@ class AntStall : ModelTask() {
                 )
             }
 
-            val taskModels = response.optJSONArray("taskModels") ?: return items
+            val taskModels = response.optJSONArray("taskModels")
+            if (taskModels == null) {
+                latestItems = items
+                return items
+            }
             for (i in 0 until taskModels.length()) {
                 val task = taskModels.optJSONObject(i) ?: continue
                 val taskType = task.optString("taskType").trim()
@@ -1246,6 +1291,7 @@ class AntStall : ModelTask() {
                     )
                 )
             }
+            latestItems = items
             return items
         }
 
@@ -1346,6 +1392,9 @@ class AntStall : ModelTask() {
             result: TaskFlowActionResult,
             decision: TaskFlowDecision
         ) {
+            if (result.failureType == TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW) {
+                unknownFailureSeen = true
+            }
             if (decision == TaskFlowDecision.MARK_HANDLED ||
                 decision == TaskFlowDecision.STOP_TODAY_OR_CURRENT_CHAIN ||
                 decision == TaskFlowDecision.BLACKLIST
@@ -1360,6 +1409,15 @@ class AntStall : ModelTask() {
 
         override fun onQueryFailed(response: JSONObject) {
             Log.error(TAG, "新村任务列表查询失败 raw=$response")
+        }
+
+        override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
+            unknownPhaseSeen = true
+            Log.error(
+                TAG,
+                "$flowName[未知状态：${item.title}] taskId=${item.id.ifBlank { "UNKNOWN" }} " +
+                    "status=${item.status.ifBlank { "UNKNOWN" }} actionType=${item.actionType.ifBlank { "UNKNOWN" }}"
+            )
         }
 
         override fun logInfo(message: String) {
@@ -1377,6 +1435,32 @@ class AntStall : ModelTask() {
                 TaskFlowAction.COMPLETE -> handledTaskFinishes.add(taskKey)
                 else -> Unit
             }
+        }
+
+        fun canMarkTasksDone(): Boolean {
+            if (!querySucceeded || unknownPhaseSeen || unknownFailureSeen) {
+                return false
+            }
+            for (item in latestItems) {
+                val phase = mapPhase(item)
+                if (phase == TaskFlowPhase.UNKNOWN) {
+                    return false
+                }
+                if (phase == TaskFlowPhase.TERMINAL || phase == TaskFlowPhase.UNSUPPORTED) {
+                    continue
+                }
+                if (shouldSkip(item)) {
+                    continue
+                }
+                if (phase == TaskFlowPhase.REWARD_READY) {
+                    return false
+                }
+                if (super<TaskFlowAdapter>.isBlacklisted(item)) {
+                    continue
+                }
+                return false
+            }
+            return true
         }
     }
 
@@ -2159,22 +2243,23 @@ class AntStall : ModelTask() {
     /**
      * @brief 助力好友
      */
-    private fun assistFriend() {
+    private fun assistFriend(): Boolean {
         try {
-            if (stallAssistFriend.value != true) return
+            if (stallAssistFriend.value != true) return false
 
             if (!Status.canAntStallAssistFriendToday()) {
                 Log.stall("今日新村助力次数已用完。")
-                return
+                return false
             }
 
             val friendSet = assistFriendList.resolvedIds()
             if (friendSet.isEmpty()) {
                 Log.stall("未设置新村助力好友列表。")
-                return
+                return false
             }
 
             Log.stall("开始为 ${friendSet.size} 位好友进行新村助力...")
+            var progressed = false
 
             for (safeUid in friendSet) {
                 if (FriendGuard.shouldSkipFriend(safeUid, TAG, "新村助力")) {
@@ -2199,7 +2284,7 @@ class AntStall : ModelTask() {
                         "600000027" -> {
                             Log.stall("新村助力💪今日助力他人次数上限")
                             Status.antStallAssistFriendToday()
-                            return
+                            return progressed
                         }
 
                         else -> {
@@ -2210,25 +2295,28 @@ class AntStall : ModelTask() {
                 }
 
                 Log.stall("新村助力🎉成功[$name]")
+                progressed = true
                 GlobalThreadPools.sleepCompat(5000)
             }
 
             Status.antStallAssistFriendToday()
+            return progressed
 
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "assistFriend err:", t)
         }
+        return false
     }
 
     /**
      * @brief 捐赠项目
      */
-    private fun donate() {
+    private fun donate(): Boolean {
         try {
             val response = AntStallRpcCall.projectList()
             val json = JSONObject(response)
 
-            if (json.optString("resultCode", "") != "SUCCESS") return
+            if (json.optString("resultCode", "") != "SUCCESS") return false
 
             // 检查余额
             val userInfo = json.optJSONObject("astUserInfoVO")
@@ -2237,12 +2325,13 @@ class AntStall : ModelTask() {
                     ?.optDouble("amount", 0.0) ?: 0.0
 
                 if (currentCoinAmount < 15000) {
-                    return
+                    return false
                 }
             }
 
             // 查找在线项目
-            val projects = json.optJSONArray("astProjectVOS") ?: return
+            val projects = json.optJSONArray("astProjectVOS") ?: return false
+            var progressed = false
 
             for (i in 0 until projects.length()) {
                 val project = projects.optJSONObject(i) ?: continue
@@ -2266,31 +2355,34 @@ class AntStall : ModelTask() {
                             if (donateJson.optString("resultCode", "") == "SUCCESS") {
                                 Log.stall("蚂蚁新村⛪[捐赠:$title]")
                                 Status.setStallDonateToday()
+                                progressed = true
                             }
                         }
                     }
                 }
             }
+            return progressed
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "donate err:", t)
         }
+        return false
     }
 
     /**
      * @brief 进入下一村
      */
-    private fun roadmap() {
+    private fun roadmap(): Boolean {
         try {
-            val latestHome = queryStallHomeOrNull("roadmap refreshHome") ?: return
+            val latestHome = queryStallHomeOrNull("roadmap refreshHome") ?: return false
             if (!latestHome.optBoolean("needUpgradeVillage", false)) {
-                return
+                return false
             }
 
             val roadmapResponse = AntStallRpcCall.roadmap()
             val roadmapJson = JSONObject(roadmapResponse)
             if (!ResChecker.checkRes(TAG, roadmapJson)) {
                 Log.error(TAG, "roadmap err: $roadmapResponse")
-                return
+                return false
             }
 
             val roadList = roadmapJson.optJSONArray("roadList")
@@ -2305,23 +2397,23 @@ class AntStall : ModelTask() {
                     TAG,
                     "roadmap err: 未解析到下一村 villageName, currentVillage=$currentVillageName raw=$roadmapJson"
                 )
-                return
+                return false
             }
 
             val flagKey = StatusFlags.FLAG_ANTSTALL_ROADMAP_VISITED_PREFIX + targetVillageName
             if (Status.hasFlagToday(flagKey)) {
                 Log.stall("今日已进入[$targetVillageName],跳过重复切换。")
-                return
+                return false
             }
 
             val nextVillageResponse = AntStallRpcCall.nextVillage()
             val nextVillageJson = JSONObject(nextVillageResponse)
             if (!ResChecker.checkRes(TAG, nextVillageJson)) {
                 Log.error(TAG, "nextVillage err: $nextVillageResponse")
-                return
+                return false
             }
 
-            val verifiedHome = queryStallHomeOrNull("roadmap verifyHome") ?: return
+            val verifiedHome = queryStallHomeOrNull("roadmap verifyHome") ?: return false
             val verifiedVillageName = verifiedHome.optJSONObject("currentVillage")
                 ?.optString("villageName")
                 ?.trim()
@@ -2332,15 +2424,22 @@ class AntStall : ModelTask() {
                     TAG,
                     "nextVillage verify err: expectedVillage=$targetVillageName actualVillage=$verifiedVillageName needUpgradeVillage=$verifiedNeedUpgradeVillage"
                 )
-                return
+                return false
             }
 
             Log.stall("蚂蚁新村⛪[进入:$targetVillageName]成功")
             Status.setFlagToday(flagKey)
+            return true
 
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "roadmap err:", t)
         }
+        return false
+    }
+
+    private fun markStallTasksDoneInvalidated() {
+        stallTasksDoneInvalidatedThisRun = true
+        Status.removeFlag(StatusFlags.FLAG_ANTSTALL_TASKS_DONE)
     }
 
     private fun queryStallHomeOrNull(action: String): JSONObject? {

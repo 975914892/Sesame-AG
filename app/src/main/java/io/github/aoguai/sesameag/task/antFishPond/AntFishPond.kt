@@ -26,12 +26,20 @@ import io.github.aoguai.sesameag.util.maps.VipDataIdMap
 import org.json.JSONObject
 
 class AntFishPond : ModelTask() {
+    private data class FishProgressSnapshot(
+        val current: String,
+        val target: String,
+        val diff: String,
+        val rodCount: Int
+    )
+
     private lateinit var fishPondTask: BooleanModelField
     private lateinit var autoFish: BooleanModelField
     private lateinit var fishDailyLimit: IntegerModelField
 
     private val handledTaskAwards = LinkedHashSet<String>()
     private val handledVisitFinishes = LinkedHashSet<String>()
+    private var lastLoggedFishProgress: FishProgressSnapshot? = null
 
     override fun getName(): String = "福气鱼池"
 
@@ -64,6 +72,7 @@ class AntFishPond : ModelTask() {
             Log.fishpond("执行开始-${getName()}")
             handledTaskAwards.clear()
             handledVisitFinishes.clear()
+            lastLoggedFishProgress = null
 
             val indexJson = queryIndex(logProgress = true)
             if (indexJson != null && exchangeRewardAndReloadIndex(indexJson, "首页") == null) {
@@ -71,9 +80,11 @@ class AntFishPond : ModelTask() {
             }
 
             val delayTaskDoneFlag = autoFish.value == true
+            var subplotChanged = false
+            var initialTaskListDone = false
             if (fishPondTask.value == true) {
-                handleSubplots()
-                handleTaskList(allowMarkDone = !delayTaskDoneFlag)
+                subplotChanged = handleSubplots()
+                initialTaskListDone = handleTaskList(allowMarkDone = !delayTaskDoneFlag)
             }
 
             val autoFishChanged = if (autoFish.value == true) {
@@ -86,12 +97,14 @@ class AntFishPond : ModelTask() {
             }
 
             if (fishPondTask.value == true && autoFish.value == true) {
+                var shouldRefreshTaskList = autoFishChanged || subplotChanged
                 if (autoFishChanged) {
                     while (true) {
-                        handleSubplots()
+                        val followUpSubplotChanged = handleSubplots()
                         handleTaskList(skipIfHandledToday = false, allowMarkDone = false)
                         val followUpIndex = queryIndex()
                         if (followUpIndex == null || extractRodCount(followUpIndex) <= 0) {
+                            shouldRefreshTaskList = true
                             break
                         }
                         val followUpFishChanged = runAutoFish()
@@ -99,13 +112,23 @@ class AntFishPond : ModelTask() {
                             return
                         }
                         if (!followUpFishChanged) {
+                            shouldRefreshTaskList = shouldRefreshTaskList || followUpSubplotChanged
                             break
                         }
+                        shouldRefreshTaskList = true
                     }
+                } else if (subplotChanged) {
+                    Log.fishpond("本轮未实际钓鱼，但鱼池子活动有进展，补刷新任务状态")
                 } else {
+                    shouldRefreshTaskList = false
+                    if (initialTaskListDone) {
+                        Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE)
+                    }
                     Log.fishpond("本轮未实际钓鱼，跳过钓鱼后任务刷新")
                 }
-                handleTaskList(skipIfHandledToday = false, allowMarkDone = true)
+                if (shouldRefreshTaskList) {
+                    handleTaskList(skipIfHandledToday = false, allowMarkDone = true)
+                }
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "start.run err:", t)
@@ -137,20 +160,21 @@ class AntFishPond : ModelTask() {
         return jo
     }
 
-    private fun handleSubplots() {
+    private fun handleSubplots(): Boolean {
         try {
             val response = AntFishPondRpcCall.querySubplotsActivity()
             if (response.isBlank()) {
                 Log.runtime(TAG, "querySubplotsActivity返回空")
-                return
+                return false
             }
             val jo = JSONObject(response)
             if (!isRpcSuccess(jo)) {
                 Log.fishpond("鱼池活动查询失败：${formatFailure(jo)}")
-                return
+                return false
             }
 
-            val activityList = payloadOf(jo).optJSONArray("subplotsActivityList") ?: return
+            val activityList = payloadOf(jo).optJSONArray("subplotsActivityList") ?: return false
+            var progressed = false
             for (i in 0 until activityList.length()) {
                 val item = activityList.optJSONObject(i) ?: continue
                 val activityType = item.optString("activityType")
@@ -160,23 +184,25 @@ class AntFishPond : ModelTask() {
                 val extendStatus = extend?.optString("status").orEmpty()
 
                 when (activityType) {
-                    ACTIVITY_GIFT_BOX -> handleGiftBox(status, extendStatus)
-                    ACTIVITY_TOMORROW_ROD -> handleTomorrowRod(status)
-                    ACTIVITY_FISH -> handleFishActivity(status, extend)
+                    ACTIVITY_GIFT_BOX -> progressed = handleGiftBox(status, extendStatus) || progressed
+                    ACTIVITY_TOMORROW_ROD -> progressed = handleTomorrowRod(status) || progressed
+                    ACTIVITY_FISH -> progressed = handleFishActivity(status, extend) || progressed
                 }
             }
+            return progressed
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "handleSubplots err:", t)
         }
+        return false
     }
 
-    private fun handleGiftBox(status: String, extendStatus: String) {
+    private fun handleGiftBox(status: String, extendStatus: String): Boolean {
         if (status == STATUS_FINISHED || extendStatus == STATUS_FINISHED) {
             Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_GIFT_BOX_DONE)
-            return
+            return false
         }
         if (status != STATUS_TODO && extendStatus != STATUS_TODO) {
-            return
+            return false
         }
         val trigger = AntFishPondRpcCall.triggerSubplotsActivity(ACTIVITY_GIFT_BOX, ACTION_RECEIVE_AWARD)
         val jo = JSONObject(trigger)
@@ -184,19 +210,22 @@ class AntFishPond : ModelTask() {
             Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_GIFT_BOX_DONE)
             Log.fishpond("每日宝箱🎁领取成功")
             AntFishPondRpcCall.fishpondSyncIndex(listOf("GIFT_BOX", "TASK_DISPLAY"))
+            GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
+            return true
         } else {
             Log.fishpond("每日宝箱领取失败：${formatFailure(jo)}")
         }
         GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
+        return false
     }
 
-    private fun handleTomorrowRod(status: String) {
+    private fun handleTomorrowRod(status: String): Boolean {
         if (status == "TODAY_FINISH") {
             Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_TOMORROW_ROD_DONE)
-            return
+            return false
         }
         if (status != "TODAY_TODO") {
-            return
+            return false
         }
         val trigger = AntFishPondRpcCall.triggerSubplotsActivity(ACTIVITY_TOMORROW_ROD, ACTION_FINISH)
         val jo = JSONObject(trigger)
@@ -204,20 +233,23 @@ class AntFishPond : ModelTask() {
             Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_TOMORROW_ROD_DONE)
             Log.fishpond("明日钓竿🎣领取成功")
             AntFishPondRpcCall.fishpondSyncIndex(listOf("TOMORROW_ROD"))
+            GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
+            return true
         } else {
             Log.fishpond("明日钓竿领取失败：${formatFailure(jo)}")
         }
         GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
+        return false
     }
 
-    private fun handleFishActivity(status: String, extend: JSONObject?) {
+    private fun handleFishActivity(status: String, extend: JSONObject?): Boolean {
         val extendStatus = extend?.optString("status").orEmpty()
         val leftFishTimes = extend?.optInt("leftFishTimes", Int.MAX_VALUE) ?: Int.MAX_VALUE
         val claimable = status in CLAIMABLE_STATUS ||
             extendStatus in CLAIMABLE_STATUS ||
             leftFishTimes <= 0
         if (!claimable) {
-            return
+            return false
         }
 
         val trigger = AntFishPondRpcCall.triggerSubplotsActivity(ACTIVITY_FISH, ACTION_RECEIVE_AWARD)
@@ -225,18 +257,21 @@ class AntFishPond : ModelTask() {
         if (isRpcSuccess(jo)) {
             Log.fishpond("钓鱼活动奖励🎣领取成功")
             handleFishActivityRewardRefresh(jo)
+            GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
+            return true
         } else {
             Log.fishpond("钓鱼活动奖励领取失败：${formatFailure(jo)}")
         }
         GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
+        return false
     }
 
     private fun handleTaskList(
         skipIfHandledToday: Boolean = true,
         allowMarkDone: Boolean = true
-    ) {
+    ): Boolean {
         try {
-            val listJson = queryTaskList() ?: return
+            val listJson = queryTaskList() ?: return false
             handleSign(listJson)
 
             val taskFlowAdapter = FishPondTaskFlowAdapter(skipIfHandledToday)
@@ -244,12 +279,15 @@ class AntFishPond : ModelTask() {
                 taskFlowAdapter,
                 roundSleepMs = SHORT_INTERVAL_MS
             ).run()
-            if (allowMarkDone && !result.stopped && taskFlowAdapter.canMarkTasksDone()) {
+            val canMarkDone = !result.stopped && taskFlowAdapter.canMarkTasksDone()
+            if (allowMarkDone && canMarkDone) {
                 Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE)
             }
+            return canMarkDone
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "handleTaskList err:", t)
         }
+        return false
     }
 
     private fun queryTaskList(): JSONObject? {
@@ -864,6 +902,11 @@ class AntFishPond : ModelTask() {
         val target = fishAsset.optString("targetFishWeight")
         val diff = fishAsset.optString("diffFishWeight")
         val rodCount = extractRodCount(jo)
+        val snapshot = FishProgressSnapshot(current, target, diff, rodCount)
+        if (lastLoggedFishProgress == snapshot) {
+            return
+        }
+        lastLoggedFishProgress = snapshot
         Log.fishpond("鱼池进度：当前${current}斤 / 目标${target}斤，还差${diff}斤，钓竿${rodCount}根")
     }
 
