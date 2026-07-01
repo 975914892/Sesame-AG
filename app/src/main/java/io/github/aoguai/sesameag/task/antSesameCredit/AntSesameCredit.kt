@@ -115,6 +115,8 @@ class AntSesameCredit : ModelTask() {
         val taskMaterialType: String,
         val taskChannel: String,
         val chInfo: String,
+        val refer: String,
+        val playInfo: String,
         val appId: String,
         val sourceName: String
     ) {
@@ -2396,7 +2398,7 @@ class AntSesameCredit : ModelTask() {
             if (taskId.isNullOrBlank()) {
                 return missingZhimaTreeTaskIdResult(item, "signup")
             }
-            val signupResult = doTaskActionResult(taskId, "signup")
+            val signupResult = doTaskActionResult(taskRef, "signup")
             if (signupResult.success) {
                 val rewardSuffix = taskRef.prizeName.takeIf { it.isNotBlank() }?.let { " #$it" }.orEmpty()
                 Log.sesame("芝麻树🌳[报名成功] ${taskRef.title}$rewardSuffix")
@@ -2416,7 +2418,7 @@ class AntSesameCredit : ModelTask() {
                     (if (taskRef.prizeName.isEmpty()) "" else " (${taskRef.prizeName})")
             )
             tryDelegateZhimaTreePushModelSend(item, taskRef)?.let { return it }
-            val sendResult = doTaskActionResult(taskId, "send")
+            val sendResult = doTaskActionResult(taskRef, "send")
             if (sendResult.success) {
                 pendingSentTaskRefs[taskRef.key()] = taskRef
                 return TaskFlowActionResult.success()
@@ -2430,7 +2432,7 @@ class AntSesameCredit : ModelTask() {
             if (taskId.isNullOrBlank()) {
                 return missingZhimaTreeTaskIdResult(item, "receive")
             }
-            val receiveResult = doTaskActionResult(taskId, "receive")
+            val receiveResult = doTaskActionResult(taskRef, "receive")
             if (receiveResult.success) {
                 handledReceiveTaskKeys.add(zhimaTreeTaskKey(item))
                 removePendingTaskRef(taskRef)
@@ -2602,6 +2604,8 @@ class AntSesameCredit : ModelTask() {
                 .put("taskMaterialType", taskMaterialType)
                 .put("taskChannel", taskChannel)
                 .put("chInfo", chInfo)
+                .put("refer", refer)
+                .put("playInfo", playInfo)
                 .put("appId", appId)
                 .put("_sourceList", sourceName)
                 .put("_syntheticReceive", syntheticReceive)
@@ -2664,6 +2668,8 @@ class AntSesameCredit : ModelTask() {
                 taskMaterialType = raw.optString("taskMaterialType"),
                 taskChannel = raw.optString("taskChannel"),
                 chInfo = raw.optString("chInfo"),
+                refer = raw.optString("refer"),
+                playInfo = raw.optString("playInfo"),
                 appId = raw.optString("appId"),
                 sourceName = raw.optString("_sourceList")
             )
@@ -2722,6 +2728,8 @@ class AntSesameCredit : ModelTask() {
                 "taskMaterialType=${raw?.optString("taskMaterialType").orEmpty()} " +
                 "taskChannel=${raw?.optString("taskChannel").orEmpty()} " +
                 "chInfo=${raw?.optString("chInfo").orEmpty()} " +
+                "refer=${raw?.optString("refer").orEmpty()} " +
+                "playInfo=${raw?.optString("playInfo").orEmpty()} " +
                 "appId=${raw?.optString("appId").orEmpty()} " +
                 "candidates=${raw?.optJSONArray("taskIdCandidates") ?: JSONArray()} " +
                 "source=${raw?.optString("_sourceList").orEmpty()}"
@@ -2952,6 +2960,8 @@ class AntSesameCredit : ModelTask() {
             return null
         }
         val chInfo = resolveZhimaTreeTaskChInfo(task, taskBaseInfo, taskMaterial, morphoDetail)
+        val refer = resolveZhimaTreeTaskRefer(task, taskBaseInfo, taskMaterial, morphoDetail, chInfo)
+        val playInfo = resolveZhimaTreeTaskPlayInfo(task, taskBaseInfo, taskMaterial, morphoDetail)
         return ZhimaTreeTaskRef(
             title = title,
             prizeName = getPrizeName(task),
@@ -2967,6 +2977,8 @@ class AntSesameCredit : ModelTask() {
                 .ifBlank { morphoDetail?.optString("taskType").orEmpty() },
             taskChannel = resolveZhimaTreeTaskChannel(task, taskBaseInfo, taskMaterial, morphoDetail),
             chInfo = chInfo,
+            refer = refer,
+            playInfo = playInfo,
             appId = resolveZhimaTreeTaskAppId(task, taskBaseInfo, taskMaterial, morphoDetail, chInfo),
             sourceName = sourceName
         )
@@ -3050,6 +3062,53 @@ class AntSesameCredit : ModelTask() {
         ).map { it.trim() }
             .firstOrNull { it.isNotBlank() }
             .orEmpty()
+    }
+
+    private fun resolveZhimaTreeTaskRefer(
+        task: JSONObject,
+        taskBaseInfo: JSONObject,
+        taskMaterial: JSONObject?,
+        morphoDetail: JSONObject?,
+        chInfo: String
+    ): String {
+        return sequenceOf(
+            task.optString("refer"),
+            taskBaseInfo.optString("refer"),
+            taskMaterial?.optString("refer").orEmpty(),
+            morphoDetail?.optString("refer").orEmpty(),
+            task.optJSONObject("taskParticipateExtInfo")?.optString("refer").orEmpty()
+        ).map { it.trim() }
+            .firstOrNull { it.isNotBlank() }
+            ?: buildZhimaTreeReferFromChInfo(chInfo)
+    }
+
+    private fun buildZhimaTreeReferFromChInfo(chInfo: String): String {
+        if (chInfo.isBlank() ||
+            chInfo.contains("://") ||
+            chInfo.contains("caprMode=") ||
+            chInfo.startsWith("alipays://")
+        ) {
+            return AntSesameCreditRpcCall.ZHIMATREE_REFER
+        }
+        return "https://render.alipay.com/p/yuyan/180020010001288004/zmTree.html?caprMode=sync&chInfo=$chInfo"
+    }
+
+    private fun resolveZhimaTreeTaskPlayInfo(
+        task: JSONObject,
+        taskBaseInfo: JSONObject,
+        taskMaterial: JSONObject?,
+        morphoDetail: JSONObject?
+    ): String {
+        return sequenceOf(
+            task.optString("playInfo"),
+            taskBaseInfo.optString("playInfo"),
+            taskMaterial?.optString("playInfo").orEmpty(),
+            morphoDetail?.optString("playInfo").orEmpty(),
+            task.optJSONObject("taskParticipateExtInfo")?.optString("playInfo").orEmpty()
+        ).map { it.trim() }
+            .firstOrNull { it.isNotBlank() }
+            .orEmpty()
+            .ifBlank { AntSesameCreditRpcCall.ZHIMATREE_PLAY_INFO }
     }
 
     private fun normalizeZhimaTreeTaskId(rawTaskId: String?): String? {
@@ -3234,13 +3293,19 @@ class AntSesameCredit : ModelTask() {
         return prizeName
     }
 
-    private fun doTaskActionResult(taskId: String?, stageCode: String?): ZhimaTreeActionResult {
+    private fun doTaskActionResult(taskRef: ZhimaTreeTaskRef, stageCode: String?): ZhimaTreeActionResult {
         try {
-            val safeTaskId = normalizeZhimaTreeTaskId(taskId)
+            val safeTaskId = normalizeZhimaTreeTaskId(taskRef.taskId)
                 ?: return ZhimaTreeActionResult(false, null, null)
             val safeStageCode = stageCode?.takeIf { it.isNotBlank() }
                 ?: return ZhimaTreeActionResult(false, null, null)
-            val rawResponse = AntSesameCreditRpcCall.rentGreenTaskFinish(safeTaskId, safeStageCode)
+            val rawResponse = AntSesameCreditRpcCall.rentGreenTaskFinish(
+                taskId = safeTaskId,
+                stageCode = safeStageCode,
+                chInfo = taskRef.chInfo,
+                refer = taskRef.refer,
+                playInfo = taskRef.playInfo
+            )
                 ?: return ZhimaTreeActionResult(false, null, null)
             val json = JSONObject(rawResponse)
             return ZhimaTreeActionResult(
