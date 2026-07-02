@@ -50,8 +50,10 @@ import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
 import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.JsonUtil
+import io.github.aoguai.sesameag.util.LocaleSettingsApplier
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.PortUtil
+import io.github.aoguai.sesameag.util.SettingsFieldAuditRegistry
 import io.github.aoguai.sesameag.util.ToastUtil
 import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.friend.FriendSelectionResolver
@@ -146,6 +148,7 @@ class WebSettingsActivity : AppCompatActivity() {
 
                 runOnUiThread {
                     try {
+                        LocaleSettingsApplier.apply(this@WebSettingsActivity)
                         webView.visibility = View.VISIBLE
                         initializeWebView()
                     } catch (e: Exception) {
@@ -532,6 +535,7 @@ class WebSettingsActivity : AppCompatActivity() {
                 "friends" to friends,
                 "groups" to friendConfig.groups,
                 "field" to ModelFieldInfoDto.toInfoDto(modelField),
+                "audit" to SettingsFieldAuditRegistry.get(userId, fieldCode),
                 "preview" to preview.items,
                 "summary" to preview.summary
             )
@@ -688,6 +692,7 @@ class WebSettingsActivity : AppCompatActivity() {
             Toast.makeText(context, "保存失败！", Toast.LENGTH_SHORT).show()
             return false
         }
+        LocaleSettingsApplier.apply(this)
 
         Toast.makeText(context, "保存成功！", Toast.LENGTH_SHORT).show()
         Log.record(TAG, "配置保存成功: userId=${userId ?: "默认"}, configReload=${!userId.isNullOrEmpty()}")

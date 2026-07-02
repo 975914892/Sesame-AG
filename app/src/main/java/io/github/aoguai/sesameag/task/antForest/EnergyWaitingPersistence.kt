@@ -140,7 +140,11 @@ object EnergyWaitingPersistence {
                         else ->
                             "持久化同步：当前有效蹲点任务仍为${currentCount}个"
                     }
-                    Log.forest("$statusText (uid: ${store.uid})")
+                    if (previousCount < 0 || currentCount != previousCount) {
+                        Log.forest("$statusText (uid: ${store.uid})")
+                    } else {
+                        Log.debug(TAG, "$statusText (uid: ${store.uid})")
+                    }
                 }
             } catch (e: Exception) {
                 Log.printStackTrace(TAG, "保存蹲点任务失败:", e)

@@ -1630,17 +1630,17 @@ class AntFarm : ModelTask() {
     }
 
     private fun refreshIpChouChouLeExchangeOptionsForSettings(): List<MapperEntity> {
+        val legacyRows = AntFarmIPChouChouLeBenefit.getList()
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE
+            )
             if (!HookReadyChecker.isTargetAppReadyForRpc(UserMap.currentUid)) {
-                val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
-                    UserMap.currentUid,
-                    ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE
-                )
                 if (cachedRows.isNotEmpty()) {
                     Log.farm("IP抽抽乐商店💸目标应用未就绪，设置页先展示上次缓存列表；请打开目标应用后再刷新#${cachedRows.size}")
                     return cachedRows
                 }
-                val legacyRows = AntFarmIPChouChouLeBenefit.getList()
                 Log.farm("IP抽抽乐商店💸目标应用未就绪，设置页使用本地旧快照列表#${legacyRows.size}")
                 return legacyRows
             }
@@ -1652,15 +1652,37 @@ class AntFarm : ModelTask() {
                 Log.farm("IP抽抽乐商店💸设置页使用目标应用刷新列表#${refreshResult.options.size}")
                 return refreshResult.options
             }
-            Log.farm("IP抽抽乐商店💸远程刷新失败，不使用旧缓存#${refreshResult.message}")
+            if (cachedRows.isNotEmpty()) {
+                Log.farm("IP抽抽乐商店💸远程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${refreshResult.message}")
+                return cachedRows
+            }
+            if (legacyRows.isNotEmpty()) {
+                Log.farm("IP抽抽乐商店💸远程刷新失败，设置页回退本地旧快照列表#${legacyRows.size}#${refreshResult.message}")
+                return legacyRows
+            }
+            Log.farm("IP抽抽乐商店💸远程刷新失败，且无可用缓存快照#${refreshResult.message}")
             return emptyList()
         }
-        val rows = runCatching {
+        val rowsResult = runCatching {
             ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshIpChouChouLeExchangeOptionsForSettings.currentRpc err:", it)
-        }.getOrElse {
-            emptyList()
+        }
+        val rows = rowsResult.getOrElse { throwable ->
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE
+            )
+            if (cachedRows.isNotEmpty()) {
+                Log.farm("IP抽抽乐商店💸当前进程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${throwable.message}")
+                cachedRows
+            } else if (legacyRows.isNotEmpty()) {
+                Log.farm("IP抽抽乐商店💸当前进程刷新失败，设置页回退本地旧快照列表#${legacyRows.size}#${throwable.message}")
+                legacyRows
+            } else {
+                Log.farm("IP抽抽乐商店💸当前进程刷新失败，且无可用缓存快照#${throwable.message}")
+                emptyList()
+            }
         }
         Log.farm("IP抽抽乐商店💸设置页刷新结构化列表#${rows.size}")
         return rows
@@ -1702,11 +1724,11 @@ class AntFarm : ModelTask() {
 
     private fun refreshParadiseCoinExchangeOptionsForSettings(): List<MapperEntity> {
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE
+            )
             if (!HookReadyChecker.isTargetAppReadyForRpc(UserMap.currentUid)) {
-                val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
-                    UserMap.currentUid,
-                    ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE
-                )
                 Log.farm("小鸡乐园币💸目标应用未就绪，设置页先展示上次缓存列表；请打开目标应用后再刷新#${cachedRows.size}")
                 return cachedRows
             }
@@ -1718,15 +1740,30 @@ class AntFarm : ModelTask() {
                 Log.farm("小鸡乐园币💸设置页使用目标应用刷新列表#${refreshResult.options.size}")
                 return refreshResult.options
             }
-            Log.farm("小鸡乐园币💸远程刷新失败，不使用旧缓存#${refreshResult.message}")
+            if (cachedRows.isNotEmpty()) {
+                Log.farm("小鸡乐园币💸远程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${refreshResult.message}")
+                return cachedRows
+            }
+            Log.farm("小鸡乐园币💸远程刷新失败，且无可用缓存快照#${refreshResult.message}")
             return emptyList()
         }
-        val rows = runCatching {
+        val rowsResult = runCatching {
             refreshParadiseCoinExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshParadiseCoinExchangeOptionsForSettings.currentRpc err:", it)
-        }.getOrElse {
-            emptyList()
+        }
+        val rows = rowsResult.getOrElse { throwable ->
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE
+            )
+            if (cachedRows.isNotEmpty()) {
+                Log.farm("小鸡乐园币💸当前进程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${throwable.message}")
+                cachedRows
+            } else {
+                Log.farm("小鸡乐园币💸当前进程刷新失败，且无可用缓存快照#${throwable.message}")
+                emptyList()
+            }
         }
         Log.farm("小鸡乐园币💸设置页刷新结构化列表#${rows.size}")
         return rows
@@ -3226,7 +3263,6 @@ class AntFarm : ModelTask() {
                     ) -> FarmTaskClosureRoute.OwnerBusiness("抽抽乐")
 
             meta.taskType in setOf("XJLY_xxljy", "XJLYKBX1_sl90") ||
-                meta.tracerGroupId == "26wufuczhl" ||
                 meta.categorizationGameId == "2021005181698249" ||
                 (
                     meta.innerAction == "PARADISE" &&
@@ -4499,13 +4535,10 @@ class AntFarm : ModelTask() {
                     val remainingFood = jo.optInt("foodStock", 0).coerceAtLeast(0)
                     Log.farm("${UserMap.getCurrentMaskName()}投喂小鸡🥣[180g]#剩余饲料${remainingFood}g")
 
-                    val interval = BaseModel.checkInterval.getConfigValue()?.toIntOrNull() ?: 0
                     val timeSendBackValue = timeSendBack?.value ?: 0
                     var timeSendBackAnimal = 0
-                    if (timeSendBackValue in 10..interval){
+                    if (timeSendBackValue >= 10) {
                         timeSendBackAnimal = timeSendBackValue
-                    } else if(timeSendBackValue > interval){
-                        Log.farm("设置个合理的喂食后赶鸡时间，建议 30 分钟")
                     }
                     if (sendBackAnimal?.value == true && timeSendBackAnimal > 0) {
                         try {

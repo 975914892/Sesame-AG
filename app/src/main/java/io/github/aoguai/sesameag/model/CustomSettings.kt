@@ -118,24 +118,37 @@ object CustomSettings {
     @JvmStatic
     fun load(userId: String) {
         if (userId.isEmpty()) return
+        resetToDefault()
         try {
             val file = Files.getCustomSetFile(userId) ?: return
             if (!file.exists()) {
-                resetToDefault()
                 return
             }
             val json = Files.readFromFile(file)
-            if (json.isEmpty()) {
-                resetToDefault()
+            if (json.isBlank()) {
                 return
             }
             val data = JsonUtil.copyMapper().readValue(json, Map::class.java)
-            if (data.containsKey(onlyOnceDaily.code)) onlyOnceDaily.setObjectValue(data[onlyOnceDaily.code])
-            if (data.containsKey(onlyOnceDailyList.code)) onlyOnceDailyList.setObjectValue(data[onlyOnceDailyList.code])
-            if (data.containsKey(autoHandleOnceDaily.code)) autoHandleOnceDaily.setObjectValue(data[autoHandleOnceDaily.code])
-            if (data.containsKey(autoHandleOnceDailyTimes.code)) autoHandleOnceDailyTimes.setObjectValue(data[autoHandleOnceDailyTimes.code])
+            applyLoadedValues(data)
         } catch (e: Throwable) {
-            Log.printStackTrace(TAG, "Failed to load custom settings", e)
+            Log.printStackTrace(TAG, "Failed to load custom settings, keeping defaults", e)
+            Log.runtime(TAG, "自定义设置加载失败，已回退默认值:userId=$userId")
+            Log.record(TAG, "自定义设置加载失败，已回退默认值:userId=$userId")
+        }
+    }
+
+    private fun applyLoadedValues(data: Map<*, *>) {
+        if (data.containsKey(onlyOnceDaily.code)) {
+            onlyOnceDaily.setObjectValue(data[onlyOnceDaily.code])
+        }
+        if (data.containsKey(onlyOnceDailyList.code)) {
+            onlyOnceDailyList.setObjectValue(data[onlyOnceDailyList.code])
+        }
+        if (data.containsKey(autoHandleOnceDaily.code)) {
+            autoHandleOnceDaily.setObjectValue(data[autoHandleOnceDaily.code])
+        }
+        if (data.containsKey(autoHandleOnceDailyTimes.code)) {
+            autoHandleOnceDailyTimes.setObjectValue(data[autoHandleOnceDailyTimes.code])
         }
     }
 

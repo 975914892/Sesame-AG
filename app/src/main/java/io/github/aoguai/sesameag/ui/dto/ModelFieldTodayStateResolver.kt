@@ -220,6 +220,9 @@ object ModelFieldTodayStateResolver {
             "AntOcean.cleanOceanList" ->
                 flag(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT, "今日帮助好友清理次数已达上限")
 
+            "AntOcean.dailyOceanTask" ->
+                flag(StatusFlags.FLAG_ANTOCEAN_TASKS_DONE, "今日海洋任务已处理")
+
             "AntOrchard.orchardSpreadManureCount" ->
                 limitReached(
                     current = Status.getIntFlagToday(StatusFlags.FLAG_ANTORCHARD_SPREAD_MANURE_COUNT),
@@ -249,6 +252,9 @@ object ModelFieldTodayStateResolver {
 
             "AntStall.stallThrowManure" ->
                 flag(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT, "今日丢肥料已达上限")
+
+            "AntStall.stallAutoTask" ->
+                flag(StatusFlags.FLAG_ANTSTALL_TASKS_DONE, "今日新村任务已处理")
 
             "AntFarm.doFarmTask",
             "AntFarm.farmTaskTrigger" ->

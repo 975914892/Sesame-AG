@@ -50,6 +50,7 @@ object Notify {
     private var lastExecText: String = ""
     private val runningTaskLock = Any()
     private val runningTaskNames = LinkedHashSet<String>()
+    private val runningTaskDisplayOrder = LinkedHashMap<String, Int>()
 
     private const val STARTUP_TITLE = "模块启动中"
     private const val RUNNING_TITLE = "模块运行中"
@@ -107,6 +108,12 @@ object Notify {
         }
     }
 
+    private fun clearRunningTaskDisplayOrder() {
+        synchronized(runningTaskLock) {
+            runningTaskDisplayOrder.clear()
+        }
+    }
+
     private fun addRunningTask(taskName: String?) {
         val normalizedName = normalizeTaskName(taskName) ?: return
         synchronized(runningTaskLock) {
@@ -124,7 +131,28 @@ object Notify {
 
     private fun snapshotRunningTasks(): List<String> {
         return synchronized(runningTaskLock) {
-            runningTaskNames.toList()
+            val tasks = runningTaskNames.toList()
+            if (tasks.size <= 1 || runningTaskDisplayOrder.isEmpty()) {
+                return@synchronized tasks
+            }
+            val insertionOrder = tasks.withIndex().associate { it.value to it.index }
+            tasks.sortedWith(
+                compareBy<String>(
+                    { runningTaskDisplayOrder[it] ?: Int.MAX_VALUE },
+                    { insertionOrder[it] ?: Int.MAX_VALUE }
+                )
+            )
+        }
+    }
+
+    @JvmStatic
+    fun updateRunningTaskOrder(taskNames: List<String?>) {
+        synchronized(runningTaskLock) {
+            runningTaskDisplayOrder.clear()
+            taskNames.forEachIndexed { index, taskName ->
+                val normalizedName = normalizeTaskName(taskName) ?: return@forEachIndexed
+                runningTaskDisplayOrder.putIfAbsent(normalizedName, index)
+            }
         }
     }
 
@@ -143,6 +171,7 @@ object Notify {
             lastExecText = ""
             nextExecTimeCache = 0
             clearRunningTasks()
+            clearRunningTaskDisplayOrder()
             lastUpdateTime = System.currentTimeMillis()
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 data = "alipays://platformapi/startapp?appId=".toUri()
@@ -190,6 +219,7 @@ object Notify {
             lastExecText = ""
             nextExecTimeCache = 0
             clearRunningTasks()
+            clearRunningTaskDisplayOrder()
             isNotificationStarted = false
         } catch (e: Exception) {
             Log.printStackTrace(e)
@@ -288,6 +318,11 @@ object Notify {
             val pauseTime = RuntimeInfo.getInstance().getLong(RuntimeInfo.RuntimeInfoKey.ForestPauseTime)
             val explicitStatus = globalStatusText?.takeIf { it.isNotBlank() }
             val runningTasks = snapshotRunningTasks()
+            val runningSummary = when {
+                runningTasks.isEmpty() -> null
+                runningTasks.size == 1 -> "${runningTasks.first()} 运行中"
+                else -> MULTI_RUNNING_PREFIX + runningTasks.joinToString("、")
+            }
             val title = when {
                 pauseTime > System.currentTimeMillis() -> {
                     "异常暂停，恢复时间 ${TimeUtil.getCommonDate(pauseTime)}"
@@ -299,7 +334,7 @@ object Notify {
                     if (runningTasks.size == 1) {
                         "${runningTasks.first()} 运行中"
                     } else {
-                        MULTI_RUNNING_PREFIX + runningTasks.joinToString("、")
+                        "$RUNNING_TITLE（${runningTasks.size}）"
                     }
                 }
                 nextExecTimeCache > 0 -> WAITING_TITLE
@@ -307,6 +342,9 @@ object Notify {
             }
 
             val lines = buildList {
+                if (runningTasks.size > 1) {
+                    add(runningSummary!!)
+                }
                 if (nextExecTimeCache > 0) {
                     add("下次执行 ${TimeUtil.getTimeStr(nextExecTimeCache)}")
                 }
@@ -314,10 +352,10 @@ object Notify {
                     add(lastExecText)
                 }
             }
-            val content = if (lines.isEmpty()) RUNNING_TITLE else lines.joinToString("\n")
+            val content = if (lines.isEmpty()) (runningSummary ?: RUNNING_TITLE) else lines.joinToString("\n")
 
             builder.setContentTitle(title)
-            builder.setContentText(lines.firstOrNull() ?: content)
+            builder.setContentText(lines.firstOrNull() ?: runningSummary ?: content)
             builder.setStyle(NotificationCompat.BigTextStyle().bigText(content))
             manager.notify(RUNNING_NOTIFICATION_ID, builder.build())
         } catch (e: Exception) {

@@ -141,8 +141,7 @@ class AntSports : ModelTask() {
         private const val WALK_CHALLENGE_MIN_DISTANCE_METER = 100.0
         private const val WALK_CHALLENGE_WALK_CALORIE_FACTOR = 0.8214
         private const val NEVERLAND_SOURCE_SPORT_HOME = "ch_toufang__yundongshouye"
-        private const val NEVERLAND_SOURCE_LEGACY = "jkdsportcard"
-        private val NEVERLAND_SOURCE_CANDIDATES = listOf(NEVERLAND_SOURCE_SPORT_HOME, NEVERLAND_SOURCE_LEGACY)
+        private val NEVERLAND_SOURCE_CANDIDATES = listOf(NEVERLAND_SOURCE_SPORT_HOME)
         private const val SPORT_ITEM_MALL_CITY_CODE = "440100"
 
     }
@@ -775,11 +774,11 @@ class AntSports : ModelTask() {
 
     private fun refreshSportsEnergyExchangeOptionsForSettings(): List<MapperEntity> {
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY
+            )
             if (!HookReadyChecker.isTargetAppReadyForRpc(UserMap.currentUid)) {
-                val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
-                    UserMap.currentUid,
-                    ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY
-                )
                 Log.sports("运动能量兑换🎁目标应用未就绪，设置页先展示上次缓存列表；请打开目标应用后再刷新#${cachedRows.size}")
                 return cachedRows
             }
@@ -791,15 +790,30 @@ class AntSports : ModelTask() {
                 Log.sports("运动能量兑换🎁设置页使用目标应用刷新列表#${refreshResult.options.size}")
                 return refreshResult.options
             }
-            Log.sports("运动能量兑换🎁远程刷新失败，不使用旧缓存#${refreshResult.message}")
+            if (cachedRows.isNotEmpty()) {
+                Log.sports("运动能量兑换🎁远程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${refreshResult.message}")
+                return cachedRows
+            }
+            Log.sports("运动能量兑换🎁远程刷新失败，且无可用缓存快照#${refreshResult.message}")
             return emptyList()
         }
-        val rows = runCatching {
+        val rowsResult = runCatching {
             refreshSportsEnergyExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshSportsEnergyExchangeOptionsForSettings.currentRpc err:", it)
-        }.getOrElse {
-            emptyList()
+        }
+        val rows = rowsResult.getOrElse { throwable ->
+            val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY
+            )
+            if (cachedRows.isNotEmpty()) {
+                Log.sports("运动能量兑换🎁当前进程刷新失败，设置页回退上次缓存快照#${cachedRows.size}#${throwable.message}")
+                cachedRows
+            } else {
+                Log.sports("运动能量兑换🎁当前进程刷新失败，且无可用缓存快照#${throwable.message}")
+                emptyList()
+            }
         }
         Log.sports("运动能量兑换🎁设置页刷新结构化列表#${rows.size}")
         return rows
@@ -1369,6 +1383,15 @@ class AntSports : ModelTask() {
         return (syncStepCount.value ?: 0) > 0
     }
 
+    internal fun isEarliestSyncStepTimeAllowed(): Boolean {
+        return if (::earliestSyncStepTime.isInitialized) {
+            earliestSyncStepTime.isDisabled() || earliestSyncStepTime.hasReachedToday()
+        } else {
+            val defaultField = HourOfDayModelField("defaultEarliestSyncStepTime", "默认最早同步时间", "-1", allowDisable = true)
+            defaultField.isDisabled() || defaultField.hasReachedToday()
+        }
+    }
+
     internal fun registerPersistentSyncStepTask() {
         if (!isSyncStepEnabled() ||
             Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE) ||
@@ -1424,11 +1447,7 @@ class AntSports : ModelTask() {
             return false
         }
 
-        return if (::earliestSyncStepTime.isInitialized) {
-            earliestSyncStepTime.hasReachedToday()
-        } else {
-            HourOfDayModelField("defaultEarliestSyncStepTime", "默认最早同步时间", "-1", allowDisable = true).hasReachedToday()
-        }
+        return isEarliestSyncStepTimeAllowed()
     }
 
     private fun queryCurrentWalkStepCount(): Int? {
@@ -2275,15 +2294,15 @@ class AntSports : ModelTask() {
             val useJumpCompleteRpc = taskAction.equals("JUMP", ignoreCase = true) && !useAdTaskFinishRpc
             val result = when {
                 useVerifiedNewCompleteRpc -> JSONObject(
-                    AntSportsRpcCall.completeTask(
+                    AntSportsRpcCall.completeAdTask(
                         taskId = taskId,
                         taskAction = taskAction,
-                        taskType = requestTaskType
+                        taskType = requestTaskType ?: "AD_TASK"
                     )
                 )
                 useAdTaskFinishRpc -> JSONObject(AntSportsRpcCall.finishAdTask(adTaskFinishPayload))
                 useJumpCompleteRpc -> JSONObject(
-                    AntSportsRpcCall.completeTask(
+                    AntSportsRpcCall.completeJumpTask(
                         taskId = taskId,
                         taskAction = taskAction
                     )

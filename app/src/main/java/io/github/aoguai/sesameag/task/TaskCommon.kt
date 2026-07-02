@@ -6,6 +6,7 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.TimeTriggerEvaluator
 import io.github.aoguai.sesameag.util.TimeTriggerParseOptions
 import io.github.aoguai.sesameag.util.TimeTriggerParser
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 通用任务工具类
@@ -13,6 +14,12 @@ import io.github.aoguai.sesameag.util.TimeTriggerParser
  * 提供任务相关的通用功能，包括时间判断和状态更新。
  */
 object TaskCommon {
+    private data class TimeRangeLogSnapshot(
+        val configText: String,
+        val disabled: Boolean,
+        val active: Boolean
+    )
+
     private val AFTER_EIGHT_AM_SPEC = TimeTriggerParser.parse(
         "0800-2400",
         TimeTriggerParseOptions(
@@ -22,6 +29,7 @@ object TaskCommon {
             tag = "TaskCommon"
         )
     )
+    private val timeRangeLogSnapshots = ConcurrentHashMap<String, TimeRangeLogSnapshot>()
     
     @Volatile
     @JvmField
@@ -78,13 +86,22 @@ object TaskCommon {
         label: String,
         currentTime: Long
     ): Boolean {
-        if (field.isDisabled()) {
-            Log.runtime("$label 配置已关闭")
-            return false
-        }
+        val configText = field.value.toString()
+        val disabled = field.isDisabled()
+        val active = !disabled && field.isActive(currentTime)
+        val currentSnapshot = TimeRangeLogSnapshot(configText, disabled, active)
+        val previousSnapshot = timeRangeLogSnapshots.put(label, currentSnapshot)
 
-        Log.runtime("获取 $label 配置: ${field.value}")
-        return field.isActive(currentTime)
+        if (previousSnapshot == null || previousSnapshot.configText != configText || previousSnapshot.disabled != disabled) {
+            if (disabled) {
+                Log.runtime("$label 配置已关闭")
+            } else {
+                Log.runtime("获取 $label 配置: $configText，当前${if (active) "命中" else "未命中"}")
+            }
+        } else if (!disabled && previousSnapshot.active != active) {
+            Log.runtime("$label ${if (active) "进入" else "离开"}命中时间段: $configText")
+        }
+        return active
     }
 }
 

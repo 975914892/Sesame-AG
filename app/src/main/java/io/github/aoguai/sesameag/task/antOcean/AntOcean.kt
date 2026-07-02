@@ -20,6 +20,7 @@ import io.github.aoguai.sesameag.task.TaskStatus
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
+import io.github.aoguai.sesameag.task.common.TaskFlowDecision
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
@@ -599,12 +600,9 @@ class AntOcean : ModelTask() {
                 taskTitle.contains("清理海域"))
     }
 
-    private fun isUnsupportedNoClosureOceanTask(taskType: String): Boolean {
-        return taskType == "CNXDY_QDRW_HAIYANG" || taskType == "mokuai_senlin_hydrw"
-    }
-
     private fun markOceanTasksDoneInvalidated() {
         oceanTasksDoneInvalidatedThisRun = true
+        Status.removeFlag(StatusFlags.FLAG_ANTOCEAN_TASKS_DONE)
     }
 
     private fun markOceanNoticeLinkedRefreshNeeded() {
@@ -1509,8 +1507,9 @@ class AntOcean : ModelTask() {
             return null
         }
         try {
-            val result = TaskFlowEngine(OceanTaskFlowAdapter(), roundSleepMs = 500L).run()
-            if (result.completed && !result.actionAttempted && !result.interrupted) {
+            val adapter = OceanTaskFlowAdapter()
+            val result = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            if (!result.interrupted && adapter.canMarkTasksDone()) {
                 Status.setFlagToday(StatusFlags.FLAG_ANTOCEAN_TASKS_DONE)
                 oceanTasksDoneInvalidatedThisRun = false
                 Log.ocean("海洋任务🌊今日已确认完成")
@@ -1528,6 +1527,11 @@ class AntOcean : ModelTask() {
     }
 
     private inner class OceanTaskFlowAdapter : TaskFlowAdapter {
+        private var querySucceeded = false
+        private var latestItems: List<TaskFlowItem> = emptyList()
+        private var unknownPhaseSeen = false
+        private var unknownFailureSeen = false
+
         override val moduleName: String = TASK_BLACKLIST_MODULE
         override val flowName: String = "神奇海洋任务"
 
@@ -1543,11 +1547,16 @@ class AntOcean : ModelTask() {
         }
 
         override fun isQuerySuccess(response: JSONObject): Boolean {
-            return ResChecker.checkRes(TAG, response)
+            querySucceeded = ResChecker.checkRes(TAG, response)
+            return querySucceeded
         }
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
-            val taskList = response.optJSONArray("antOceanTaskVOList") ?: return emptyList()
+            val taskList = response.optJSONArray("antOceanTaskVOList")
+            if (taskList == null) {
+                latestItems = emptyList()
+                return emptyList()
+            }
             val items = mutableListOf<TaskFlowItem>()
             for (i in 0 until taskList.length()) {
                 val task = taskList.optJSONObject(i) ?: continue
@@ -1593,6 +1602,7 @@ class AntOcean : ModelTask() {
                     )
                 )
             }
+            latestItems = items
             return items
         }
 
@@ -1738,8 +1748,28 @@ class AntOcean : ModelTask() {
             return "${action.logName}:${buildOceanTaskBizKey(item.sceneCode, item.type, item.title)}"
         }
 
+        override fun afterFailure(
+            item: TaskFlowItem,
+            action: TaskFlowAction,
+            result: TaskFlowActionResult,
+            decision: TaskFlowDecision
+        ) {
+            if (result.failureType == TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW) {
+                unknownFailureSeen = true
+            }
+        }
+
         override fun onQueryFailed(response: JSONObject) {
             Log.ocean("查询任务列表失败：" + extractOceanTaskFailureMessage(response))
+        }
+
+        override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
+            unknownPhaseSeen = true
+            Log.error(
+                TAG,
+                "$flowName[未知状态：${item.title}] taskId=${item.id.ifBlank { "UNKNOWN" }} " +
+                    "status=${item.status.ifBlank { "UNKNOWN" }} actionType=${item.actionType.ifBlank { "UNKNOWN" }}"
+            )
         }
 
         override fun logInfo(message: String) {
@@ -1748,6 +1778,41 @@ class AntOcean : ModelTask() {
 
         override fun logError(message: String) {
             Log.error(TAG, message)
+        }
+
+        fun canMarkTasksDone(): Boolean {
+            if (!querySucceeded || unknownPhaseSeen || unknownFailureSeen) {
+                return false
+            }
+            for (item in latestItems) {
+                if (shouldSkipByTodayState(item)) {
+                    continue
+                }
+                val phase = mapPhase(item)
+                if (phase == TaskFlowPhase.UNKNOWN) {
+                    return false
+                }
+                if (phase == TaskFlowPhase.TERMINAL || phase == TaskFlowPhase.BUSINESS_ACTION) {
+                    continue
+                }
+                if (phase == TaskFlowPhase.REWARD_READY) {
+                    return false
+                }
+                if (super<TaskFlowAdapter>.isBlacklisted(item)) {
+                    continue
+                }
+                when (phase) {
+                    TaskFlowPhase.READY_TO_COMPLETE,
+                    TaskFlowPhase.SIGNUP_REQUIRED,
+                    TaskFlowPhase.SIGNUP_COMPLETE,
+                    TaskFlowPhase.UNSUPPORTED -> return false
+                    TaskFlowPhase.TERMINAL,
+                    TaskFlowPhase.BUSINESS_ACTION,
+                    TaskFlowPhase.REWARD_READY,
+                    TaskFlowPhase.UNKNOWN -> Unit
+                }
+            }
+            return true
         }
     }
 
@@ -1909,7 +1974,7 @@ class AntOcean : ModelTask() {
         rpc: String,
         detail: String
     ): TaskFlowActionResult {
-        val failureType = normalizeOceanTaskFailureType(item.type, classifyOceanTaskFailure(response))
+        val failureType = classifyOceanTaskFailure(response)
         return TaskFlowActionResult.failure(
             failureType = failureType,
             code = extractOceanTaskFailureCode(response),
@@ -1918,20 +1983,6 @@ class AntOcean : ModelTask() {
             raw = response.toString(),
             detail = detail
         )
-    }
-
-    private fun normalizeOceanTaskFailureType(
-        taskType: String,
-        failureType: TaskRpcFailureType
-    ): TaskRpcFailureType {
-        if (failureType != TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE) {
-            return failureType
-        }
-        return if (isUnsupportedNoClosureOceanTask(taskType)) {
-            TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
-        } else {
-            TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW
-        }
     }
 
     private fun oceanTaskActionDetail(
@@ -2161,7 +2212,7 @@ class AntOcean : ModelTask() {
         taskTitle: String,
         response: JSONObject
     ) {
-        val failureType = normalizeOceanTaskFailureType(taskType, classifyOceanTaskFailure(response))
+        val failureType = classifyOceanTaskFailure(response)
         val code = extractOceanTaskFailureCode(response).ifBlank { "UNKNOWN" }
         val message = extractOceanTaskFailureMessage(response).ifBlank { "UNKNOWN" }
         val detail = "module=神奇海洋 taskType=$taskType taskName=$taskTitle " +

@@ -13,8 +13,13 @@ import io.github.aoguai.sesameag.entity.friend.FriendSelectionSpec
 import io.github.aoguai.sesameag.model.ModelField
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.SettingsFieldAudit
+import io.github.aoguai.sesameag.util.SettingsFieldAuditRegistry
 import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.friend.FriendSelectionResolver
+import io.github.aoguai.sesameag.util.maps.UserMap
+import org.json.JSONArray
+import org.json.JSONObject
 
 open class FriendSelectionModelField(
     code: String,
@@ -27,18 +32,24 @@ open class FriendSelectionModelField(
     override fun getEditorMeta(): Any = FriendSelectionEditorMeta(countEnabled = false)
 
     override fun setObjectValue(objectValue: Any?) {
+        clearAudit()
         value = normalizeSpec(objectValue)
     }
 
     override fun setConfigValue(configValue: String?) {
         if (configValue.isNullOrBlank()) {
+            clearAudit()
             reset()
             return
         }
         value = try {
+            clearAudit()
             sanitizeSpec(JsonUtil.parseObject(configValue, FriendSelectionSpec::class.java))
         } catch (t: Throwable) {
-            Log.runtime("FriendSelectionModelField", "好友选择配置[$code]格式无效，已重置为空")
+            reportInvalidConfig(
+                configValue,
+                "好友选择配置[$code]已失效，已重置为空；请在好友中心重新选择"
+            )
             FriendSelectionSpec()
         }
     }
@@ -79,12 +90,56 @@ open class FriendSelectionModelField(
             null -> FriendSelectionSpec()
             is FriendSelectionSpec -> raw
             else -> try {
+                clearAudit()
                 JsonUtil.parseObject(raw, FriendSelectionSpec::class.java)
             } catch (_: Throwable) {
-                Log.runtime("FriendSelectionModelField", "好友选择配置[$code]格式无效，已重置为空")
+                reportInvalidObjectValue("好友选择配置[$code]格式无效，已重置为空；请在好友中心重新选择")
                 FriendSelectionSpec()
             }
         })
+    }
+
+    private fun clearAudit() {
+        SettingsFieldAuditRegistry.clear(UserMap.currentUid, code)
+    }
+
+    private fun reportInvalidObjectValue(message: String) {
+        clearAudit()
+        val clearValue = JsonUtil.formatJson(FriendSelectionSpec(), false)
+        SettingsFieldAuditRegistry.save(
+            UserMap.currentUid,
+            code,
+            SettingsFieldAudit(
+                title = "历史好友配置已失效",
+                message = message,
+                staleCount = 1,
+                clearValue = clearValue
+            )
+        )
+        Log.runtime("FriendSelectionModelField", message)
+        Log.record("FriendSelectionModelField", message)
+    }
+
+    private fun reportInvalidConfig(rawConfig: String, genericMessage: String) {
+        clearAudit()
+        val staleCount = estimateLegacySelectionCount(rawConfig)
+        val legacyMessage = if (looksLikeLegacyFriendSelectionConfig(rawConfig, FRIEND_SELECTION_SPEC_KEYS)) {
+            "检测到旧版好友数组/Map配置[$code]，当前版本已改为好友中心规则；旧配置不会继续生效，请重新选择"
+        } else {
+            genericMessage
+        }
+        SettingsFieldAuditRegistry.save(
+            UserMap.currentUid,
+            code,
+            SettingsFieldAudit(
+                title = "历史好友配置已失效",
+                message = legacyMessage,
+                staleCount = staleCount,
+                clearValue = JsonUtil.formatJson(FriendSelectionSpec(), false)
+            )
+        )
+        Log.runtime("FriendSelectionModelField", legacyMessage)
+        Log.record("FriendSelectionModelField", legacyMessage)
     }
 }
 
@@ -99,18 +154,24 @@ class FriendSelectionCountModelField(
     override fun getEditorMeta(): Any = FriendSelectionEditorMeta(countEnabled = true)
 
     override fun setObjectValue(objectValue: Any?) {
+        clearAudit()
         value = normalizeSpec(objectValue)
     }
 
     override fun setConfigValue(configValue: String?) {
         if (configValue.isNullOrBlank()) {
+            clearAudit()
             reset()
             return
         }
         value = try {
+            clearAudit()
             sanitizeCountSpec(JsonUtil.parseObject(configValue, FriendSelectionCountSpec::class.java))
         } catch (t: Throwable) {
-            Log.runtime("FriendSelectionCountModelField", "好友计数选择配置[$code]格式无效，已重置为空")
+            reportInvalidConfig(
+                configValue,
+                "好友计数选择配置[$code]已失效，已重置为空；请在好友中心重新设置"
+            )
             FriendSelectionCountSpec()
         }
     }
@@ -149,12 +210,56 @@ class FriendSelectionCountModelField(
             null -> FriendSelectionCountSpec()
             is FriendSelectionCountSpec -> raw
             else -> try {
+                clearAudit()
                 JsonUtil.parseObject(raw, FriendSelectionCountSpec::class.java)
             } catch (_: Throwable) {
-                Log.runtime("FriendSelectionCountModelField", "好友计数选择配置[$code]格式无效，已重置为空")
+                reportInvalidObjectValue("好友计数选择配置[$code]格式无效，已重置为空；请在好友中心重新设置")
                 FriendSelectionCountSpec()
             }
         })
+    }
+
+    private fun clearAudit() {
+        SettingsFieldAuditRegistry.clear(UserMap.currentUid, code)
+    }
+
+    private fun reportInvalidObjectValue(message: String) {
+        clearAudit()
+        val clearValue = JsonUtil.formatJson(FriendSelectionCountSpec(), false)
+        SettingsFieldAuditRegistry.save(
+            UserMap.currentUid,
+            code,
+            SettingsFieldAudit(
+                title = "历史好友配置已失效",
+                message = message,
+                staleCount = 1,
+                clearValue = clearValue
+            )
+        )
+        Log.runtime("FriendSelectionCountModelField", message)
+        Log.record("FriendSelectionCountModelField", message)
+    }
+
+    private fun reportInvalidConfig(rawConfig: String, genericMessage: String) {
+        clearAudit()
+        val staleCount = estimateLegacySelectionCount(rawConfig)
+        val legacyMessage = if (looksLikeLegacyFriendSelectionConfig(rawConfig, FRIEND_SELECTION_COUNT_SPEC_KEYS)) {
+            "检测到旧版好友数组/Map配置[$code]，当前版本已改为好友中心规则；旧配置不会继续生效，请重新设置"
+        } else {
+            genericMessage
+        }
+        SettingsFieldAuditRegistry.save(
+            UserMap.currentUid,
+            code,
+            SettingsFieldAudit(
+                title = "历史好友配置已失效",
+                message = legacyMessage,
+                staleCount = staleCount,
+                clearValue = JsonUtil.formatJson(FriendSelectionCountSpec(), false)
+            )
+        )
+        Log.runtime("FriendSelectionCountModelField", legacyMessage)
+        Log.record("FriendSelectionCountModelField", legacyMessage)
     }
 }
 
@@ -171,6 +276,22 @@ private val MANDATORY_CAPABILITY_MODULE_KEYS = linkedSetOf(
     "DODO",
     "OCEAN",
     "SPORTS"
+)
+
+private val FRIEND_SELECTION_SPEC_KEYS = linkedSetOf(
+    "includeUserIds",
+    "includeGroupIds",
+    "excludeUserIds",
+    "excludeGroupIds",
+    "relationFilter",
+    "capabilityFilter"
+)
+
+private val FRIEND_SELECTION_COUNT_SPEC_KEYS = linkedSetOf(
+    "selection",
+    "defaultCount",
+    "groupCountOverrides",
+    "userCountOverrides"
 )
 
 private fun sanitizeSpec(
@@ -270,4 +391,34 @@ private fun resolveFriendConfig(userId: String?): FriendCenterConfig? {
     return runCatching {
         FriendRepository.current(safeUserId)
     }.getOrNull()
+}
+
+private fun estimateLegacySelectionCount(rawConfig: String?): Int {
+    val normalized = rawConfig?.trim().orEmpty()
+    if (normalized.isEmpty()) {
+        return 0
+    }
+    return runCatching { JSONArray(normalized).length() }
+        .getOrElse {
+            runCatching { JSONObject(normalized).length() }.getOrDefault(1)
+        }
+        .coerceAtLeast(1)
+}
+
+private fun looksLikeLegacyFriendSelectionConfig(rawConfig: String?, knownKeys: Set<String>): Boolean {
+    val normalized = rawConfig?.trim().orEmpty()
+    if (normalized.startsWith("[")) {
+        return true
+    }
+    if (!normalized.startsWith("{")) {
+        return false
+    }
+    return runCatching {
+        val jsonObject = JSONObject(normalized)
+        if (jsonObject.length() == 0) {
+            false
+        } else {
+            jsonObject.keys().asSequence().none { knownKeys.contains(it) }
+        }
+    }.getOrDefault(false)
 }

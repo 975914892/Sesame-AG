@@ -80,6 +80,9 @@ object StatusFlags {
     /** 森林：保护地巡护机会兑换今日已达上限 */
     const val FLAG_ANTFOREST_PATROL_CHANCE_EXCHANGE_LIMIT = "AntForest::exchangePatrolChanceLimit"
 
+    /** 森林：累计奖励按 sceneCode/taskType 维度记录今日已处理前缀 */
+    const val FLAG_ANTFOREST_DEFERRED_RIGHTS_HANDLED_PREFIX = "AntForest::deferredRightsHandled::"
+
     /** 森林：双击卡时间槽已消费到的索引 */
     const val FLAG_ANTFOREST_DOUBLE_CARD_TRIGGER_INDEX = "antForest::doubleCard::triggerIndex"
 
@@ -300,6 +303,9 @@ object StatusFlags {
 
     /** 蚂蚁新村：今日丢肥料是否达到上限 */
     const val FLAG_ANTSTALL_THROW_MANURE_LIMIT: String = "Flag_AntStall_Throw_Manure_Limit"
+
+    /** 蚂蚁新村：今日任务列表已确认无可执行项 */
+    const val FLAG_ANTSTALL_TASKS_DONE: String = "AntStall::tasksDone"
 
     /** 蚂蚁新村：村庄路线图今日已进入前缀 */
     const val FLAG_ANTSTALL_ROADMAP_VISITED_PREFIX: String = "stall::roadmap::"

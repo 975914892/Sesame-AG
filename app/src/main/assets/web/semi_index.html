@@ -1475,6 +1475,7 @@
             const [sheetSafetyFilter, setSheetSafetyFilter] = useState('all');
             const [sheetLoading, setSheetLoading] = useState(false);
             const [sheetVisibleLimit, setSheetVisibleLimit] = useState(120);
+            const [sheetAudit, setSheetAudit] = useState({ staleIds: [], hasCachedSnapshot: false });
             const [selectedIds, setSelectedIds] = useState(new Set()); // 选中的ID集合
             const [selectedCounts, setSelectedCounts] = useState({}); // ID对应的数值
             const [friendSheetVisible, setFriendSheetVisible] = useState(false);
@@ -1488,6 +1489,7 @@
                 groupById: {},
                 allGroupsByUser: {}
             });
+            const [friendAudit, setFriendAudit] = useState(null);
             const [friendSpec, setFriendSpec] = useState(makeDefaultFriendSelectionSpec());
             const [friendCountSpec, setFriendCountSpec] = useState(makeDefaultFriendSelectionCountSpec());
             const [friendSheetSearch, setFriendSheetSearch] = useState('');
@@ -1567,6 +1569,7 @@
                         return 0;
                     });
                     setSheetList(listData);
+                    setSheetAudit(detectSheetAudit(listData, selectedForSort));
                     setSheetLoading(false);
                     setSheetVisibleLimit(120);
                     if (!payload.success) {
@@ -1665,7 +1668,25 @@
                 setFriendSheetLoading(false);
                 setFriendBatchMode(false);
                 updateFriendBatchSelectedIds(new Set());
+                setFriendAudit(null);
                 setFriendSheetVisible(false);
+            };
+
+            const clearFriendAuditConfig = () => {
+                const clearValue = String(friendAudit?.clearValue || '');
+                if (!clearValue) return;
+                commitFieldChange(friendSheetConfig.modelCode, friendSheetConfig.fieldCode, clearValue);
+                if (friendSheetConfig.type === 'FRIEND_SELECTION_COUNT') {
+                    const countSpec = parseFriendSelectionCountSpec(clearValue);
+                    setFriendSpec(countSpec.selection);
+                    setFriendCountSpec(countSpec);
+                } else {
+                    setFriendSpec(parseFriendSelectionSpec(clearValue));
+                    setFriendCountSpec(makeDefaultFriendSelectionCountSpec());
+                }
+                setFriendAudit(null);
+                setFriendSpecDirty(false);
+                Toast.success('已清理历史失效好友配置，退出时保存生效');
             };
 
             const getDraftKey = (modelCode, fieldCode) => `${modelCode}::${fieldCode}`;
@@ -1814,6 +1835,38 @@
                 }).filter(Boolean);
             };
 
+            const detectSheetAudit = (listData, selectedSet) => {
+                const validIds = new Set(
+                    (Array.isArray(listData) ? listData : [])
+                        .map(item => String(item?.id || '').trim())
+                        .filter(Boolean)
+                );
+                const staleIds = Array.from(selectedSet || [])
+                    .map(id => String(id || '').trim())
+                    .filter(id => id && !validIds.has(id));
+                const hasCachedSnapshot = (Array.isArray(listData) ? listData : []).some(item => {
+                    const reasonText = `${item?.safetyReason || ''} ${item?.excludeReason || ''}`;
+                    return reasonText.includes('本地缓存，未经过本次目标应用刷新复核') ||
+                        reasonText.includes('当前仅展示上次缓存');
+                });
+                return { staleIds, hasCachedSnapshot };
+            };
+
+            const clearStaleSheetSelections = () => {
+                if (!Array.isArray(sheetAudit.staleIds) || sheetAudit.staleIds.length === 0) return;
+                const staleIdSet = new Set(sheetAudit.staleIds.map(id => String(id || '').trim()).filter(Boolean));
+                const nextIds = new Set(selectedIds);
+                const nextCounts = { ...selectedCounts };
+                staleIdSet.forEach(id => {
+                    nextIds.delete(id);
+                    delete nextCounts[id];
+                });
+                setSelectedIds(nextIds);
+                setSelectedCounts(nextCounts);
+                setSheetAudit(prev => ({ ...prev, staleIds: [] }));
+                Toast.success(`已清理 ${staleIdSet.size} 个历史失效项，退出时保存生效`);
+            };
+
             const loadListSheetSyncFallback = (modelCode, fieldCode, selectedForSort, config) => {
                 window.requestAnimationFrame(() => {
                     window.setTimeout(() => {
@@ -1827,6 +1880,7 @@
                                 return 0;
                             });
                             setSheetList(listData);
+                            setSheetAudit(detectSheetAudit(listData, selectedForSort));
                         } catch (e) {
                             Toast.error('列表加载失败');
                         } finally {
@@ -1863,6 +1917,7 @@
                 setSheetSafetyFilter('all');
                 setSelectedIds(newSelectedIds);
                 setSelectedCounts(newSelectedCounts);
+                setSheetAudit({ staleIds: [], hasCachedSnapshot: false });
                 setSheetLoading(true);
                 setSheetVisibleLimit(120);
                 setSheetVisible(true);
@@ -1887,6 +1942,7 @@
                 sheetLoadTokenRef.current = null;
                 setSheetLoading(false);
                 setSheetSafetyFilter('all');
+                setSheetAudit({ staleIds: [], hasCachedSnapshot: false });
                 setSheetVisible(false);
             };
 
@@ -1941,6 +1997,7 @@
                     groupById: {},
                     allGroupsByUser: {}
                 });
+                setFriendAudit(null);
                 if (type === 'FRIEND_SELECTION_COUNT') {
                     const countSpec = parseFriendSelectionCountSpec(configValue);
                     setFriendSpec(countSpec.selection);
@@ -1971,6 +2028,7 @@
                             preview: Array.isArray(payload.preview) ? payload.preview : [],
                             summary: payload && typeof payload.summary === 'object' && payload.summary !== null ? payload.summary : null
                         };
+                        setFriendAudit(payload && typeof payload.audit === 'object' && payload.audit !== null ? payload.audit : null);
                         const indexData = buildFriendSheetIndex(data.friends, data.groups);
                         if (type === 'FRIEND_SELECTION_COUNT') {
                             const countSpec = parseFriendSelectionCountSpec(effectiveConfigValue);
@@ -2465,6 +2523,8 @@
                 const summary = shouldUseBackendPreview
                     ? { ...(backendSummaryFallback || {}), ...(backendSummary || {}) }
                     : localSummary;
+                const friendAuditCount = Number(friendAudit?.staleCount) || 0;
+                const canClearFriendAudit = Boolean(friendAudit?.clearValue);
                 const lowerSearch = friendSheetSearch.toLowerCase();
                 const matchesSearch = (item) => {
                     const haystack = [
@@ -2636,6 +2696,26 @@
                 return (
                     <div className="friend-sheet">
                         {friendSheetConfig.desc ? <Text>{friendSheetConfig.desc}</Text> : null}
+                        {friendAudit ? (
+                            <div style={{
+                                marginTop: '0.75rem',
+                                padding: '0.75rem 1rem',
+                                borderRadius: '0.75rem',
+                                background: 'var(--semi-color-warning-light-default)',
+                                color: 'var(--semi-color-warning)'
+                            }}>
+                                <div style={{ fontWeight: 600 }}>{friendAudit.title || '历史好友配置已失效'}</div>
+                                <div style={{ marginTop: '0.375rem', fontSize: '0.8125rem', lineHeight: 1.6 }}>
+                                    {friendAudit.message}
+                                    {friendAuditCount > 0 ? `（历史项 ${friendAuditCount} 个）` : ''}
+                                </div>
+                                {canClearFriendAudit ? (
+                                    <Button style={{ marginTop: '0.625rem' }} size="small" onClick={clearFriendAuditConfig}>
+                                        一键清理并改写为空配置
+                                    </Button>
+                                ) : null}
+                            </div>
+                        ) : null}
                         <div className="friend-summary-panel">
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                                 {renderSummaryItem('最终生效', summary.effectiveCount, 'var(--semi-color-success)')}
@@ -3022,6 +3102,35 @@
                     >
                         {sheetConfig.desc ? <Text>{sheetConfig.desc}</Text> : null}
                         <div style={{ padding: '0.625rem 1rem', borderBottom: '0.0625rem solid var(--semi-color-border)' }}>
+                            {sheetAudit.hasCachedSnapshot ? (
+                                <div style={{
+                                    marginBottom: '0.625rem',
+                                    padding: '0.625rem 0.75rem',
+                                    borderRadius: '0.75rem',
+                                    background: 'var(--semi-color-warning-light-default)',
+                                    color: 'var(--semi-color-warning)',
+                                    fontSize: '0.8125rem',
+                                    lineHeight: 1.6
+                                }}>
+                                    当前展示为缓存快照，尚未经过本次目标应用刷新复核；请先打开目标应用并刷新列表，再决定是否勾选自动兑换。
+                                </div>
+                            ) : null}
+                            {sheetAudit.staleIds.length > 0 ? (
+                                <div style={{
+                                    marginBottom: '0.625rem',
+                                    padding: '0.625rem 0.75rem',
+                                    borderRadius: '0.75rem',
+                                    background: 'var(--semi-color-danger-light-default)',
+                                    color: 'var(--semi-color-danger)',
+                                    fontSize: '0.8125rem',
+                                    lineHeight: 1.6
+                                }}>
+                                    <div>检测到历史失效项 {sheetAudit.staleIds.length} 个：这些 ID 已不在当前可选列表中，保留在配置里也不会生效。</div>
+                                    <Button style={{ marginTop: '0.5rem' }} size="small" type="danger" onClick={clearStaleSheetSelections}>
+                                        一键清理历史失效项
+                                    </Button>
+                                </div>
+                            ) : null}
                             <Input
                                 prefix={<IconSearch />}
                                 placeholder="搜索名称、来源、用途、触发点或原因..."

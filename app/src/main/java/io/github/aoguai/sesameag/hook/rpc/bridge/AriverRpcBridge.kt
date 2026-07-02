@@ -103,12 +103,6 @@ class AriverRpcBridge : RpcBridge {
     private val retryableErrorMessageKeywords =
         arrayListOf("繁忙", "网络不可用", "重试", "稍後再試", "稍后再试", "再試", "再试", "頻繁", "频繁")
 
-    // 需要屏蔽错误日志的RPC方法列表
-    private val silentErrorMethods = arrayListOf(
-        "com.alipay.adexchange.ad.facade.xlightPlugin",  // 木兰集市 第一次
-        "alipay.antforest.forest.h5.takeLook"  // 找能量
-    )
-
     private val lastNullResponseLogAtMs = ConcurrentHashMap<String, Long>()
     private val nullResponseLogIntervalMs = NULL_RESPONSE_LOG_INTERVAL_MS
 
@@ -193,11 +187,6 @@ class AriverRpcBridge : RpcBridge {
         offlineDetail: String = reason,
         count: Int
     ): RpcEntity? {
-        if (!shouldShowErrorLog(methodName)) {
-            logNullResponse(rpcEntity, reason, count)
-            return null
-        }
-
         maxErrorCount.set(0)
         val wasOffline = io.github.aoguai.sesameag.hook.ApplicationHookConstants.offline
         val cooldownMs = offlineCooldownMs()
@@ -231,16 +220,6 @@ class AriverRpcBridge : RpcBridge {
 
         logNullResponse(rpcEntity, reason, count)
         return null
-    }
-
-    /**
-     * 检查指定的RPC方法是否应该显示错误日志
-     *
-     * @param methodName RPC方法名称
-     * @return 如果应该显示错误日志返回true，否则返回false
-     */
-    private fun shouldShowErrorLog(methodName: String?): Boolean {
-        return methodName != null && !silentErrorMethods.contains(methodName)
     }
 
     override fun load() {
@@ -456,7 +435,7 @@ class AriverRpcBridge : RpcBridge {
                                                 val isMarkedNetworkError = isRetryableRpcError(errorCode, errorMessage)
                                                 if (isMarkedNetworkError) {
                                                     logErrorSummary(methodName, errorCode, errorMessage)
-                                                } else if (shouldShowErrorLog(methodName)) {
+                                                } else {
                                                     val message = buildString {
                                                         append("rpc response1 | id: ")
                                                         append(rpcEntity.hashCode())
@@ -542,13 +521,8 @@ class AriverRpcBridge : RpcBridge {
                         }
 
                         if (isRetryableRpcError(errorCode, errorMessage)) {
-                            val shouldHandleRecovery = shouldShowErrorLog(methodName)
-                            val currentErrorCount = if (shouldHandleRecovery) {
-                                maxErrorCount.incrementAndGet()
-                            } else {
-                                0
-                            }
-                            if (!io.github.aoguai.sesameag.hook.ApplicationHookConstants.offline && shouldHandleRecovery) {
+                            val currentErrorCount = maxErrorCount.incrementAndGet()
+                            if (!io.github.aoguai.sesameag.hook.ApplicationHookConstants.offline) {
                                 var enteredOffline = false
                                 if (currentErrorCount > setMaxErrorCount) {
                                     io.github.aoguai.sesameag.hook.ApplicationHookConstants.enterOffline(
@@ -647,19 +621,15 @@ class AriverRpcBridge : RpcBridge {
 
     private fun logNullResponse(rpcEntity: RpcEntity?, reason: String, count: Int) {
         val methodName = rpcEntity?.requestMethod ?: "unknown"
-        if (shouldShowErrorLog(methodName)) {
-            val now = System.currentTimeMillis()
-            val last = lastNullResponseLogAtMs[methodName]
-            if (last == null || now - last >= nullResponseLogIntervalMs) {
-                lastNullResponseLogAtMs[methodName] = now
-                Log.error(TAG, "RPC返回null | 方法: $methodName | 原因: $reason | 重试: $count")
-            }
+        val now = System.currentTimeMillis()
+        val last = lastNullResponseLogAtMs[methodName]
+        if (last == null || now - last >= nullResponseLogIntervalMs) {
+            lastNullResponseLogAtMs[methodName] = now
+            Log.error(TAG, "RPC返回null | 方法: $methodName | 原因: $reason | 重试: $count")
         }
     }
 
     private fun logErrorSummary(methodName: String, errorCode: String, errorMessage: String) {
-        if (!shouldShowErrorLog(methodName)) return
-
         val key = "$methodName|$errorCode"
         val now = System.currentTimeMillis()
         val stat = errorSummaryWindowStats.computeIfAbsent(key) {

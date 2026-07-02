@@ -66,6 +66,7 @@ import io.github.aoguai.sesameag.util.Logback
 import io.github.aoguai.sesameag.util.Log.error
 import io.github.aoguai.sesameag.util.Log.printStackTrace
 import io.github.aoguai.sesameag.util.Log.record
+import io.github.aoguai.sesameag.util.LocaleSettingsApplier
 import io.github.aoguai.sesameag.util.ModuleStatus
 import io.github.aoguai.sesameag.util.Notify
 import io.github.aoguai.sesameag.util.Notify.stopRunning
@@ -1058,6 +1059,7 @@ class ApplicationHook {
                 record(TAG, "Sesame-AG 开始初始化...")
 
                 Config.load(userId)
+                LocaleSettingsApplier.apply(appContext)
                 Logback.reloadFileLogging()
                 val activeUserSnapshot = AccountSessionCoordinator.ensureActiveUserSnapshot(userId, activeClassLoader)
                 val legalAccepted = Config.isLoaded() && Config.isLegalAcceptedForCurrentVersion()
@@ -1286,6 +1288,7 @@ class ApplicationHook {
                 val activeClassLoader = classLoader ?: return false
                 val userId = HookUtil.getUserId(activeClassLoader) ?: return false
                 Config.load(userId)
+                LocaleSettingsApplier.apply(appContext)
             }
             if (Config.isLegalAcceptedForCurrentVersion()) {
                 AccountSessionCoordinator.refreshWorkflowState(appContext, "legal_accepted", legalAccepted = true)

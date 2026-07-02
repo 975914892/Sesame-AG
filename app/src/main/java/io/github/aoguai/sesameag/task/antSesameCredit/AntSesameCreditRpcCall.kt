@@ -323,9 +323,9 @@ object AntSesameCreditRpcCall {
         )
     }
 
-    private const val ZHIMATREE_PLAY_INFO = "SwbtxJSo8OOUrymAU%2FHnY2jyFRc%2BkCJ3"
-    private const val ZHIMATREE_CH_INFO = "ch_url-https://2021002135657012.hybrid.alipay-eco.com/index.html"
-    private const val ZHIMATREE_REFER =
+    internal const val ZHIMATREE_PLAY_INFO = "SwbtxJSo8OOUrymAU%2FHnY2jyFRc%2BkCJ3"
+    internal const val ZHIMATREE_CH_INFO = "ch_url-https://2021002135657012.hybrid.alipay-eco.com/index.html"
+    internal const val ZHIMATREE_REFER =
         "https://render.alipay.com/p/yuyan/180020010001288004/zmTree.html?caprMode=sync&chInfo=ch_zmzlzms__chsub_zlsy_icon"
 
     @JvmStatic
@@ -392,17 +392,26 @@ object AntSesameCreditRpcCall {
     }
 
     @JvmStatic
-    fun rentGreenTaskFinish(taskId: String, stageCode: String): String? {
+    fun rentGreenTaskFinish(
+        taskId: String,
+        stageCode: String,
+        chInfo: String = ZHIMATREE_CH_INFO,
+        refer: String = ZHIMATREE_REFER,
+        playInfo: String = ZHIMATREE_PLAY_INFO
+    ): String? {
         return try {
+            val safeChInfo = chInfo.ifBlank { ZHIMATREE_CH_INFO }
+            val safeRefer = refer.ifBlank { ZHIMATREE_REFER }
+            val safePlayInfo = playInfo.ifBlank { ZHIMATREE_PLAY_INFO }
             val extInfo = JSONObject().apply {
-                put("chInfo", ZHIMATREE_CH_INFO)
+                put("chInfo", safeChInfo)
                 put("taskId", taskId)
                 put("stageCode", stageCode)
             }
             val args = JSONObject().apply {
                 put("operation", "RENT_GREEN_TASK_FINISH")
-                put("playInfo", ZHIMATREE_PLAY_INFO)
-                put("refer", ZHIMATREE_REFER)
+                put("playInfo", safePlayInfo)
+                put("refer", safeRefer)
                 put("extInfo", extInfo)
             }
             RequestManager.requestString(

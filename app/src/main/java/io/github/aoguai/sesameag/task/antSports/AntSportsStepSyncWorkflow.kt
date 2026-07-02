@@ -8,7 +8,7 @@ import io.github.aoguai.sesameag.util.Log
 internal fun AntSports.runStepSyncWorkflow() {
     if (isSyncStepEnabled() &&
         !Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE) &&
-        earliestSyncStepTime.hasReachedToday()
+        isEarliestSyncStepTimeAllowed()
     ) {
         if (isEnergyOnlyModeNow()) {
             Log.sports("⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，跳过同步步数")

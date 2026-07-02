@@ -15,7 +15,8 @@ class RpcEntity @JvmOverloads constructor(
     val appName: String? = null,
     val methodName: String? = "taskFeedback",
     val facadeName: String? = null,
-    val headers: Map<String, String>? = null
+    val headers: Map<String, String>? = null,
+    val relationLocal: JSONObject? = null
 ) {
     @Volatile
     var hasResult = false
@@ -69,6 +70,9 @@ class RpcEntity @JvmOverloads constructor(
             jo.put("methodName", this.methodName)
             jo.put("operationType", this.requestMethod)
             jo.put("requestData", this.requestData)
+            if (this.relationLocal != null) {
+                jo.put("relationLocal", this.relationLocal)
+            }
             if (!this.headers.isNullOrEmpty()) {
                 jo.put("headers", JSONObject(this.headers))
             }
