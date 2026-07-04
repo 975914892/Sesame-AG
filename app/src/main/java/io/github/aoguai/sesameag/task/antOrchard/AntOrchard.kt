@@ -1395,8 +1395,12 @@ class AntOrchard : ModelTask() {
         )
     }
 
-    private fun buildOrchardXLightGateFailure(item: TaskFlowItem, response: JSONObject): TaskFlowActionResult? {
-        if (!RpcOfflineRisk.isAdTrafficRisk(response)) {
+    private fun buildOrchardXLightGateFailure(
+        item: TaskFlowItem,
+        response: JSONObject,
+        playingResult: JSONObject?
+    ): TaskFlowActionResult? {
+        if (!RpcOfflineRisk.isAdTrafficRisk(response) || playingResult != null) {
             return null
         }
         return buildOrchardTaskFailureResult(
@@ -1640,7 +1644,14 @@ class AntOrchard : ModelTask() {
             }
 
             val responseJson = JSONObject(response)
-            val xlightGateFailure = buildOrchardXLightGateFailure(item, responseJson)
+            val playingResult = responseJson.optJSONObject("resData")?.optJSONObject("playingResult")
+                ?: responseJson.optJSONObject("playingResult")
+            if (playingResult != null && RpcOfflineRisk.isAdTrafficRisk(responseJson)) {
+                Log.orchard(
+                    "农场浏览任务⏭️[$title] 第${round}轮第${pageNo}页命中广告风控上下文，但已返回playingResult，继续尝试闭环"
+                )
+            }
+            val xlightGateFailure = buildOrchardXLightGateFailure(item, responseJson, playingResult)
             if (xlightGateFailure != null) {
                 Log.orchard(
                     "农场浏览任务⏭️[$title] 第${round}轮第${pageNo}页命中广告风控信号: " +
@@ -1648,8 +1659,6 @@ class AntOrchard : ModelTask() {
                 )
                 return OrchardBrowseRoundResult(finishedCount, xlightGateFailure)
             }
-            val playingResult = responseJson.optJSONObject("resData")?.optJSONObject("playingResult")
-                ?: responseJson.optJSONObject("playingResult")
             if (playingResult == null) {
                 Log.orchard("农场浏览任务⏭️[$title] 第${round}轮第${pageNo}页未返回 playingResult")
                 return OrchardBrowseRoundResult(

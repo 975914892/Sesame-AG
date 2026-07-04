@@ -397,21 +397,41 @@ object AntSesameCreditRpcCall {
         stageCode: String,
         chInfo: String = ZHIMATREE_CH_INFO,
         refer: String = ZHIMATREE_REFER,
-        playInfo: String = ZHIMATREE_PLAY_INFO
+        playInfo: String = ZHIMATREE_PLAY_INFO,
+        appletId: String = "",
+        userId: String = ""
     ): String? {
         return try {
             val safeChInfo = chInfo.ifBlank { ZHIMATREE_CH_INFO }
             val safeRefer = refer.ifBlank { ZHIMATREE_REFER }
             val safePlayInfo = playInfo.ifBlank { ZHIMATREE_PLAY_INFO }
+            val safeAppletId = appletId.trim()
+            val safeUserId = userId.trim()
             val extInfo = JSONObject().apply {
                 put("chInfo", safeChInfo)
                 put("taskId", taskId)
                 put("stageCode", stageCode)
+                if (safeAppletId.isNotBlank()) {
+                    put("appId", safeAppletId)
+                    put("appletId", safeAppletId)
+                }
+                if (safeUserId.isNotBlank()) {
+                    put("userId", safeUserId)
+                }
             }
             val args = JSONObject().apply {
                 put("operation", "RENT_GREEN_TASK_FINISH")
                 put("playInfo", safePlayInfo)
                 put("refer", safeRefer)
+                put("taskId", taskId)
+                put("stageCode", stageCode)
+                if (safeAppletId.isNotBlank()) {
+                    put("appId", safeAppletId)
+                    put("appletId", safeAppletId)
+                }
+                if (safeUserId.isNotBlank()) {
+                    put("userId", safeUserId)
+                }
                 put("extInfo", extInfo)
             }
             RequestManager.requestString(

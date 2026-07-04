@@ -8,6 +8,13 @@ import org.json.JSONObject
 private val FOREST_TAG: String = AntForest::class.java.simpleName
 
 internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: TimeCounter): JSONObject? {
+    if (shouldRunWaterFriendsBeforeCollect()) {
+        Log.forest("🚿 【正常流程】执行预收能量浇水")
+        waterFriends()
+        markWaterFriendsBeforeCollectExecuted()
+        tc.countDebug("预收能量浇水")
+    }
+
     Log.forest("🌳 【正常流程】查询森林主页数据...")
     val initialHome = querySelfHome()
     tc.countDebug("主页对象信息")
@@ -180,8 +187,13 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(selfHomeObj: JSONOb
         }
     }
 
-    waterFriends()
-    tc.countDebug("给好友浇水")
+    if (hasWaterFriendsBeforeCollectExecuted()) {
+        Log.forest("浇水 | 本轮已在收能量前执行，跳过后置浇水")
+        tc.countDebug("跳过后置浇水（前置已执行）")
+    } else {
+        waterFriends()
+        tc.countDebug("给好友浇水")
+    }
 
     if (giveProp?.value == true) {
         giveProp()

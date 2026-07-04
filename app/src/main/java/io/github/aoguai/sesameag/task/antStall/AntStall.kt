@@ -1631,39 +1631,19 @@ class AntStall : ModelTask() {
                 )
             )
             val adTrafficRisk = RpcOfflineRisk.isAdTrafficRisk(json)
-            if (adTrafficRisk) {
-                return StallXlightRoundResult(
-                    finishedCount,
-                    stallTaskActionFailureResult(
-                        response = json,
-                        rpc = "AntStallRpcCall.xlightPlugin",
-                        detail = stallTaskActionDetail(item, "xlightPlugin")
-                    )
-                )
-            }
-
             val playingResult = json.optJSONObject("playingResult") ?: return StallXlightRoundResult(
                 finishedCount,
-                TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
-                    message = "XLight缺少playingResult",
-                    rpc = "AntStallRpcCall.xlightPlugin",
-                    raw = json.toString(),
-                    detail = stallTaskActionDetail(item, "xlightPlugin")
-                )
+                buildStallXlightPluginFailureResult(item, json, "XLight缺少playingResult")
             )
             val playingBizId = playingResult.optString("playingBizId").trim()
             if (playingBizId.isBlank()) {
                 return StallXlightRoundResult(
                     finishedCount,
-                    TaskFlowActionResult.failure(
-                        failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
-                        message = "XLight缺少playingBizId",
-                        rpc = "AntStallRpcCall.xlightPlugin",
-                        raw = json.toString(),
-                        detail = stallTaskActionDetail(item, "xlightPlugin")
-                    )
+                    buildStallXlightPluginFailureResult(item, json, "XLight缺少playingBizId")
                 )
+            }
+            if (adTrafficRisk) {
+                Log.stall("新村浏览任务⏭️[${item.title}] 第${pageNo}页命中广告风控上下文，但已返回playingResult，继续尝试闭环")
             }
 
             val nextPlayingPageInfo = playingResult.optString("playingPageInfo").trim().ifBlank { null }
@@ -1676,13 +1656,7 @@ class AntStall : ModelTask() {
                 if (nextPlayingPageInfo.isNullOrBlank() && !(config.usePagedSearchInfo && hasNextPage)) {
                     return StallXlightRoundResult(
                         finishedCount,
-                        TaskFlowActionResult.failure(
-                            failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
-                            message = "XLight未返回可完成浏览事件",
-                            rpc = "AntStallRpcCall.xlightPlugin",
-                            raw = json.toString(),
-                            detail = stallTaskActionDetail(item, "xlightPlugin")
-                        )
+                        buildStallXlightPluginFailureResult(item, json, "XLight未返回可完成浏览事件")
                     )
                 }
                 playingPageInfo = nextPlayingPageInfo
@@ -1706,13 +1680,7 @@ class AntStall : ModelTask() {
                 if (nextPlayingPageInfo.isNullOrBlank() && !(config.usePagedSearchInfo && hasNextPage)) {
                     return StallXlightRoundResult(
                         finishedCount,
-                        TaskFlowActionResult.failure(
-                            failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
-                            message = "XLight未返回BROWSE事件",
-                            rpc = "AntStallRpcCall.xlightPlugin",
-                            raw = json.toString(),
-                            detail = stallTaskActionDetail(item, "xlightPlugin")
-                        )
+                        buildStallXlightPluginFailureResult(item, json, "XLight未返回BROWSE事件")
                     )
                 }
                 playingPageInfo = nextPlayingPageInfo
@@ -1935,6 +1903,23 @@ class AntStall : ModelTask() {
             raw = raw,
             detail = stallTaskActionDetail(item, action),
             stopCurrentRound = true
+        )
+    }
+
+    private fun buildStallXlightPluginFailureResult(
+        item: TaskFlowItem,
+        response: JSONObject,
+        message: String
+    ): TaskFlowActionResult {
+        val failureType = classifyStallTaskFailure(response)
+        return TaskFlowActionResult.failure(
+            failureType = failureType,
+            code = extractStallTaskFailureCode(response),
+            message = message,
+            rpc = "AntStallRpcCall.xlightPlugin",
+            raw = response.toString(),
+            detail = stallTaskActionDetail(item, "xlightPlugin"),
+            stopCurrentRound = failureType == TaskRpcFailureType.RETRYABLE_RPC
         )
     }
 

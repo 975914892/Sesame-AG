@@ -140,6 +140,13 @@ class AntSesameCredit : ModelTask() {
         val completed: Boolean
     )
 
+    private data class ZhimaTreeTaskContext(
+        val appId: String,
+        val chInfo: String,
+        val refer: String,
+        val urlCandidates: List<String>
+    )
+
     private data class SesameCheckInCandidate(
         val checkInDate: String,
         val broken: Boolean,
@@ -2116,7 +2123,8 @@ class AntSesameCredit : ModelTask() {
         if (actionUrl.isBlank()) {
             return null
         }
-        val appId = extractSesameAppId(actionUrl)
+        val taskContext = resolveZhimaTreeTaskContext(task)
+        val appId = taskContext.appId
         if (appId.isBlank()) {
             return null
         }
@@ -2146,28 +2154,54 @@ class AntSesameCredit : ModelTask() {
     }
 
     private fun findZhimaTreePushModelDelegate(taskRef: ZhimaTreeTaskRef): SesamePushModelTaskSnapshot? {
-        if (taskRef.sourceName != "rent.taskDetailList") {
-            return null
-        }
-        if (!taskRef.taskChannel.equals("RENT", ignoreCase = true)) {
-            return null
-        }
-        val rentSnapshots = sesamePushModelTaskSnapshots.values.filter { snapshot ->
-            snapshot.jumpToPushModel &&
-                snapshot.sourceName == "daily.waitCompleteTaskVOS" &&
-                snapshot.merchantName == "芝麻租赁" &&
-                snapshot.appId.isNotBlank()
-        }
+        val rentSnapshots = findZhimaTreePushModelSnapshots(taskRef)
         if (rentSnapshots.isEmpty()) {
             return null
         }
-        val expectedAppId = taskRef.appId.ifBlank {
-            rentSnapshots.map { it.appId }.distinct().singleOrNull().orEmpty()
-        }
+        val expectedAppId = resolveZhimaTreePushModelExpectedAppId(taskRef, rentSnapshots)
         if (expectedAppId.isBlank()) {
-            return null
+            return rentSnapshots.singleOrNull()
         }
         return rentSnapshots.filter { it.appId == expectedAppId }.singleOrNull()
+    }
+
+    private fun findZhimaTreePushModelSnapshots(
+        taskRef: ZhimaTreeTaskRef
+    ): List<SesamePushModelTaskSnapshot> {
+        if (taskRef.sourceName != "rent.taskDetailList") {
+            return emptyList()
+        }
+        if (!taskRef.taskChannel.equals("RENT", ignoreCase = true)) {
+            return emptyList()
+        }
+        return sesamePushModelTaskSnapshots.values.filter { snapshot ->
+            snapshot.jumpToPushModel &&
+                snapshot.sourceName in RENT_PUSH_MODEL_SNAPSHOT_SOURCES &&
+                snapshot.merchantName == "芝麻租赁" &&
+                snapshot.appId.isNotBlank()
+        }
+    }
+
+    private fun resolveZhimaTreePushModelExpectedAppId(
+        taskRef: ZhimaTreeTaskRef,
+        rentSnapshots: List<SesamePushModelTaskSnapshot>
+    ): String {
+        return taskRef.appId.ifBlank {
+            rentSnapshots.map { it.appId }.distinct().singleOrNull().orEmpty()
+        }
+    }
+
+    private fun resolveZhimaTreeTaskAppletId(taskRef: ZhimaTreeTaskRef): String {
+        if (taskRef.sourceName != "rent.taskDetailList" ||
+            !taskRef.taskChannel.equals("RENT", ignoreCase = true)
+        ) {
+            return ""
+        }
+        if (taskRef.appId.isNotBlank()) {
+            return taskRef.appId
+        }
+        val rentSnapshots = findZhimaTreePushModelSnapshots(taskRef)
+        return resolveZhimaTreePushModelExpectedAppId(taskRef, rentSnapshots)
     }
 
     private fun extractSesameAppId(text: String): String {
@@ -2959,8 +2993,7 @@ class AntSesameCredit : ModelTask() {
         if (title.contains("邀请") || title.contains("下单") || title.contains("开通")) {
             return null
         }
-        val chInfo = resolveZhimaTreeTaskChInfo(task, taskBaseInfo, taskMaterial, morphoDetail)
-        val refer = resolveZhimaTreeTaskRefer(task, taskBaseInfo, taskMaterial, morphoDetail, chInfo)
+        val taskContext = resolveZhimaTreeTaskContext(task, taskBaseInfo, taskMaterial, morphoDetail)
         val playInfo = resolveZhimaTreeTaskPlayInfo(task, taskBaseInfo, taskMaterial, morphoDetail)
         return ZhimaTreeTaskRef(
             title = title,
@@ -2976,10 +3009,10 @@ class AntSesameCredit : ModelTask() {
             taskMaterialType = taskMaterial?.optString("taskType").orEmpty()
                 .ifBlank { morphoDetail?.optString("taskType").orEmpty() },
             taskChannel = resolveZhimaTreeTaskChannel(task, taskBaseInfo, taskMaterial, morphoDetail),
-            chInfo = chInfo,
-            refer = refer,
+            chInfo = taskContext.chInfo,
+            refer = taskContext.refer,
             playInfo = playInfo,
-            appId = resolveZhimaTreeTaskAppId(task, taskBaseInfo, taskMaterial, morphoDetail, chInfo),
+            appId = taskContext.appId,
             sourceName = sourceName
         )
     }
@@ -3023,24 +3056,84 @@ class AntSesameCredit : ModelTask() {
             .ifBlank { morphoDetail?.optString("taskChannel").orEmpty().trim() }
     }
 
-    private fun resolveZhimaTreeTaskChInfo(
+    private fun resolveZhimaTreeTaskContext(
         task: JSONObject,
         taskBaseInfo: JSONObject,
         taskMaterial: JSONObject?,
         morphoDetail: JSONObject?
+    ): ZhimaTreeTaskContext {
+        val urlCandidates = collectZhimaTreeTaskUrlCandidates(task, taskBaseInfo, taskMaterial, morphoDetail)
+        val chInfo = resolveZhimaTreeTaskChInfo(task, taskBaseInfo, taskMaterial, morphoDetail, urlCandidates)
+        return ZhimaTreeTaskContext(
+            appId = resolveZhimaTreeTaskAppId(task, taskBaseInfo, taskMaterial, morphoDetail, chInfo, urlCandidates),
+            chInfo = chInfo,
+            refer = resolveZhimaTreeTaskRefer(task, taskBaseInfo, taskMaterial, morphoDetail, chInfo),
+            urlCandidates = urlCandidates
+        )
+    }
+
+    private fun resolveZhimaTreeTaskContext(task: JSONObject): ZhimaTreeTaskContext {
+        val taskBaseInfo = task.optJSONObject("taskBaseInfo") ?: JSONObject()
+        val taskMaterial = task.optJSONObject("taskMaterial")
+        val morphoDetail = task.optJSONObject("taskExtProps")
+            ?.opt("TASK_MORPHO_DETAIL")
+            ?.let { detail ->
+                when (detail) {
+                    is JSONObject -> detail
+                    is String -> parseJSONObjectOrNull(detail)
+                    else -> null
+                }
+            }
+        return resolveZhimaTreeTaskContext(task, taskBaseInfo, taskMaterial, morphoDetail)
+    }
+
+    private fun collectZhimaTreeTaskUrlCandidates(
+        task: JSONObject,
+        taskBaseInfo: JSONObject,
+        taskMaterial: JSONObject?,
+        morphoDetail: JSONObject?
+    ): List<String> {
+        val urlCandidates = linkedSetOf<String>()
+        val targetUrl = task.optString("targetUrl").ifBlank { taskMaterial?.optString("targetUrl").orEmpty() }
+        val schema = task.optString("schema").ifBlank { taskMaterial?.optString("schema").orEmpty() }
+        sequenceOf(
+            taskMaterial?.optString("jumpUrl").orEmpty(),
+            morphoDetail?.optString("jumpUrl").orEmpty(),
+            task.optString("actionUrl"),
+            targetUrl,
+            schema,
+            taskBaseInfo.optString("appletSchema")
+        ).map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach(urlCandidates::add)
+        return urlCandidates.toList()
+    }
+
+    private fun resolveZhimaTreeTaskChInfo(
+        task: JSONObject,
+        taskBaseInfo: JSONObject,
+        taskMaterial: JSONObject?,
+        morphoDetail: JSONObject?,
+        urlCandidates: List<String>
     ): String {
-        return sequenceOf(
+        val explicitChInfo = sequenceOf(
             task.optString("chInfo"),
             taskBaseInfo.optString("chInfo"),
             taskMaterial?.optString("chInfo").orEmpty(),
             morphoDetail?.optString("chInfo").orEmpty(),
-            task.optJSONObject("taskParticipateExtInfo")?.optString("chInfo").orEmpty(),
-            taskMaterial?.optString("targetUrl").orEmpty(),
-            task.optString("targetUrl"),
-            taskBaseInfo.optString("appletSchema")
+            task.optJSONObject("taskParticipateExtInfo")?.optString("chInfo").orEmpty()
         ).map { it.trim() }
             .firstOrNull { it.isNotBlank() }
             .orEmpty()
+        if (explicitChInfo.isNotBlank()) {
+            return explicitChInfo
+        }
+        val derivedChInfo = urlCandidates.asSequence()
+            .mapNotNull { extractQueryParam(it, "chInfo") }
+            .map { it.trim() }
+            .firstOrNull { it.isNotBlank() && (it.startsWith("ch_url-") || it.startsWith("ch_appid-")) }
+            .orEmpty()
+        return derivedChInfo.ifBlank { AntSesameCreditRpcCall.ZHIMATREE_CH_INFO }
     }
 
     private fun resolveZhimaTreeTaskAppId(
@@ -3048,20 +3141,25 @@ class AntSesameCredit : ModelTask() {
         taskBaseInfo: JSONObject,
         taskMaterial: JSONObject?,
         morphoDetail: JSONObject?,
-        chInfo: String
+        chInfo: String,
+        urlCandidates: List<String>
     ): String {
         return sequenceOf(
             taskBaseInfo.optString("appId"),
             task.optString("appId"),
             taskMaterial?.optString("appId").orEmpty(),
             morphoDetail?.optString("appId").orEmpty(),
-            extractSesameAppId(chInfo),
-            extractSesameAppId(taskMaterial?.optString("targetUrl").orEmpty()),
-            extractSesameAppId(task.optString("targetUrl")),
-            extractSesameAppId(taskBaseInfo.optString("appletSchema"))
+            extractSesameAppId(chInfo)
         ).map { it.trim() }
             .firstOrNull { it.isNotBlank() }
             .orEmpty()
+            .ifBlank {
+                urlCandidates.asSequence()
+                    .map(::extractSesameAppId)
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotBlank() }
+                    .orEmpty()
+            }
     }
 
     private fun resolveZhimaTreeTaskRefer(
@@ -3299,12 +3397,17 @@ class AntSesameCredit : ModelTask() {
                 ?: return ZhimaTreeActionResult(false, null, null)
             val safeStageCode = stageCode?.takeIf { it.isNotBlank() }
                 ?: return ZhimaTreeActionResult(false, null, null)
+            val carryRentContext = taskRef.sourceName == "rent.taskDetailList" &&
+                taskRef.taskChannel.equals("RENT", ignoreCase = true)
+            val appletId = resolveZhimaTreeTaskAppletId(taskRef)
             val rawResponse = AntSesameCreditRpcCall.rentGreenTaskFinish(
                 taskId = safeTaskId,
                 stageCode = safeStageCode,
                 chInfo = taskRef.chInfo,
                 refer = taskRef.refer,
-                playInfo = taskRef.playInfo
+                playInfo = taskRef.playInfo,
+                appletId = appletId,
+                userId = if (carryRentContext) UserMap.currentUid.orEmpty() else ""
             )
                 ?: return ZhimaTreeActionResult(false, null, null)
             val json = JSONObject(rawResponse)
@@ -3434,6 +3537,11 @@ class AntSesameCredit : ModelTask() {
 
     companion object {
         private val TAG: String = AntSesameCredit::class.java.simpleName
+        private val RENT_PUSH_MODEL_SNAPSHOT_SOURCES = setOf(
+            "daily.waitCompleteTaskVOS",
+            "daily.waitJoinTaskVOS",
+            "toCompleteVOS"
+        )
 
         /**
          * 查询 + 自动领取可领取球（精简一行输出领取信息）

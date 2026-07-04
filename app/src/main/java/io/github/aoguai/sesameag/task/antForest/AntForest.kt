@@ -223,6 +223,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
     private var vitalityExchangeList: SelectAndCountModelField? = null
     private var wateringEnabled: BooleanModelField? = null
+    private var waterFriendEnergyFirst: BooleanModelField? = null
+    @Volatile
+    private var preCollectWateringExecutedThisRound: Boolean = false
     private var returnWater33: IntegerModelField? = null
     private var returnWater18: IntegerModelField? = null
     private var returnWater10: IntegerModelField? = null
@@ -392,6 +395,20 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
     private fun isForestWateringEnabled(): Boolean {
         return wateringEnabled?.value != false
+    }
+
+    internal fun shouldRunWaterFriendsBeforeCollect(): Boolean {
+        return isForestWateringEnabled() &&
+            waterFriendEnergyFirst?.value == true &&
+            !preCollectWateringExecutedThisRound
+    }
+
+    internal fun markWaterFriendsBeforeCollectExecuted() {
+        preCollectWateringExecutedThisRound = true
+    }
+
+    internal fun hasWaterFriendsBeforeCollectExecuted(): Boolean {
+        return preCollectWateringExecutedThisRound
     }
 
     private fun hasRebornProtectWorkEnabled(): Boolean {
@@ -652,6 +669,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 true
             ).withDesc("统一控制普通浇水、随机浇水任务、回浇和浇水金球/保护回赠收取；关闭后不影响复活金球与任务领奖。").also {
                 wateringEnabled = it
+            })
+        modelFields.addField(
+            BooleanModelField(
+                "waterFriendEnergyFirst",
+                "浇水 | 每轮收能量前先执行",
+                false
+            ).withDesc("开启后在完整森林流程中先执行好友浇水，再收自己/好友能量；仅影响正常流程，不影响“只收能量”链路。").also {
+                waterFriendEnergyFirst = it
             })
         modelFields.addField(
             IntegerModelField(
@@ -1024,6 +1049,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             GreenLife.resetForestMarketRound()
             if (showBagList?.value == true) showBag()
             initRebornWeeklyState()
+            preCollectWateringExecutedThisRound = false
             // 加载“今日统计”（按账号维度持久化），用于跨重启/多次运行累计
             selfId?.takeIf { it.isNotBlank() }?.let { uid ->
                 Statistics.load(uid)
@@ -1105,6 +1131,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         handledProtectUsers.clear()
         roundPropCheckState = null
         lastUsePropCheckTime = 0L
+        preCollectWateringExecutedThisRound = false
         forestGameCenterRecentAppRecords.clear()
         GreenLife.resetForestMarketRound()
     }

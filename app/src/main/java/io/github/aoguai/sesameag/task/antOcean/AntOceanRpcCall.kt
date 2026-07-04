@@ -16,6 +16,8 @@ object AntOceanRpcCall {
     private const val TASK_TYPE_BUSINESS_LIGHTS03 = "BUSINESS_LIGHTS03"
     private const val SOURCE_APP_CENTER = "chInfo_ch_appcenter__chsub_9patch"
     private const val SOURCE_ATLAS = "chInfo_ch_url-https://2021003115672468.h5app.alipay.com/www/atlasOcean.html"
+    private const val SOURCE_AI_FISH_STATUS = "chInfo_ch_appcollect__chsub_my-recentlyUsed"
+    private const val SOURCE_AI_FISH = "ANT_OCEAN"
     private const val SOURCE_FOREST = "ANT_FOREST"
     private const val SOURCE_OCEAN = "ANTFOCEAN"
     private const val SOURCE_REPLICA = "senlinzuoshangjiao"
@@ -83,6 +85,70 @@ object AntOceanRpcCall {
         return RequestManager.requestString(
             "alipay.antocean.ocean.h5.queryHomePage",
             payload.toString()
+        )
+    }
+
+    @JvmStatic
+    fun aiFishStatus(): String {
+        return RequestManager.requestString(
+            "alipay.antaifish.h5.status",
+            "[{\"source\":\"$SOURCE_AI_FISH_STATUS\",\"uniqueId\":\"${getUniqueId()}\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun aiFishHomepage(): String {
+        return RequestManager.requestString(
+            "alipay.antaifish.h5.homepage",
+            "[{\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun drawAiFish(imgId: String, imgUrl: String): String {
+        return RequestManager.requestString(
+            "alipay.antaifish.h5.drawFish",
+            "[{\"imgId\":\"$imgId\",\"imgUrl\":\"$imgUrl\",\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun rescueAiFish(): String {
+        return RequestManager.requestString(
+            "alipay.antaifish.h5.rescueFish",
+            "[{\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun touchAiFish(): String {
+        return RequestManager.requestString(
+            "alipay.antaifish.h5.touchfish",
+            "[{\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun aiFishListTask(): String {
+        return RequestManager.requestString(
+            "com.alipay.antieptask.listTaskopengreen",
+            "[{\"extend\":{\"appMode\":\"normal\"},\"requestType\":\"RPC\",\"sceneCode\":\"ANTAIFISH\",\"source\":\"ANTAIFISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun aiFishFinishTask(taskType: String): String {
+        return RequestManager.requestString(
+            "com.alipay.antiep.finishTask",
+            "[{\"outBizNo\":\"${taskType}_${RandomUtil.nextDouble()}\",\"requestType\":\"H5\",\"sceneCode\":\"ANTAIFISH\",\"source\":\"ANTAIFISH\",\"taskType\":\"$taskType\"}]"
+        )
+    }
+
+    @JvmStatic
+    fun aiFishReceiveTaskAward(taskType: String): String {
+        return RequestManager.requestString(
+            "com.alipay.antieptask.receiveTaskAwardopengreen",
+            "[{\"ignoreLimit\":false,\"requestType\":\"RPC\",\"sceneCode\":\"ANTAIFISH\",\"source\":\"ANTAIFISH\",\"taskType\":\"$taskType\",\"uniqueId\":\"${getUniqueId()}\"}]"
         )
     }
     
