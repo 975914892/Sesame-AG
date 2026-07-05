@@ -62,9 +62,12 @@ jobs:
           BEFORE_SHA=$(git rev-parse HEAD)
           git merge upstream/dev --no-edit -X theirs
           AFTER_SHA=$(git rev-parse HEAD)
-          SHORT_AFTER=$(git rev-parse --short "$AFTER_SHA")
 
           if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
+            # 修改提交信息，加上 [skip ci]，避免触发二次构建
+            git commit --amend -m "Merge upstream/dev [skip ci]"
+            AFTER_SHA=$(git rev-parse HEAD)
+            
             echo "has_update=true" >> "$GITHUB_OUTPUT"
 
             CHANGE_LOG=$(git log --oneline "${BEFORE_SHA}..${AFTER_SHA}")
@@ -89,7 +92,7 @@ jobs:
 
       - name: 推送更新到本地仓库
         if: steps.check_update.outputs.has_update == 'true'
-        run: git push origin dev -o ci.skip
+        run: git push origin dev
 
   # 任务2：构建APK、签名、发布Release、清理旧版本
   build-and-sign:
