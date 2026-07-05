@@ -7160,12 +7160,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 val response = unwrapResData(JSONObject(AntForestRpcCall.queryAnimalAndPiece(animalId)))
                 var resultCode = response.optString("resultCode")
                 if ("SUCCESS" != resultCode) {
-                    Log.forest("查询失败: " + response.optString("resultDesc"))
+                    Log.forest(
+                        "动物碎片合成查询失败[#${animalId}]: " +
+                            response.optString("resultDesc", response.optString("desc"))
+                    )
                     break
                 }
                 val animalProps = response.optJSONArray("animalProps")
                 if (animalProps == null || animalProps.length() == 0) {
-                    Log.forest("动物属性数据为空")
+                    Log.forest("动物碎片合成查询返回空动物数据[#${animalId}]")
                     break
                 }
                 // 获取第一个动物的属性
@@ -7176,7 +7179,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 // 获取碎片信息
                 val pieces = animalProp.optJSONArray("pieces")
                 if (pieces == null || pieces.length() == 0) {
-                    Log.forest("碎片数据为空")
+                    Log.forest("动物碎片合成查询缺少碎片数据[$name]")
                     break
                 }
                 var canCombineAnimalPiece = true
@@ -7186,7 +7189,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     val piece = pieces.optJSONObject(j)
                     if (piece == null || piece.optInt("holdsNum", 0) <= 0) {
                         canCombineAnimalPiece = false
-                        Log.forest("碎片不足，无法合成动物")
+                        Log.forest("动物碎片不足[$name]：无法继续自动合成")
                         break
                     }
                     val propId = piece.optJSONArray("propIdList")?.optString(0)?.takeIf { it.isNotBlank() }
@@ -7210,7 +7213,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         GlobalThreadPools.sleepCompat(100) // 等待一段时间再查询
                         continue
                     } else {
-                        Log.forest("合成失败: " + combineResponse.optString("resultDesc"))
+                        Log.forest(
+                            "动物碎片合成失败[$name]: " +
+                                combineResponse.optString("resultDesc", combineResponse.optString("desc"))
+                        )
                     }
                 }
                 break // 如果不能合成或合成失败，跳出循环

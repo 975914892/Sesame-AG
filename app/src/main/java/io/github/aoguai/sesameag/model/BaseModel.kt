@@ -120,8 +120,8 @@ class BaseModel : Model() {
         /**
          * 任务并发数配置
          */
-        val taskMaxConcurrency: IntegerModelField = IntegerModelField("taskMaxConcurrency", "任务并发数", 1, 1, 3).withDesc(
-            "控制每个批次最多同时运行的任务协程数；默认 1 更稳妥，调高会增加请求频率和风控概率。"
+        val taskMaxConcurrency: IntegerModelField = IntegerModelField("taskMaxConcurrency", "任务并发数", 2, 1, 3).withDesc(
+            "控制每个批次最多同时运行的任务协程数；默认 2，调高会增加请求频率和风控概率。"
         )
 
         /**

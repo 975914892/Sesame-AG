@@ -6294,7 +6294,7 @@ class AntSports : ModelTask() {
         private val pickedNeverlandBubbleRecordIds = mutableSetOf<String>()
         private val handledNeverlandBubbleEncryptValues = mutableSetOf<String>()
         private val handledNeverlandBubbleTaskIds = mutableSetOf<String>()
-        private val awaitingPromoKernelTaskKeys = mutableSetOf<String>()
+        private val delegatedPromoKernelTaskKeys = mutableSetOf<String>()
         // 任务大厅/签到/建造按最新抓包固定运动首页 source；泡泡可独立记忆可用辅助 source。
         private var activeNeverlandSource: String = NEVERLAND_SOURCE_SPORT_HOME
         private var activeNeverlandAuxSource: String = NEVERLAND_SOURCE_SPORT_HOME
@@ -6436,7 +6436,7 @@ class AntSports : ModelTask() {
         // ---------------------------------------------------------------
 
         /**
-         * @brief 循环处理健康岛任务大厅中的 PROMOKERNEL_TASK & LIGHT_TASK
+         * @brief 循环处理健康岛任务大厅中的健康岛自有任务
          */
         private fun loopHandleTaskCenter() {
             if (Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_TASK_CENTER_DONE)) {
@@ -6480,11 +6480,6 @@ class AntSports : ModelTask() {
                         val type = task.optString("taskType", "")
                         val status = task.optString("taskStatus", "")
                         val taskId = task.optString("id", task.optString("taskId", ""))
-                        val taskKey = neverlandTaskKey(task)
-
-                        if (taskKey.isNotBlank() && status != "SIGNUP_COMPLETE" && status != "INIT") {
-                            awaitingPromoKernelTaskKeys.remove(taskKey)
-                        }
 
                         if ("NOT_SIGNUP" == status) {
                             Log.sports(
@@ -6504,17 +6499,19 @@ class AntSports : ModelTask() {
                             continue
                         }
 
-                        if (type == "PROMOKERNEL_TASK" &&
-                            (status == "SIGNUP_COMPLETE" || status == "INIT") &&
-                            taskKey.isNotBlank() &&
-                            taskKey in awaitingPromoKernelTaskKeys
-                        ) {
+                        if (type == "PROMOKERNEL_TASK") {
+                            val delegationKey = taskId.ifBlank { title }
+                            if (status != "FINISHED" &&
+                                delegatedPromoKernelTaskKeys.add(delegationKey)
+                            ) {
+                                Log.sports(
+                                    "健康岛任务大厅发现通用活动任务[$title][taskId=${taskId.ifBlank { "UNKNOWN" }}][status=$status]，交由运动任务面板处理"
+                                )
+                            }
                             continue
                         }
 
-                        if (("PROMOKERNEL_TASK" == type || "LIGHT_TASK" == type) &&
-                            "FINISHED" != status
-                        ) {
+                        if (type == "LIGHT_TASK" && "FINISHED" != status) {
                             pendingTasks.add(task)
                         }
                     }
@@ -6597,7 +6594,6 @@ class AntSports : ModelTask() {
 
                 if ("SIGNUP_COMPLETE" == status || "INIT" == status) {
                     return when (type) {
-                        "PROMOKERNEL_TASK" -> handlePromoKernelTask(task, title)
                         "LIGHT_TASK" -> handleLightTask(task, title, jumpLink)
                         else -> {
                             Log.error(TAG, "未处理的任务类型：$type")
@@ -6743,130 +6739,8 @@ class AntSports : ModelTask() {
         }
 
         // ---------------------------------------------------------------
-        // 4. PROMOKERNEL_TASK / LIGHT_TASK 处理
+        // 4. LIGHT_TASK 处理
         // ---------------------------------------------------------------
-
-        /**
-         * @brief 处理 PROMOKERNEL_TASK（活动类任务）
-         */
-        private fun handlePromoKernelTask(task: JSONObject, title: String): Boolean {
-            return try {
-                task.put("scene", "MED_TASK_HALL")
-                val taskId = task.optString("id", task.optString("taskId", ""))
-                val taskKey = neverlandTaskKey(task)
-                val res = JSONObject(AntSportsRpcCall.NeverlandRpcCall.taskSend(task))
-                val errorCode = res.optString("errorCode").ifBlank { res.optString("code") }
-                if (errorCode == "TASK_TRIGGER_ERROR") {
-                    val errorMsg = res.optString("errorMsg").ifBlank { res.optString("desc", "任务推进失败") }
-                    markPromoKernelTaskPending(taskKey)
-                    Log.sports("活动任务推进待确认：$title[taskId=$taskId] $errorMsg，本轮停止重复推进并等待任务大厅刷新")
-                    true
-                } else if (ResChecker.checkRes(TAG, res)) {
-                    GlobalThreadPools.sleepCompat(500)
-                    val refreshedTask = queryNeverlandTaskCenterTask(task)
-                    if (refreshedTask == null) {
-                        markPromoKernelTaskPending(taskKey)
-                        Log.sports("活动任务已发送但状态未确认：$title[taskId=$taskId] 未查到最新任务状态，本轮停止重复推进并等待后续刷新")
-                        true
-                    } else {
-                        val refreshedStatus = refreshedTask.optString("taskStatus", "")
-                        when {
-                            isNeverlandTaskRewardReadyStatus(refreshedStatus) ||
-                                isNeverlandTaskTerminalStatus(refreshedStatus) -> {
-                                clearPromoKernelTaskPending(taskKey)
-                                Log.sports("活动任务状态已刷新：$title[taskId=$taskId] -> $refreshedStatus")
-                                true
-                            }
-
-                            refreshedStatus == "SIGNUP_COMPLETE" || refreshedStatus == "INIT" -> {
-                                markPromoKernelTaskPending(taskKey)
-                                Log.sports(
-                                    "活动任务仅收到发送确认：$title[taskId=$taskId] 当前状态仍为$refreshedStatus，本轮停止重复推进并等待后续刷新"
-                                )
-                                true
-                            }
-
-                            else -> {
-                                markPromoKernelTaskPending(taskKey)
-                                Log.sports(
-                                    "活动任务状态待确认：$title[taskId=$taskId] 刷新后状态=$refreshedStatus，本轮停止重复推进并等待后续刷新"
-                                )
-                                true
-                            }
-                        }
-                    }
-                } else {
-                    Log.error(TAG, "taskSend 失败: $task 响应：$res")
-                    false
-                }
-            } catch (e: Exception) {
-                Log.printStackTrace(TAG, "handlePromoKernelTask 处理 PROMOKERNEL_TASK 异常（$title）", e)
-                false
-            }
-        }
-
-        private fun markPromoKernelTaskPending(taskKey: String) {
-            if (taskKey.isNotBlank()) {
-                awaitingPromoKernelTaskKeys.add(taskKey)
-            }
-        }
-
-        private fun clearPromoKernelTaskPending(taskKey: String) {
-            if (taskKey.isNotBlank()) {
-                awaitingPromoKernelTaskKeys.remove(taskKey)
-            }
-        }
-
-        private fun neverlandTaskKey(task: JSONObject): String {
-            val taskId = task.optString("id").ifBlank { task.optString("taskId") }
-            if (taskId.isNotBlank()) {
-                return taskId
-            }
-            val taskType = task.optString("taskType")
-            val taskTitle = task.optString("title", task.optString("taskName", ""))
-            return listOf(taskType, taskTitle).filter { it.isNotBlank() }.joinToString("::")
-        }
-
-        private fun queryNeverlandTaskCenterTask(targetTask: JSONObject): JSONObject? {
-            val title = targetTask.optString("title", targetTask.optString("taskName", "未知任务"))
-            val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryTaskCenter(activeNeverlandSource))
-            if (!ResChecker.checkRes(TAG, response) || response.optJSONObject("data") == null) {
-                Log.error(TAG, "活动任务状态复查失败：$title 响应：$response")
-                return null
-            }
-            val taskList = response.optJSONObject("data")?.optJSONArray("taskCenterTaskVOS") ?: return null
-            for (i in 0 until taskList.length()) {
-                val candidate = taskList.optJSONObject(i) ?: continue
-                if (isSameNeverlandTask(candidate, targetTask)) {
-                    return candidate
-                }
-            }
-            return null
-        }
-
-        private fun isSameNeverlandTask(candidate: JSONObject, targetTask: JSONObject): Boolean {
-            val candidateTaskId = candidate.optString("id").ifBlank { candidate.optString("taskId") }
-            val targetTaskId = targetTask.optString("id").ifBlank { targetTask.optString("taskId") }
-            if (candidateTaskId.isNotBlank() && candidateTaskId == targetTaskId) {
-                return true
-            }
-            val candidateType = candidate.optString("taskType")
-            val targetType = targetTask.optString("taskType")
-            val candidateTitle = candidate.optString("title", candidate.optString("taskName", ""))
-            val targetTitle = targetTask.optString("title", targetTask.optString("taskName", ""))
-            return candidateType == targetType && candidateTitle.isNotBlank() && candidateTitle == targetTitle
-        }
-
-        private fun isNeverlandTaskRewardReadyStatus(status: String): Boolean {
-            return status == "TO_RECEIVE"
-        }
-
-        private fun isNeverlandTaskTerminalStatus(status: String): Boolean {
-            return when (status.uppercase(Locale.ROOT)) {
-                "RECEIVED", "RECEIVE_SUCCESS", "FINISHED", "DONE", "COMPLETED" -> true
-                else -> false
-            }
-        }
 
         /**
          * @brief 处理 LIGHT_TASK（浏览类任务）

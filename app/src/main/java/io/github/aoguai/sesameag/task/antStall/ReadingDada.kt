@@ -18,12 +18,25 @@ object ReadingDada {
 
     val group: ModelGroup = ModelGroup.STALL
 
+    enum class AnswerQuestionStatus {
+        CONFIRMED_SUCCESS,
+        CONFIRMED_WRONG,
+        SUBMIT_SENT_WAIT_REFRESH,
+        RPC_FAILED
+    }
+
+    data class AnswerQuestionResult(
+        val status: AnswerQuestionStatus,
+        val message: String = "",
+        val raw: String = ""
+    )
+
     /**
      * @brief 回答问题
      * @param bizInfo 业务信息JSON对象
-     * @return 是否回答成功
+     * @return 答题动作结果；任务是否最终推进由调用方结合任务刷新闭环确认
      */
-    fun answerQuestion(bizInfo: JSONObject): Boolean {
+    fun answerQuestion(bizInfo: JSONObject): AnswerQuestionResult {
         try {
             // 获取任务跳转URL
             val taskJumpUrl = bizInfo.optString("taskJumpUrl").takeIf { it.isNotEmpty() }
@@ -70,23 +83,49 @@ object ReadingDada {
 
                 val submitJson = JSONObject(submitResponse)
                 val submitSuccess = submitJson.optString("resultCode") == "200"
-                val confirmedCorrect = submitJson.optBoolean("correct", !submitJson.has("correct"))
-                return if (submitSuccess && confirmedCorrect) {
-                    AnswerAI.rememberAnswer(question, answerList, answer, LogChannel.STALL.loggerName)
-                    Log.stall("答题完成")
-                    true
+                if (!submitSuccess) {
+                    Log.error(TAG, "答题失败")
+                    return AnswerQuestionResult(
+                        status = AnswerQuestionStatus.RPC_FAILED,
+                        message = submitJson.optString("resultDesc", "答题失败"),
+                        raw = submitResponse
+                    )
+                }
+
+                return if (submitJson.has("correct")) {
+                    val confirmedCorrect = submitJson.optBoolean("correct", false)
+                    if (confirmedCorrect) {
+                        AnswerAI.rememberAnswer(question, answerList, answer, LogChannel.STALL.loggerName)
+                        Log.stall("答题完成")
+                        AnswerQuestionResult(status = AnswerQuestionStatus.CONFIRMED_SUCCESS, raw = submitResponse)
+                    } else {
+                        AnswerAI.removeCachedAnswer(question, LogChannel.STALL.loggerName)
+                        Log.error(TAG, "答题完成但答案错误")
+                        AnswerQuestionResult(status = AnswerQuestionStatus.CONFIRMED_WRONG, raw = submitResponse)
+                    }
                 } else {
-                    AnswerAI.removeCachedAnswer(question, LogChannel.STALL.loggerName)
-                    Log.error(TAG, if (submitSuccess) "答题完成但答案错误" else "答题失败")
-                    false
+                    Log.stall("答题已提交，等待任务刷新确认")
+                    AnswerQuestionResult(
+                        status = AnswerQuestionStatus.SUBMIT_SENT_WAIT_REFRESH,
+                        raw = submitResponse
+                    )
                 }
             } else {
                 Log.error(TAG, "获取问题失败")
+                return AnswerQuestionResult(
+                    status = AnswerQuestionStatus.RPC_FAILED,
+                    message = questionJson.optString("resultDesc", "获取问题失败"),
+                    raw = questionResponse
+                )
             }
         } catch (e: Throwable) {
             Log.printStackTrace(TAG, "answerQuestion err:", e)
+            return AnswerQuestionResult(
+                status = AnswerQuestionStatus.RPC_FAILED,
+                message = e.message.orEmpty(),
+                raw = bizInfo.toString()
+            )
         }
-        return false
     }
 }
 

@@ -1403,7 +1403,8 @@ object AntForestRpcCall {
 
                 animalId != 0 -> {
                     put("animalId", animalId)
-                    put("withDetail", "N")
+                    // 最新巡护合成链路要求按动物定向查询时省略 withDetail，
+                    // 服务端才会返回稳定的 propIdList。
                 }
                 else -> {
                     put("withDetail", "N")
