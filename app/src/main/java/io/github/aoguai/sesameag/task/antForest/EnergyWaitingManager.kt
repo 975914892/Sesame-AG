@@ -137,7 +137,6 @@ class SmartRetryStrategy {
  */
 object EnergyWaitingManager {
     private const val TAG = "EnergyWaitingManager"
-    private const val FAILED_BUBBLE_STALE_GRACE_MS = 2 * 60 * 1000L
     private const val FOREST_WAITING_DEDUPE_PREFIX = "forest_waiting_"
     private const val FOREST_WAITING_TOLERANCE_MS = 60 * 60 * 1000L
     private const val MAX_PERSISTENT_WAITING_ALARMS = 16
@@ -1057,11 +1056,9 @@ object EnergyWaitingManager {
                     Log.forest("❌ 蹲点收取[${task.getUserTypeTag()}${task.userName}]失败：${result.message}")
 
                     // 根据失败原因决定是否重试
-                    val failedBubbleStale = result.allRequestedBubblesFailed &&
-                        System.currentTimeMillis() - task.produceTime >= FAILED_BUBBLE_STALE_GRACE_MS
                     when {
-                        failedBubbleStale -> {
-                            Log.forest("  → 服务端标记目标能量球收取失败且任务已成熟超过宽限期，移除蹲点任务 failedBubbleIds=${result.failedBubbleIds}")
+                        result.allRequestedBubblesFailed -> {
+                            Log.forest("  → 服务端标记目标能量球收取失败，立即移除当前气泡蹲点并停止普通重试 failedBubbleIds=${result.failedBubbleIds}")
                             removeWaitingTask(task.taskId)
                             for (bubbleId in result.failedBubbleIds) {
                                 removeWaitingTask("${task.userId}_${bubbleId}")

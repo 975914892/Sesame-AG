@@ -60,6 +60,7 @@ object CustomSettings {
             SimpleEntity("antCooperate", "蚂蚁森林合种"),
             SimpleEntity("antSports", "运动"),
             SimpleEntity("antMember", "会员"),
+            SimpleEntity("myBankWelfare", "网商银行"),
             SimpleEntity("antSesameCredit", "芝麻信用"),
             SimpleEntity("EcoProtection", "生态保护"),
             SimpleEntity("greenFinance", "绿色经营"),
@@ -171,6 +172,7 @@ object CustomSettings {
             taskInfo.contains("运动") || taskInfo.contains("antSports") -> "antSports"
             taskInfo.contains("芝麻信用") || taskInfo.contains("antSesameCredit") -> "antSesameCredit"
             taskInfo.contains("会员") || taskInfo.contains("antMember") -> "antMember"
+            taskInfo.contains("网商银行") || taskInfo.contains("网商福利金") || taskInfo.contains("MyBankWelfare") -> "myBankWelfare"
             taskInfo.contains("生态保护") || taskInfo.contains("EcoProtection") -> "EcoProtection"
             taskInfo.contains("绿色经营") || taskInfo.contains("greenFinance") -> "greenFinance"
             taskInfo.contains("保护地") || taskInfo.contains("reserve") -> "reserve"

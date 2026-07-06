@@ -414,6 +414,13 @@ private val sportsDefaultBlacklist = setOf(
     "AP10344931|逛好运卡翻红包" // 路线复活入口 completeTask 返回 CAMP_TRIGGER_ERROR
 )
 
+private val myBankWelfareDefaultBlacklist = setOf(
+    "查看借呗额度", // 需真实授信业务行为，默认跳过
+    "查看我的借呗额度", // 真实标题变体，服务端返回 10000005 不支持 loanpromoweb 事件闭环
+    "办理全国大流量卡", // 需真实办理业务，默认跳过
+    "完成1笔借呗支用" // 需真实借款支用行为，默认跳过
+)
+
 val DEFAULT_BLACKLIST: Map<String, Set<String>> = mapOf(
     "芝麻信用" to sesameCreditDefaultBlacklist,
     "芝麻炼金" to sesameAlchemyDefaultBlacklist,
@@ -426,6 +433,7 @@ val DEFAULT_BLACKLIST: Map<String, Set<String>> = mapOf(
     "会员" to memberDefaultBlacklist,
     "蚂蚁保" to insuredDefaultBlacklist,
     "运动" to sportsDefaultBlacklist,
+    "网商银行" to myBankWelfareDefaultBlacklist,
     "神奇物种" to dodoDefaultBlacklist,
     "蚂蚁新村" to stallDefaultBlacklist,
     "福气鱼池" to fishPondDefaultBlacklist

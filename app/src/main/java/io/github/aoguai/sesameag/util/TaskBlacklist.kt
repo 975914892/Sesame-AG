@@ -9,6 +9,35 @@ import com.fasterxml.jackson.core.type.TypeReference
 object TaskBlacklist {
     private const val TAG = "TaskBlacklist"
     private const val BLACKLIST_KEY = "task_blacklist"
+    private const val MYBANK_MODULE_NAME = "网商银行"
+    private const val LEGACY_MYBANK_WELFARE_MODULE_NAME = "网商福利金"
+
+    private fun canonicalModuleName(moduleName: String): String {
+        return when (moduleName) {
+            LEGACY_MYBANK_WELFARE_MODULE_NAME -> MYBANK_MODULE_NAME
+            else -> moduleName
+        }
+    }
+
+    private fun relatedModuleNames(moduleName: String): LinkedHashSet<String> {
+        val canonicalName = canonicalModuleName(moduleName)
+        return if (canonicalName == MYBANK_MODULE_NAME) {
+            linkedSetOf(MYBANK_MODULE_NAME, LEGACY_MYBANK_WELFARE_MODULE_NAME)
+        } else {
+            linkedSetOf(canonicalName)
+        }
+    }
+
+    private fun collectModuleBlacklist(
+        allBlacklists: Map<String, Set<String>>,
+        moduleName: String
+    ): LinkedHashSet<String> {
+        val merged = LinkedHashSet<String>()
+        relatedModuleNames(moduleName).forEach { name ->
+            merged.addAll(allBlacklists[name].orEmpty())
+        }
+        return merged
+    }
 
     private fun getAllBlacklists(): Map<String, Set<String>> {
         return try {
@@ -34,7 +63,7 @@ object TaskBlacklist {
      * 获取所有有黑名单的模块名称
      */
     fun getBlacklistModuleNames(): List<String> {
-        return getAllBlacklists().keys.toList()
+        return getAllBlacklists().keys.map(::canonicalModuleName).distinct()
     }
 
     /**
@@ -42,7 +71,7 @@ object TaskBlacklist {
      */
     fun getBlacklist(moduleName: String?): Set<String> {
         if (moduleName.isNullOrBlank()) return emptySet()
-        return getAllBlacklists()[moduleName] ?: emptySet()
+        return collectModuleBlacklist(getAllBlacklists(), moduleName)
     }
 
     /**
@@ -53,8 +82,10 @@ object TaskBlacklist {
         if (moduleName.isNullOrBlank() || taskInfo.isNullOrBlank()) return false
 
         // 1. 检查内置黑名单
-        DEFAULT_BLACKLIST[moduleName]?.let { defaultSet ->
-            if (defaultSet.any { isMatch(taskInfo, it) }) return true
+        relatedModuleNames(moduleName).forEach { name ->
+            DEFAULT_BLACKLIST[name]?.let { defaultSet ->
+                if (defaultSet.any { isMatch(taskInfo, it) }) return true
+            }
         }
 
         // 2. 检查持久化存储的黑名单
@@ -116,11 +147,17 @@ object TaskBlacklist {
 
         // 使用分隔符 | 拼接 ID 和 标题，便于后续精确匹配
         val blacklistItem = if (taskTitle.isNotBlank() && taskId != taskTitle) "$taskId|$taskTitle" else taskId
+        val canonicalName = canonicalModuleName(moduleName)
         val allBlacklists = getAllBlacklists().toMutableMap()
-        val moduleSet = allBlacklists[moduleName]?.toMutableSet() ?: mutableSetOf()
+        val moduleSet = collectModuleBlacklist(allBlacklists, canonicalName).toMutableSet()
 
         if (moduleSet.add(blacklistItem)) {
-            allBlacklists[moduleName] = moduleSet
+            relatedModuleNames(canonicalName).forEach { name ->
+                if (name != canonicalName) {
+                    allBlacklists.remove(name)
+                }
+            }
+            allBlacklists[canonicalName] = moduleSet
             saveAllBlacklists(allBlacklists)
         }
     }
@@ -132,13 +169,18 @@ object TaskBlacklist {
         if (moduleName.isNullOrBlank() || taskId.isBlank()) return
 
         val blacklistItem = if (taskTitle.isNotBlank() && taskId != taskTitle) "$taskId|$taskTitle" else taskId
+        val canonicalName = canonicalModuleName(moduleName)
         val allBlacklists = getAllBlacklists().toMutableMap()
-        val moduleSet = allBlacklists[moduleName]?.toMutableSet() ?: return
+        val moduleSet = collectModuleBlacklist(allBlacklists, canonicalName).toMutableSet()
+        if (moduleSet.isEmpty()) return
 
         if (moduleSet.remove(blacklistItem)) {
-            allBlacklists[moduleName] = moduleSet
+            relatedModuleNames(canonicalName).forEach { allBlacklists.remove(it) }
+            if (moduleSet.isNotEmpty()) {
+                allBlacklists[canonicalName] = moduleSet
+            }
             saveAllBlacklists(allBlacklists)
-            Log.record(TAG, "模块[$moduleName]的任务[$blacklistItem]已从黑名单移除")
+            Log.record(TAG, "模块[$canonicalName]的任务[$blacklistItem]已从黑名单移除")
         }
     }
 
@@ -147,10 +189,14 @@ object TaskBlacklist {
      */
     fun clearBlacklist(moduleName: String?) {
         if (moduleName.isNullOrBlank()) return
+        val canonicalName = canonicalModuleName(moduleName)
         val allBlacklists = getAllBlacklists().toMutableMap()
-        if (allBlacklists.remove(moduleName) != null) {
+        val removed = relatedModuleNames(canonicalName).fold(false) { acc, name ->
+            allBlacklists.remove(name) != null || acc
+        }
+        if (removed) {
             saveAllBlacklists(allBlacklists)
-            Log.record(TAG, "模块[$moduleName]的黑名单已清空")
+            Log.record(TAG, "模块[$canonicalName]的黑名单已清空")
         }
     }
 

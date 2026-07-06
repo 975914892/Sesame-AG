@@ -30,6 +30,8 @@ enum class ModelGroup(
     SPORTS("SPORTS", "运动", "svg/group/sports.svg"),
     /** 会员 */
     MEMBER("MEMBER", "会员", "svg/group/member.svg"),
+    /** 网商银行 */
+    MYBANK("MYBANK", "网商银行", "svg/group/member.svg"),
     /** 芝麻信用 */
     SESAME_CREDIT("SESAME_CREDIT", "芝麻信用", "svg/group/member.svg"),
     /** 其他 */

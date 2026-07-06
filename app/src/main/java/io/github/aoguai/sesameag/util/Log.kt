@@ -245,6 +245,11 @@ object Log {
     }
 
     @JvmStatic
+    fun mybank(msg: String) {
+        business(LogChannel.MYBANK, msg)
+    }
+
+    @JvmStatic
     fun fishpond(msg: String) {
         business(LogChannel.FISHPOND, msg)
     }

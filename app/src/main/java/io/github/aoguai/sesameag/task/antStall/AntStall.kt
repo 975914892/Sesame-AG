@@ -87,7 +87,8 @@ class AntStall : ModelTask() {
 
     private data class StallXlightRoundResult(
         val finishedCount: Int,
-        val failure: TaskFlowActionResult? = null
+        val failure: TaskFlowActionResult? = null,
+        val riskContext: String? = null
     )
 
     // 配置字段
@@ -1500,6 +1501,9 @@ class AntStall : ModelTask() {
         val finishedCount = roundResult.finishedCount
 
         return if (finishedCount > 0) {
+            roundResult.riskContext?.let { riskContext ->
+                Log.stall("新村浏览任务⚠️[${item.title}] 命中广告风控上下文但闭环成功[$riskContext]")
+            }
             Log.stall("蚂蚁新村💣任务[${item.title}]完成")
             TaskFlowActionResult.success(refreshAfterAction = true)
         } else {
@@ -1609,6 +1613,7 @@ class AntStall : ModelTask() {
         var playingPageInfo: String? = null
         var pageNo = 1
         var finishedCount = 0
+        var riskContext: String? = null
 
         while (pageNo <= 5 && finishedCount < config.rounds) {
             val response = AntStallRpcCall.xlightPlugin(
@@ -1644,6 +1649,9 @@ class AntStall : ModelTask() {
                 )
             }
             if (adTrafficRisk) {
+                if (riskContext == null) {
+                    riskContext = buildStallXlightRiskContext(json, playingBizId)
+                }
                 Log.stall("新村浏览任务⏭️[${item.title}] 第${pageNo}页命中广告风控上下文，但已返回playingResult，继续尝试闭环")
             }
 
@@ -1743,7 +1751,7 @@ class AntStall : ModelTask() {
             pageNo++
         }
 
-        return StallXlightRoundResult(finishedCount)
+        return StallXlightRoundResult(finishedCount, riskContext = riskContext)
     }
 
     private fun buildStallXlightSearchInfo(pageNo: Int): JSONObject? {
@@ -1758,6 +1766,18 @@ class AntStall : ModelTask() {
 
     private fun buildStallXlightEventKey(playBizId: String, eventInfo: JSONObject): String {
         return "$playBizId#${eventInfo.optInt("order", -1)}#${eventInfo.optInt("rewardId", -1)}#${eventInfo.optInt("eventStep", 0)}"
+    }
+
+    private fun buildStallXlightRiskContext(response: JSONObject, playingBizId: String): String {
+        val parts = listOf(
+            response.optString("errorMsg").takeIf { it.isNotBlank() }?.let { "errorMsg=$it" },
+            response.optString("retCode").takeIf { it.isNotBlank() }?.let { "retCode=$it" },
+            response.optString("sspErrorCode").takeIf { it.isNotBlank() }?.let { "sspErrorCode=$it" },
+            response.optString("sspErrorMsg").takeIf { it.isNotBlank() }?.let { "sspErrorMsg=$it" },
+            response.optString("xlightRequestId").takeIf { it.isNotBlank() }?.let { "xlightRequestId=$it" },
+            playingBizId.takeIf { it.isNotBlank() }?.let { "playingBizId=$it" }
+        ).filterNotNull()
+        return parts.joinToString(", ")
     }
 
     private fun buildStallXlightSession(): String {

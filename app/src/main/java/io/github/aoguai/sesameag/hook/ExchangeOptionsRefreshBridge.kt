@@ -26,6 +26,7 @@ object ExchangeOptionsRefreshBridge {
     private const val DEFAULT_TIMEOUT_MS = 12_000L
 
     const val TARGET_MEMBER_POINT = "member_point"
+    const val TARGET_MYBANK_WELFARE = "mybank_welfare"
     const val TARGET_BEAN_RIGHT = "bean_right"
     const val TARGET_FARM_PARADISE = "farm_paradise"
     const val TARGET_FARM_IP_CHOUCHOULE = "farm_ip_chouchoule"

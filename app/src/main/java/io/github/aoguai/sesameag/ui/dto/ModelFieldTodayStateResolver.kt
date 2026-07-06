@@ -115,6 +115,19 @@ object ModelFieldTodayStateResolver {
                     "今日会员积分兑换权益已处理"
                 )
 
+            "MyBankWelfare.myBankWelfareSign" ->
+                flag(StatusFlags.FLAG_MYBANK_WELFARE_SIGN_DONE, "今日网商银行福利金签到已处理")
+
+            "MyBankWelfare.myBankWelfareExchange" ->
+                flag(StatusFlags.FLAG_MYBANK_WELFARE_EXCHANGE_REFRESH_DONE, "今日网商银行福利金兑换已处理")
+
+            "MyBankWelfare.myBankWelfareExchangeList" ->
+                selectedSetFlagState(
+                    modelField,
+                    StatusFlags.FLAG_MYBANK_WELFARE_EXCHANGE_REFRESH_DONE,
+                    "今日网商银行福利金兑换已处理"
+                )
+
             "AntMember.enableGameCenter" ->
                 flag(StatusFlags.FLAG_ANTMEMBER_GAME_CENTER_DONE, "今日游戏中心已处理")
 

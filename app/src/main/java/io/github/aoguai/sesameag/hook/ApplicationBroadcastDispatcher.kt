@@ -22,6 +22,7 @@ import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.customTasks.CustomTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
+import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log.capture
@@ -482,6 +483,11 @@ internal object ApplicationBroadcastDispatcher {
         return try {
             UserMap.setCurrentUserId(currentUserId)
             val options = when (target) {
+                ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE -> {
+                    Model.getModel(MyBankWelfare::class.java)?.refreshMyBankWelfareExchangeOptionsForRemote()
+                        ?: return ExchangeOptionsRefreshResult(false, "网商银行模块未初始化", currentUserId)
+                }
+
                 ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT -> {
                     Model.getModel(AntMember::class.java)?.refreshMemberPointExchangeOptionsForRemote()
                         ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)

@@ -23,12 +23,16 @@ internal object ApplicationResumeCoordinator {
     private var hostAppForeground = false
 
     @Volatile
+    private var foregroundSessionEpoch = 0L
+
+    @Volatile
     private var lastReOpenAppLaunchAtMs: Long = 0L
 
     fun reset() {
         hostAppWentBackground = false
         pendingModuleForegroundResume = false
         hostAppForeground = false
+        foregroundSessionEpoch = 0L
         persistHostAppForeground(false)
     }
 
@@ -43,6 +47,9 @@ internal object ApplicationResumeCoordinator {
     }
 
     fun markHostAppForegrounded() {
+        if (!hostAppForeground) {
+            foregroundSessionEpoch++
+        }
         hostAppWentBackground = false
         hostAppForeground = true
         persistHostAppForeground(true)
@@ -89,6 +96,8 @@ internal object ApplicationResumeCoordinator {
         return runCatching { DataStore.get(TARGET_APP_FOREGROUND_KEY, Boolean::class.javaObjectType) == true }
             .getOrDefault(false)
     }
+
+    fun currentForegroundSessionEpoch(): Long = foregroundSessionEpoch
 
     fun tryRecoverOffline(resumeSource: String): Boolean {
         if (!ApplicationHookConstants.isOffline()) return false

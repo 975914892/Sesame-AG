@@ -9292,6 +9292,106 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
     }
 
+    private fun queryWaitingTargetHome(task: EnergyWaitingManager.WaitingTask): JSONObject? {
+        val fromAct = if (task.isPkContest()) "PKContest" else "TAKE_LOOK_FRIEND"
+        return if (task.isSelf()) {
+            querySelfHome()
+        } else {
+            queryFriendHome(task.userId, fromAct)
+        }
+    }
+
+    private fun recheckWaitingBubblesAfterFailedCollect(
+        task: EnergyWaitingManager.WaitingTask,
+        userName: String?,
+        failedBubbleIds: Set<Long>
+    ): String {
+        val latestHome = queryWaitingTargetHome(task)
+            ?: return "服务端标记目标能量球收取失败，主页复核失败"
+        val latestUserName = getAndCacheUserName(task.userId, latestHome, task.fromTag)
+            ?: userName
+            ?: task.userName
+        val rebuiltCount = rebuildWaitingTasksAfterFailedCollect(
+            task,
+            latestHome,
+            latestUserName,
+            failedBubbleIds
+        )
+        return if (rebuiltCount > 0) {
+            "服务端标记目标能量球收取失败，已复核并重建${rebuiltCount}个新蹲点任务"
+        } else {
+            "服务端标记目标能量球收取失败，已复核未发现新的可蹲点能量球"
+        }
+    }
+
+    private fun rebuildWaitingTasksAfterFailedCollect(
+        task: EnergyWaitingManager.WaitingTask,
+        userHomeObj: JSONObject,
+        userName: String?,
+        failedBubbleIds: Set<Long>
+    ): Int {
+        val serverTime = userHomeObj.optLong("now", System.currentTimeMillis())
+        val isSelf = task.isSelf()
+        val excludedBubbleIds = failedBubbleIds + task.bubbleId
+        val bubbles = if (isTeam(userHomeObj)) {
+            userHomeObj.optJSONObject("teamHomeResult")
+                ?.optJSONObject("mainMember")
+                ?.optJSONArray("bubbles")
+        } else {
+            userHomeObj.optJSONArray("bubbles")
+        } ?: return 0
+
+        var rebuiltCount = 0
+        for (i in 0 until bubbles.length()) {
+            val bubble = bubbles.optJSONObject(i) ?: continue
+            if (bubble.optString("collectStatus") != CollectStatus.WAITING.name) {
+                continue
+            }
+
+            val bubbleId = bubble.optLong("id", 0L)
+            if (bubbleId <= 0L || bubbleId in excludedBubbleIds) {
+                continue
+            }
+
+            val bubbleCount = bubble.optInt("fullEnergy", 0)
+            if (bubbleCount <= 0) {
+                continue
+            }
+            if (isSelf && !shouldCollectSelfBubble(bubbleCount)) {
+                continue
+            }
+
+            val produceTime = bubble.optLong("produceTime", 0L)
+            if (produceTime <= serverTime) {
+                continue
+            }
+            if (!isSelf && shouldSkipWaitingTaskDueToProtection(userHomeObj, produceTime, serverTime)) {
+                continue
+            }
+            if (EnergyWaitingManager.hasWaitingTask(task.userId, bubbleId, produceTime)) {
+                continue
+            }
+
+            EnergyWaitingManager.addWaitingTask(
+                userId = task.userId,
+                userName = userName ?: task.userName,
+                bubbleId = bubbleId,
+                produceTime = produceTime,
+                fromTag = task.fromTag.ifBlank { "蹲点收取" },
+                userHomeObj = userHomeObj
+            )
+            rebuiltCount++
+        }
+
+        val safeUserName = userName ?: task.userName
+        if (rebuiltCount > 0) {
+            Log.forest("蹲点失败复核[$safeUserName]：跳过 failedBubbleIds=$excludedBubbleIds，已重建${rebuiltCount}个新蹲点任务")
+        } else {
+            Log.forest("蹲点失败复核[$safeUserName]：跳过 failedBubbleIds=$excludedBubbleIds，未发现新的可蹲点能量球")
+        }
+        return rebuiltCount
+    }
+
     /**
      * 实现EnergyCollectCallback接口
      * 为蹲点管理器提供能量收取功能（增强版）
@@ -9326,13 +9426,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
         return try {
             withContext(Dispatchers.Default) {
-                // 主号蹲点查询自己的主页，好友蹲点走好友主页守卫。
-                val fromAct = if (task.isPkContest()) "PKContest" else "TAKE_LOOK_FRIEND"
-                val friendHomeObj = if (task.isSelf()) {
-                    querySelfHome()
-                } else {
-                    queryFriendHome(task.userId, fromAct)
-                }
+                val friendHomeObj = queryWaitingTargetHome(task)
                 if (friendHomeObj != null) {
                     // 获取真实用户名
                     val realUserName = getAndCacheUserName(task.userId, friendHomeObj, task.fromTag)
@@ -9347,7 +9441,12 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             Log.printStackTrace(TAG, "蹲点后领取N倍卡能量失败", it)
                         }
                     }
-                    result.copy(userName = realUserName)
+                    val finalMessage = if (result.allRequestedBubblesFailed) {
+                        recheckWaitingBubblesAfterFailedCollect(task, realUserName, result.failedBubbleIds)
+                    } else {
+                        result.message
+                    }
+                    result.copy(userName = realUserName, message = finalMessage)
                 } else {
                     CollectResult(
                         success = false,

@@ -129,6 +129,12 @@ object StatusFlags {
     /** 会员积分权益兑换：今日已完成权益列表刷新/扫描 */
     const val FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE: String = "memberBenefit::refresh"
 
+    /** 网商福利金：今日签到已处理 */
+    const val FLAG_MYBANK_WELFARE_SIGN_DONE: String = "MyBankWelfare::signDone"
+
+    /** 网商福利金：今日兑换列表已刷新并处理已勾选项 */
+    const val FLAG_MYBANK_WELFARE_EXCHANGE_REFRESH_DONE: String = "MyBankWelfare::exchangeRefreshDone"
+
     /** 今日游戏中心签到、平台任务、乐豆和赚现金签到是否已处理 */
     const val FLAG_ANTMEMBER_GAME_CENTER_DONE = "AntMember::gameCenterDone"
 

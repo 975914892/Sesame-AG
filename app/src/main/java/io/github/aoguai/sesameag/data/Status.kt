@@ -123,6 +123,9 @@ class Status {
     /** 会员权益 */
     var memberPointExchangeBenefitLogList: MutableSet<String> = HashSet()
 
+    /** 网商福利金权益 */
+    var myBankWelfareExchangeLogList: MutableSet<String> = HashSet()
+
     /**
      * 检查今日已完成状态（实例方法，供 ModelFieldTodayStateResolver 使用）
      */
@@ -984,6 +987,19 @@ class Status {
         fun memberPointExchangeBenefitToday(benefitId: String) {
             if (canMemberPointExchangeBenefitToday(benefitId)) {
                 INSTANCE.memberPointExchangeBenefitLogList.add(benefitId)
+                save()
+            }
+        }
+
+        @JvmStatic
+        fun canMyBankWelfareExchangeToday(itemId: String): Boolean {
+            return !INSTANCE.myBankWelfareExchangeLogList.contains(itemId)
+        }
+
+        @JvmStatic
+        fun myBankWelfareExchangeToday(itemId: String) {
+            if (canMyBankWelfareExchangeToday(itemId)) {
+                INSTANCE.myBankWelfareExchangeLogList.add(itemId)
                 save()
             }
         }
