@@ -10,6 +10,7 @@ import io.github.aoguai.sesameag.entity.friend.FriendCenterConfig
 import io.github.aoguai.sesameag.entity.friend.FriendRelationFilter
 import io.github.aoguai.sesameag.entity.friend.FriendSelectionCountSpec
 import io.github.aoguai.sesameag.entity.friend.FriendSelectionSpec
+import io.github.aoguai.sesameag.model.ConfigPortScope
 import io.github.aoguai.sesameag.model.ModelField
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
@@ -26,6 +27,10 @@ open class FriendSelectionModelField(
     name: String,
     value: FriendSelectionSpec = FriendSelectionSpec()
 ) : ModelField<FriendSelectionSpec>(code, name, value) {
+
+    init {
+        configPortScope = ConfigPortScope.ACCOUNT_PRIVATE
+    }
 
     override fun getType(): String = "FRIEND_SELECTION"
 
@@ -148,6 +153,10 @@ class FriendSelectionCountModelField(
     name: String,
     value: FriendSelectionCountSpec = FriendSelectionCountSpec()
 ) : ModelField<FriendSelectionCountSpec>(code, name, value) {
+
+    init {
+        configPortScope = ConfigPortScope.ACCOUNT_PRIVATE
+    }
 
     override fun getType(): String = "FRIEND_SELECTION_COUNT"
 

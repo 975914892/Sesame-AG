@@ -4,9 +4,11 @@ import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.CooperateEntity.Companion.getList
 import io.github.aoguai.sesameag.model.BaseModel
+import io.github.aoguai.sesameag.model.ConfigPortScope
 import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
 import io.github.aoguai.sesameag.model.withDesc
+import io.github.aoguai.sesameag.model.withPortScope
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.IntegerModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.SelectAndCountModelField
@@ -56,14 +58,14 @@ class AntCooperate : ModelTask() {
         LinkedHashMap<String?, Int?>(),
         { getList() },
         "设置每个合种单次最多浇多少克；首次开启并执行一次后，返回设置页可刷新出合种列表。"
-    )
+    ).withPortScope(ConfigPortScope.ACCOUNT_PRIVATE)
     private val cooperateWaterTotalLimitList = SelectAndCountModelField(
         "cooperateWaterTotalLimitList",
         "合种浇水 | 总量限制",
         LinkedHashMap<String?, Int?>(),
         { getList() },
         "限制每个合种的累计总浇水量；达到后即使当天还有额度也不再浇。"
-    )
+    ).withPortScope(ConfigPortScope.ACCOUNT_PRIVATE)
     private val cooperateSendCooperateBeckon =
         BooleanModelField("cooperateSendCooperateBeckon", "合种 | 召唤队友浇水", false).withDesc(
             "仅队长可用，18:00 后自动召唤还能浇水的队友；可单独开启，不依赖“合种浇水 | 开启”。"

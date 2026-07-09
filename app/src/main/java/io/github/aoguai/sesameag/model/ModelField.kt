@@ -43,6 +43,9 @@ open class ModelField<T> : Serializable {
     /** 字段描述 */
     @JsonIgnore
     var desc: String = ""
+
+    @get:JsonIgnore
+    var configPortScope: ConfigPortScope = ConfigPortScope.GENERIC
     
     /** 当前值 */
     @Volatile
@@ -302,5 +305,9 @@ open class ModelField<T> : Serializable {
  */
 fun <F : ModelField<*>> F.withDesc(desc: String?): F = apply {
     this.desc = desc?.trim().orEmpty()
+}
+
+fun <F : ModelField<*>> F.withPortScope(scope: ConfigPortScope): F = apply {
+    this.configPortScope = scope
 }
 

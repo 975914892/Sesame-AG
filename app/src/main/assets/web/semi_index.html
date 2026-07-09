@@ -1465,6 +1465,7 @@
             const [modelsMap, setModelsMap] = useState({});
             const [draftValues, setDraftValues] = useState({});
             const [actionLoading, setActionLoading] = useState({});
+            const modelsMapRef = useRef({});
             const panelRefs = useRef({});
 
             // 列表弹窗相关的 State
@@ -1535,8 +1536,13 @@
             const loadModelIfNeeded = (modelCode) => {
                 if (!modelCode) return;
                 setModelsMap(prev => {
-                    if (prev[modelCode]) return prev;
-                    return { ...prev, [modelCode]: getModelData(modelCode) };
+                    if (prev[modelCode]) {
+                        modelsMapRef.current = prev;
+                        return prev;
+                    }
+                    const next = { ...prev, [modelCode]: getModelData(modelCode) };
+                    modelsMapRef.current = next;
+                    return next;
                 });
             };
 
@@ -1548,8 +1554,13 @@
                 if (tabsData[0]?.modelCode) {
                     initialMap[tabsData[0].modelCode] = getModelData(tabsData[0].modelCode);
                 }
+                modelsMapRef.current = initialMap;
                 setModelsMap(initialMap);
             }, []);
+
+            useEffect(() => {
+                modelsMapRef.current = modelsMap;
+            }, [modelsMap]);
 
             useEffect(() => {
                 setSheetVisibleLimit(120);
@@ -1705,37 +1716,37 @@
 
             const commitFieldChange = (modelCode, fieldCode, newValue) => {
                 const serializedValue = newValue == null ? '' : String(newValue);
-                setModelsMap(prev => {
-                    let currentFields = [...(prev[modelCode] || [])];
-                    const fieldIndex = currentFields.findIndex(f => f.code === fieldCode);
-                    if (fieldIndex > -1) {
-                        currentFields[fieldIndex] = { ...currentFields[fieldIndex], configValue: serializedValue };
-                    }
+                let currentFields = [...(modelsMapRef.current[modelCode] || [])];
+                const fieldIndex = currentFields.findIndex(f => f.code === fieldCode);
+                if (fieldIndex > -1) {
+                    currentFields[fieldIndex] = { ...currentFields[fieldIndex], configValue: serializedValue };
+                }
 
-                    let committed = false;
-                    if (window.HOOK && window.HOOK.setField) {
-                        try {
-                            committed = window.HOOK.setField(modelCode, fieldCode, serializedValue) === 'SUCCESS';
-                        } catch (e) {
-                            committed = false;
-                        }
+                let committed = false;
+                if (window.HOOK && window.HOOK.setField) {
+                    try {
+                        committed = window.HOOK.setField(modelCode, fieldCode, serializedValue) === 'SUCCESS';
+                    } catch (e) {
+                        committed = false;
                     }
+                }
 
-                    if (!committed && window.HOOK && window.HOOK.setModel) {
-                        const savePayload = {};
-                        currentFields.forEach(f => { savePayload[f.code] = { configValue: f.configValue }; });
-                        window.HOOK.setModel(modelCode, JSON.stringify(savePayload));
+                if (!committed && window.HOOK && window.HOOK.setModel) {
+                    const savePayload = {};
+                    currentFields.forEach(f => { savePayload[f.code] = { configValue: f.configValue }; });
+                    window.HOOK.setModel(modelCode, JSON.stringify(savePayload));
+                }
+
+                if ((window.HOOK && window.HOOK.setField) || (window.HOOK && window.HOOK.setModel)) {
+                    const refreshedFields = getModelData(modelCode);
+                    if (Array.isArray(refreshedFields) && refreshedFields.length > 0) {
+                        currentFields = refreshedFields;
                     }
+                }
 
-                    if ((window.HOOK && window.HOOK.setField) || (window.HOOK && window.HOOK.setModel)) {
-                        const refreshedFields = getModelData(modelCode);
-                        if (Array.isArray(refreshedFields) && refreshedFields.length > 0) {
-                            currentFields = refreshedFields;
-                        }
-                    }
-
-                    return { ...prev, [modelCode]: currentFields };
-                });
+                const nextModelsMap = { ...modelsMapRef.current, [modelCode]: currentFields };
+                modelsMapRef.current = nextModelsMap;
+                setModelsMap(nextModelsMap);
             };
 
             const getCachedFriendSummary = (modelCode, fieldCode, type, configValue) => {
@@ -1769,6 +1780,89 @@
                 commitFieldChange(modelCode, fieldCode, draftValue ?? '');
                 clearDraftValue(modelCode, fieldCode);
             };
+
+            const buildSheetConfigValue = () => {
+                const { type } = sheetConfig;
+                if (type === 'SELECT') {
+                    return JSON.stringify(Array.from(selectedIds));
+                }
+                const obj = {};
+                selectedIds.forEach(id => {
+                    obj[id] = selectedCounts[id] !== undefined ? selectedCounts[id] : 0;
+                });
+                return JSON.stringify(obj);
+            };
+
+            const flushOpenSheetConfig = () => {
+                if (!sheetVisible || sheetLoading) return false;
+                const { modelCode, fieldCode } = sheetConfig;
+                if (!modelCode || !fieldCode) return false;
+                closeListSheet();
+                commitFieldChange(modelCode, fieldCode, buildSheetConfigValue());
+                return true;
+            };
+
+            const buildFriendSheetConfigValue = () => {
+                const { type } = friendSheetConfig;
+                const normalizedSpec = {
+                    ...friendSpec,
+                    includeUserIds: normalizeStringArray(friendSpec.includeUserIds),
+                    includeGroupIds: normalizeStringArray(friendSpec.includeGroupIds),
+                    excludeUserIds: normalizeStringArray(friendSpec.excludeUserIds),
+                    excludeGroupIds: normalizeStringArray(friendSpec.excludeGroupIds),
+                    relationFilter: friendSpec.relationFilter || 'MUTUAL_ONLY',
+                    capabilityFilter: friendSpec.capabilityFilter
+                };
+                const newValue = type === 'FRIEND_SELECTION_COUNT'
+                    ? {
+                        ...friendCountSpec,
+                        selection: normalizedSpec,
+                        defaultCount: Number(friendCountSpec.defaultCount) || 0,
+                        groupCountOverrides: normalizeStringNumberMap(friendCountSpec.groupCountOverrides),
+                        userCountOverrides: normalizeStringNumberMap(friendCountSpec.userCountOverrides)
+                    }
+                    : normalizedSpec;
+                return JSON.stringify(newValue);
+            };
+
+            const flushOpenFriendSheetConfig = () => {
+                if (!friendSheetVisible || friendSheetLoading) return false;
+                const { modelCode, fieldCode } = friendSheetConfig;
+                if (!modelCode || !fieldCode) return false;
+                closeFriendSheet();
+                commitFieldChange(modelCode, fieldCode, buildFriendSheetConfigValue());
+                return true;
+            };
+
+            useEffect(() => {
+                window.__flushPendingDrafts = () => {
+                    try {
+                        const activeElement = document.activeElement;
+                        if (activeElement && typeof activeElement.blur === 'function') {
+                            activeElement.blur();
+                        }
+                    } catch (e) { }
+
+                    flushOpenFriendSheetConfig();
+                    flushOpenSheetConfig();
+
+                    Object.keys(draftValues).forEach((draftKey) => {
+                        const separatorIndex = draftKey.indexOf('::');
+                        if (separatorIndex <= 0) return;
+                        const modelCode = draftKey.substring(0, separatorIndex);
+                        const fieldCode = draftKey.substring(separatorIndex + 2);
+                        const fallbackValue = (modelsMap[modelCode] || []).find(field => field.code === fieldCode)?.configValue ?? '';
+                        commitInputDraft(modelCode, fieldCode, fallbackValue);
+                    });
+                    return 'SUCCESS';
+                };
+
+                return () => {
+                    if (window.__flushPendingDrafts) {
+                        delete window.__flushPendingDrafts;
+                    }
+                };
+            }, [draftValues, modelsMap]);
 
             const runFieldAction = (modelCode, item) => {
                 const actionKey = getDraftKey(modelCode, item.code);
@@ -1948,21 +2042,9 @@
 
             const saveSheet = () => {
                 if (sheetLoading) return;
-                const { modelCode, fieldCode, type } = sheetConfig;
-                let newValueStr = "";
-                if (type === 'SELECT') {
-                    const arr = Array.from(selectedIds);
-                    newValueStr = JSON.stringify(arr);
-                } else {
-                    const obj = {};
-                    selectedIds.forEach(id => {
-                        obj[id] = selectedCounts[id] !== undefined ? selectedCounts[id] : 0;
-                    });
-                    newValueStr = JSON.stringify(obj);
+                if (flushOpenSheetConfig()) {
+                    Toast.success("已修改列表设置，退出时保存生效");
                 }
-                commitFieldChange(modelCode, fieldCode, newValueStr);
-                closeListSheet();
-                Toast.success("已修改列表设置，退出时保存生效");
             };
 
             const toggleItem = (id, checked) => {
@@ -2083,30 +2165,9 @@
 
             const saveFriendSheet = () => {
                 if (friendSheetLoading) return;
-                const { modelCode, fieldCode, type } = friendSheetConfig;
-                const normalizedSpec = {
-                    ...friendSpec,
-                    includeUserIds: normalizeStringArray(friendSpec.includeUserIds),
-                    includeGroupIds: normalizeStringArray(friendSpec.includeGroupIds),
-                    excludeUserIds: normalizeStringArray(friendSpec.excludeUserIds),
-                    excludeGroupIds: normalizeStringArray(friendSpec.excludeGroupIds),
-                    relationFilter: friendSpec.relationFilter || 'MUTUAL_ONLY',
-                    capabilityFilter: friendSpec.capabilityFilter
-                };
-                const newValue = type === 'FRIEND_SELECTION_COUNT'
-                    ? {
-                        ...friendCountSpec,
-                        selection: normalizedSpec,
-                        defaultCount: Number(friendCountSpec.defaultCount) || 0,
-                        groupCountOverrides: normalizeStringNumberMap(friendCountSpec.groupCountOverrides),
-                        userCountOverrides: normalizeStringNumberMap(friendCountSpec.userCountOverrides)
-                    }
-                    : normalizedSpec;
-                closeFriendSheet();
-                window.setTimeout(() => {
-                    commitFieldChange(modelCode, fieldCode, JSON.stringify(newValue));
+                if (flushOpenFriendSheetConfig()) {
                     Toast.success("已修改好友选择，退出时保存生效");
-                }, 0);
+                }
             };
 
             const scrollToPanel = (modelCode) => {
