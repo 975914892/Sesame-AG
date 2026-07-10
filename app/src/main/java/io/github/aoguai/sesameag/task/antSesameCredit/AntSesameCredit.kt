@@ -24,6 +24,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
 import io.github.aoguai.sesameag.task.common.TaskFlowDecision
+import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
@@ -2455,7 +2456,7 @@ class AntSesameCredit : ModelTask() {
             val sendResult = doTaskActionResult(taskRef, "send")
             if (sendResult.success) {
                 pendingSentTaskRefs[taskRef.key()] = taskRef
-                return TaskFlowActionResult.success()
+                return zhimaTreePendingSendResult(item, taskRef, "send")
             }
             return zhimaTreeActionFailureResult(item, "send", sendResult)
         }
@@ -2752,6 +2753,21 @@ class AntSesameCredit : ModelTask() {
             )
         }
 
+        private fun zhimaTreePendingSendResult(
+            item: TaskFlowItem,
+            taskRef: ZhimaTreeTaskRef,
+            stageCode: String
+        ): TaskFlowActionResult {
+            return TaskFlowActionResult.defer(
+                deferredReason = DeferredReason.STATE_CONFIRMATION,
+                message = "send已发起，等待服务端状态确认",
+                rpc = "AntSesameCreditRpcCall.rentGreenTaskFinish",
+                detail = zhimaTreeActionDetail(item, stageCode) + " pendingSend=${taskRef.key()}",
+                refreshAfterAction = true,
+                progressChanged = true
+            )
+        }
+
         private fun zhimaTreeActionDetail(item: TaskFlowItem, action: String): String {
             val raw = item.raw
             return "taskId=${item.id} taskName=${item.title} action=$action " +
@@ -2784,7 +2800,7 @@ class AntSesameCredit : ModelTask() {
             if (snapshot.completed) {
                 pendingSentTaskRefs[taskRef.key()] = taskRef
                 Log.sesame("芝麻树🌳[复用push闭环已完成] ${taskRef.title} -> recordId=${snapshot.recordId}")
-                return TaskFlowActionResult.success(refreshAfterAction = true)
+                return zhimaTreePendingSendResult(item, taskRef, "delegatePushActivity")
             }
             val finishRes = AntSesameCreditRpcCall.finishSesameTask(snapshot.recordId)
             val responseObj = parseJSONObjectOrNull(finishRes)
@@ -2800,7 +2816,7 @@ class AntSesameCredit : ModelTask() {
                 markSesamePushModelTaskFinished(snapshot.recordId)
                 pendingSentTaskRefs[taskRef.key()] = taskRef
                 Log.sesame("芝麻树🌳[复用push闭环] ${taskRef.title} -> recordId=${snapshot.recordId}")
-                return TaskFlowActionResult.success(refreshAfterAction = true)
+                return zhimaTreePendingSendResult(item, taskRef, "delegatePushActivity")
             }
             val code = responseObj.optString("errorCode")
                 .ifBlank { responseObj.optString("resultCode") }

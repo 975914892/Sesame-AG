@@ -34,6 +34,15 @@ enum class TaskFlowAction(val logName: String) {
     SEND("send")
 }
 
+enum class DeferredReason {
+    TIME_WINDOW,
+    CAPACITY_LIMIT,
+    STATE_CONFIRMATION,
+    PREREQUISITE_PENDING,
+    CHILD_TASK_PENDING,
+    NO_PROGRESS_COOLDOWN
+}
+
 enum class TaskFlowDecision {
     BLACKLIST,
     RETRY_LATER,
@@ -70,7 +79,9 @@ data class TaskFlowActionResult(
     // 默认批量处理当前查询快照，只有强依赖服务端新状态的动作才要求立即刷新。
     val refreshAfterAction: Boolean = false,
     // RPC 成功不一定代表服务端任务状态已经推进；无进展成功不继续驱动刷新闭环。
-    val progressChanged: Boolean = true
+    val progressChanged: Boolean = true,
+    val deferredReason: DeferredReason? = null,
+    val deferredUntil: Long? = null
 ) {
     companion object {
         fun success(
@@ -106,6 +117,31 @@ data class TaskFlowActionResult(
                 continueCurrentRoundOnFailure = continueCurrentRoundOnFailure
             )
         }
+
+        fun defer(
+            deferredReason: DeferredReason,
+            message: String = "",
+            rpc: String = "",
+            raw: String = "",
+            detail: String = "",
+            deferredUntil: Long? = null,
+            stopCurrentRound: Boolean = false,
+            refreshAfterAction: Boolean = false,
+            progressChanged: Boolean = false
+        ): TaskFlowActionResult {
+            return TaskFlowActionResult(
+                success = false,
+                message = message,
+                rpc = rpc,
+                raw = raw,
+                detail = detail,
+                stopCurrentRound = stopCurrentRound,
+                refreshAfterAction = refreshAfterAction,
+                progressChanged = progressChanged,
+                deferredReason = deferredReason,
+                deferredUntil = deferredUntil
+            )
+        }
     }
 }
 
@@ -132,7 +168,9 @@ data class TaskFlowRunResult(
     val actionAttempted: Boolean = false,
     val progressChanged: Boolean = progressed,
     val noProgressSuccess: Boolean = false,
-    val interrupted: Boolean = false
+    val interrupted: Boolean = false,
+    val deferredCount: Int = 0,
+    val deferredReasonCounts: Map<DeferredReason, Int> = emptyMap()
 )
 
 private data class TaskFlowActionCandidate(
@@ -222,6 +260,12 @@ interface TaskFlowAdapter {
         decision: TaskFlowDecision
     ) = Unit
 
+    fun afterDeferred(
+        item: TaskFlowItem,
+        action: TaskFlowAction,
+        result: TaskFlowActionResult
+    ) = Unit
+
     fun onAllTasksDone(snapshot: TaskFlowSnapshot) = Unit
 
     fun onQueryFailed(response: JSONObject) = Unit
@@ -259,36 +303,48 @@ class TaskFlowEngine(
 
     fun run(): TaskFlowRunResult {
         val failedActionKeys = mutableSetOf<String>()
+        val deferredActionKeys = mutableSetOf<String>()
         var round = 1
         var roundLimit = 1
         var hardRoundLimit = 1
         var progressedAny = false
         var actionAttemptedAny = false
         var noProgressSuccessAny = false
+        var deferredCountAny = 0
+        val deferredReasonCountsAny = linkedMapOf<DeferredReason, Int>()
+        var failureCountAny = 0
+        var tailFollowUpRefreshBudget = 1
 
         while (round <= roundLimit) {
             if (adapter.isFlowHandledToday()) {
                 adapter.onFlowHandledToday()
-                return buildRunResult(
+                return finishRunResult(
                     completed = true,
                     progressed = progressedAny,
                     stopped = false,
-                    rounds = 0,
+                    rounds = round - 1,
                     actionAttempted = actionAttemptedAny,
-                    noProgressSuccess = noProgressSuccessAny
+                    noProgressSuccess = noProgressSuccessAny,
+                    interrupted = false,
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny
                 )
             }
 
             if (ApplicationHookConstants.isOffline()) {
                 adapter.logInfo("${adapter.flowName}[检测到离线模式，中断任务流]")
-                return buildRunResult(
+                return finishRunResult(
                     completed = false,
                     progressed = progressedAny,
                     stopped = true,
                     rounds = round,
                     actionAttempted = actionAttemptedAny,
                     noProgressSuccess = noProgressSuccessAny,
-                    interrupted = true
+                    interrupted = true,
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny
                 )
             }
 
@@ -296,41 +352,50 @@ class TaskFlowEngine(
                 adapter.query()
             } catch (t: Throwable) {
                 adapter.logError("${adapter.flowName}[查询异常：${t.message}]")
-                return buildRunResult(
+                return finishRunResult(
                     completed = false,
                     progressed = progressedAny,
                     stopped = true,
                     rounds = round,
                     actionAttempted = actionAttemptedAny,
                     noProgressSuccess = noProgressSuccessAny,
-                    interrupted = ApplicationHookConstants.isOffline()
+                    interrupted = ApplicationHookConstants.isOffline(),
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny + 1
                 )
             }
 
             RpcOfflineRisk.enterOfflineIfNeeded(adapter.flowName, response)
             if (ApplicationHookConstants.isOffline()) {
                 adapter.logInfo("${adapter.flowName}[查询后检测到离线模式，中断任务流]")
-                return buildRunResult(
+                return finishRunResult(
                     completed = false,
                     progressed = progressedAny,
                     stopped = true,
                     rounds = round,
                     actionAttempted = actionAttemptedAny,
                     noProgressSuccess = noProgressSuccessAny,
-                    interrupted = true
+                    interrupted = true,
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny
                 )
             }
 
             if (!adapter.isQuerySuccess(response)) {
                 adapter.onQueryFailed(response)
-                return buildRunResult(
+                return finishRunResult(
                     completed = false,
                     progressed = progressedAny,
                     stopped = true,
                     rounds = round,
                     actionAttempted = actionAttemptedAny,
                     noProgressSuccess = noProgressSuccessAny,
-                    interrupted = ApplicationHookConstants.isOffline()
+                    interrupted = ApplicationHookConstants.isOffline(),
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny + 1
                 )
             }
 
@@ -347,6 +412,7 @@ class TaskFlowEngine(
             var stopCurrentRound = false
             var refreshRequested = false
             val roundActions = mutableListOf<TaskFlowRoundAction>()
+            val roundDeferredReasonCounts = linkedMapOf<DeferredReason, Int>()
             val candidates = buildActionCandidates(items)
 
             for (candidate in candidates) {
@@ -367,14 +433,49 @@ class TaskFlowEngine(
                     roundActions.add(TaskFlowRoundAction("跳过已失败${action.logName}", item.title))
                     continue
                 }
+                if (actionKey in deferredActionKeys) {
+                    adapter.logInfo("${adapter.flowName}[本轮已跳过明确延后任务：${item.title}]")
+                    roundActions.add(TaskFlowRoundAction("跳过已延后${action.logName}", item.title))
+                    continue
+                }
 
                 val result = executeAction(item, action)
                 actionAttemptedAny = true
+                val deferredReason = result.deferredReason
                 val failureType = result.failureType ?: TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW
                 if (ApplicationHookConstants.isOffline()) {
                     stopCurrentRound = true
                     roundActions.add(TaskFlowRoundAction("离线中断", item.title))
                     break
+                }
+                if (deferredReason != null) {
+                    adapter.afterDeferred(item, action, result)
+                    deferredActionKeys.add(actionKey)
+                    deferredCountAny++
+                    deferredReasonCountsAny[deferredReason] =
+                        (deferredReasonCountsAny[deferredReason] ?: 0) + 1
+                    roundDeferredReasonCounts[deferredReason] =
+                        (roundDeferredReasonCounts[deferredReason] ?: 0) + 1
+                    if (result.progressChanged) {
+                        progressed = true
+                        progressedAny = true
+                    }
+                    logDeferred(item, action, result, deferredReason)
+                    roundActions.add(
+                        TaskFlowRoundAction(
+                            deferredActionText(action, deferredReason, result.refreshAfterAction),
+                            item.title
+                        )
+                    )
+                    if (result.stopCurrentRound) {
+                        stopCurrentRound = true
+                        break
+                    }
+                    if (result.refreshAfterAction) {
+                        refreshRequested = true
+                        break
+                    }
+                    continue
                 }
                 if (result.success) {
                     adapter.afterSuccess(item, action, result)
@@ -406,6 +507,7 @@ class TaskFlowEngine(
                 if (decision == TaskFlowDecision.BLACKLIST) {
                     adapter.blacklist(item, result)
                 }
+                failureCountAny++
                 logFailure(item, action, result, failureType, decision)
                 adapter.afterFailure(item, action, result, decision)
                 failedActionKeys.add(actionKey)
@@ -430,6 +532,7 @@ class TaskFlowEngine(
                     "[处理前已完成:${snapshot.completedTasks}/${snapshot.totalTasks}]" +
                     "[处理前待处理:${snapshot.availableTasks}]" +
                     "[本轮动作:${describeRoundActions(roundActions)}]" +
+                    "[本轮明确延后:${describeDeferredReasonCounts(roundDeferredReasonCounts)}]" +
                     "[本轮批量后刷新:${progressed && !stopCurrentRound}]" +
                     "[立即刷新请求:$refreshRequested]" +
                     "[本轮有进展:$progressed]"
@@ -437,31 +540,43 @@ class TaskFlowEngine(
 
             if (!stopCurrentRound &&
                 !ApplicationHookConstants.isOffline() &&
-                snapshot.totalTasks > 0 &&
                 snapshot.completedTasks >= snapshot.totalTasks &&
                 snapshot.availableTasks == 0
             ) {
                 adapter.onAllTasksDone(snapshot)
-                return buildRunResult(
+                return finishRunResult(
                     completed = true,
                     progressed = progressedAny,
                     stopped = false,
                     rounds = round,
                     actionAttempted = actionAttemptedAny,
-                    noProgressSuccess = noProgressSuccessAny
+                    noProgressSuccess = noProgressSuccessAny,
+                    interrupted = false,
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny
                 )
             }
 
             if (stopCurrentRound || !progressed) {
-                return buildRunResult(
+                return finishRunResult(
                     completed = false,
                     progressed = progressedAny,
                     stopped = stopCurrentRound,
                     rounds = round,
                     actionAttempted = actionAttemptedAny,
                     noProgressSuccess = noProgressSuccessAny,
-                    interrupted = ApplicationHookConstants.isOffline()
+                    interrupted = ApplicationHookConstants.isOffline(),
+                    deferredCount = deferredCountAny,
+                    deferredReasonCounts = deferredReasonCountsAny,
+                    failureCount = failureCountAny
                 )
+            }
+
+            if (deferredActionKeys.isNotEmpty() && tailFollowUpRefreshBudget > 0) {
+                adapter.logInfo("${adapter.flowName}[检测到前置状态已推进，允许1次尾部补收刷新]")
+                deferredActionKeys.clear()
+                tailFollowUpRefreshBudget--
             }
 
             val extendedRoundLimit = extendRoundLimitIfNeeded(round, roundLimit, hardRoundLimit, progressed)
@@ -477,14 +592,17 @@ class TaskFlowEngine(
         }
 
         adapter.onRoundLimit(roundLimit)
-        return buildRunResult(
+        return finishRunResult(
             completed = false,
             progressed = progressedAny,
             stopped = true,
             rounds = roundLimit,
             actionAttempted = actionAttemptedAny,
             noProgressSuccess = noProgressSuccessAny,
-            interrupted = ApplicationHookConstants.isOffline()
+            interrupted = ApplicationHookConstants.isOffline(),
+            deferredCount = deferredCountAny,
+            deferredReasonCounts = deferredReasonCountsAny,
+            failureCount = failureCountAny + 1
         )
     }
 
@@ -518,7 +636,9 @@ class TaskFlowEngine(
         rounds: Int,
         actionAttempted: Boolean,
         noProgressSuccess: Boolean,
-        interrupted: Boolean = false
+        interrupted: Boolean = false,
+        deferredCount: Int = 0,
+        deferredReasonCounts: Map<DeferredReason, Int> = emptyMap()
     ): TaskFlowRunResult {
         return TaskFlowRunResult(
             completed = completed,
@@ -528,7 +648,46 @@ class TaskFlowEngine(
             actionAttempted = actionAttempted,
             progressChanged = progressed,
             noProgressSuccess = noProgressSuccess,
-            interrupted = interrupted
+            interrupted = interrupted,
+            deferredCount = deferredCount,
+            deferredReasonCounts = deferredReasonCounts
+        )
+    }
+
+    private fun finishRunResult(
+        completed: Boolean,
+        progressed: Boolean,
+        stopped: Boolean,
+        rounds: Int,
+        actionAttempted: Boolean,
+        noProgressSuccess: Boolean,
+        interrupted: Boolean = false,
+        deferredCount: Int = 0,
+        deferredReasonCounts: Map<DeferredReason, Int> = emptyMap(),
+        failureCount: Int = 0
+    ): TaskFlowRunResult {
+        logFinalSummary(
+            completed = completed,
+            progressed = progressed,
+            stopped = stopped,
+            rounds = rounds,
+            actionAttempted = actionAttempted,
+            noProgressSuccess = noProgressSuccess,
+            interrupted = interrupted,
+            deferredCount = deferredCount,
+            deferredReasonCounts = deferredReasonCounts,
+            failureCount = failureCount
+        )
+        return buildRunResult(
+            completed = completed,
+            progressed = progressed,
+            stopped = stopped,
+            rounds = rounds,
+            actionAttempted = actionAttempted,
+            noProgressSuccess = noProgressSuccess,
+            interrupted = interrupted,
+            deferredCount = deferredCount,
+            deferredReasonCounts = deferredReasonCounts
         )
     }
 
@@ -640,6 +799,48 @@ class TaskFlowEngine(
         }
     }
 
+    private fun logDeferred(
+        item: TaskFlowItem,
+        action: TaskFlowAction,
+        result: TaskFlowActionResult,
+        deferredReason: DeferredReason
+    ) {
+        val message = buildString {
+            append(adapter.flowName)
+            append("[")
+            append(item.title)
+            append("] defer=")
+            append(deferredReason)
+            append(" module=")
+            append(adapter.moduleName)
+            append(" taskId=")
+            append(item.id.ifBlank { "UNKNOWN" })
+            append(" taskName=")
+            append(item.title.ifBlank { "UNKNOWN" })
+            append(" status=")
+            append(item.status.ifBlank { "UNKNOWN" })
+            append(" action=")
+            append(action.logName)
+            append(" rpc=")
+            append(result.rpc.ifBlank { action.logName })
+            append(" msg=")
+            append(result.message.ifBlank { deferredReasonLabel(deferredReason) })
+            result.deferredUntil?.let {
+                append(" deferredUntil=")
+                append(it)
+            }
+            if (result.detail.isNotBlank()) {
+                append(" ")
+                append(result.detail)
+            }
+            if (result.raw.isNotBlank()) {
+                append(" raw=")
+                append(result.raw)
+            }
+        }
+        adapter.logInfo(message)
+    }
+
     private fun logFailure(
         item: TaskFlowItem,
         action: TaskFlowAction,
@@ -688,6 +889,57 @@ class TaskFlowEngine(
         }
     }
 
+    private fun logFinalSummary(
+        completed: Boolean,
+        progressed: Boolean,
+        stopped: Boolean,
+        rounds: Int,
+        actionAttempted: Boolean,
+        noProgressSuccess: Boolean,
+        interrupted: Boolean,
+        deferredCount: Int,
+        deferredReasonCounts: Map<DeferredReason, Int>,
+        failureCount: Int
+    ) {
+        val summary = buildString {
+            append(adapter.flowName)
+            when {
+                completed -> append("[本轮完成]")
+                !interrupted && failureCount == 0 -> append("[本轮明确延后]")
+                else -> append("[本轮真实失败]")
+            }
+            append("[轮次:")
+            append(rounds)
+            append("]")
+            append("[动作:")
+            append(actionAttempted)
+            append("]")
+            append("[有进展:")
+            append(progressed)
+            append("]")
+            append("[无确认进展成功:")
+            append(noProgressSuccess)
+            append("]")
+            append("[明确延后:")
+            append(describeDeferredReasonCounts(deferredReasonCounts))
+            append("]")
+            append("[真实失败:")
+            append(failureCount)
+            append("]")
+            if (stopped) {
+                append("[已停止当前链路]")
+            }
+            if (interrupted) {
+                append("[中断]")
+            }
+        }
+        if (!interrupted && failureCount == 0) {
+            adapter.logInfo(summary)
+        } else {
+            adapter.logError(summary)
+        }
+    }
+
     private fun TaskFlowPhase.toAction(): TaskFlowAction? {
         return when (this) {
             TaskFlowPhase.REWARD_READY -> TaskFlowAction.RECEIVE
@@ -707,6 +959,39 @@ class TaskFlowEngine(
             TaskFlowAction.COMPLETE -> "完成任务"
             TaskFlowAction.SIGNUP -> "报名"
             TaskFlowAction.SEND -> "发送任务"
+        }
+    }
+
+    private fun describeDeferredReasonCounts(reasonCounts: Map<DeferredReason, Int>): String {
+        if (reasonCounts.isEmpty()) {
+            return "0"
+        }
+        return reasonCounts.entries.joinToString("，") { (reason, count) ->
+            "${deferredReasonLabel(reason)}x$count"
+        }
+    }
+
+    private fun deferredReasonLabel(reason: DeferredReason): String {
+        return when (reason) {
+            DeferredReason.TIME_WINDOW -> "时间窗口"
+            DeferredReason.CAPACITY_LIMIT -> "容量限制"
+            DeferredReason.STATE_CONFIRMATION -> "状态确认"
+            DeferredReason.PREREQUISITE_PENDING -> "前置待满足"
+            DeferredReason.CHILD_TASK_PENDING -> "子任务待完成"
+            DeferredReason.NO_PROGRESS_COOLDOWN -> "无进展冷却"
+        }
+    }
+
+    private fun deferredActionText(
+        action: TaskFlowAction,
+        reason: DeferredReason,
+        refreshRequested: Boolean
+    ): String {
+        val reasonText = deferredReasonLabel(reason)
+        return if (refreshRequested) {
+            "${action.logName}明确延后($reasonText，补1次回查)"
+        } else {
+            "${action.logName}明确延后($reasonText)"
         }
     }
 

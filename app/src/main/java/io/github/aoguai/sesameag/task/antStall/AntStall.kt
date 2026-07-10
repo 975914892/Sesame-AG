@@ -36,6 +36,7 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.RandomUtil
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.ResChecker
+import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.TimeCounter
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.friend.FriendCapabilityRecorder
@@ -717,7 +718,7 @@ class AntStall : ModelTask() {
                                 .put("rent_last_user", rentLastUser)
                                 .put("biz_start_time", bizStartTime)
                         )
-                        Log.stall("添加蹲点请走⛪在[${TimeUtil.getCommonDate(endTime)}]执行")
+                        Log.stall("新村请走已交给定时子任务⛪将在[${TimeUtil.getCommonDate(endTime)}]执行")
                     }
                 }
             }
@@ -910,7 +911,7 @@ class AntStall : ModelTask() {
                                 .put("rent_last_user", rentLastUser)
                                 .put("gmt_last_rent", gmtLastRent)
                         )
-                        Log.stall("添加蹲点收摊⛪在[${TimeUtil.getCommonDate(shopTime)}]执行")
+                        Log.stall("新村收摊已交给定时子任务⛪将在[${TimeUtil.getCommonDate(shopTime)}]执行")
                     }
                 }
             }
@@ -1507,6 +1508,7 @@ class AntStall : ModelTask() {
             Log.stall("蚂蚁新村💣任务[${item.title}]完成")
             TaskFlowActionResult.success(refreshAfterAction = true)
         } else {
+            tryTreatXlightTaskAsCompletedAfterRefresh(item)?.let { return it }
             TaskFlowActionResult.failure(
                 failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
                 message = "XLight未推进任何事件",
@@ -1514,6 +1516,42 @@ class AntStall : ModelTask() {
                 raw = item.raw?.toString().orEmpty(),
                 detail = stallTaskActionDetail(item, "xlightFinish")
             )
+        }
+    }
+
+    private fun tryTreatXlightTaskAsCompletedAfterRefresh(item: TaskFlowItem): TaskFlowActionResult? {
+        val refreshedResponse = JsonUtil.parseJSONObjectOrNull(AntStallRpcCall.taskList()) ?: return null
+        if (!ResChecker.checkRes(TAG, refreshedResponse)) {
+            return null
+        }
+        val refreshedItems = buildStallTaskItems(refreshedResponse)
+        val refreshedItem = refreshedItems.firstOrNull { refreshed ->
+            item.id.isNotBlank() && refreshed.id == item.id
+        } ?: refreshedItems.firstOrNull { refreshed ->
+            item.title.isNotBlank() && refreshed.title == item.title
+        } ?: return null
+        return when {
+            isStallTerminalStatus(refreshedItem.status) -> {
+                releaseStallTaskBlacklist(refreshedItem)
+                Log.stall("新村浏览任务⚠️[${item.title}] XLight未推进事件，但刷新后已处于终态")
+                TaskFlowActionResult.success()
+            }
+            isStallRewardReadyStatus(refreshedItem.status) -> {
+                releaseStallTaskBlacklist(refreshedItem)
+                Log.stall("新村浏览任务⚠️[${item.title}] XLight未推进事件，但刷新后奖励已可领取")
+                TaskFlowActionResult.success(refreshAfterAction = true)
+            }
+            else -> null
+        }
+    }
+
+    private fun releaseStallTaskBlacklist(item: TaskFlowItem) {
+        if (item.id.isNotBlank()) {
+            TaskBlacklist.removeFromBlacklist(STALL_TASK_BLACKLIST_MODULE, item.id, item.title)
+            TaskBlacklist.removeFromBlacklist(STALL_TASK_BLACKLIST_MODULE, item.id)
+        }
+        if (item.title.isNotBlank()) {
+            TaskBlacklist.removeFromBlacklist(STALL_TASK_BLACKLIST_MODULE, item.title)
         }
     }
 

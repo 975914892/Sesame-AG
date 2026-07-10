@@ -50,8 +50,10 @@ private val sesameCreditDefaultBlacklist = setOf(
     "zml_fengkuangshuishijie_renwu|去玩疯狂水世界", // 参数错误：promiseActivityExtCheck
     "zml_baoweixiangrikui_renwu|去玩保卫向日葵", // 参数错误：promiseActivityExtCheck
     "zml_sanguobingheshidai_renwu|去玩三国冰河时代", // 参数错误：promiseActivityExtCheck
+    "zml_zfbfeizhu_xiadan_sanfang|去飞猪订酒店", // 参数错误：promiseActivityExtCheck，固定跳过
     // 芝麻树 SIGNUP_SEND 游戏/导流任务
     "AP11327686|秒杀浏览",
+    "AP18365439|去天天秒杀下1单", // rentGreenTaskFinish 返回 20020012，任务完成失败
     "AP18344041|去玩我的***世界",
     "AP15358968|去玩斗破苍穹",
     "AP14359058|去玩青云诀之伏魔",
@@ -79,6 +81,7 @@ private val sesameAlchemyDefaultBlacklist = setOf(
     "逛一逛蚂蚁阿福",
     "租游戏账号",
     "芝麻大表鸽",
+    "hjwf_myzy_gyxj_erfang", // 大表鸽/雇佣小鸡模板别名，当前不纳入自动化
     "坚持签到",
     "玩游戏完成10个订单",
     "玩任意游戏30秒",       // 缺少 promiseActivityExtCheck 闭环：ILLEGAL_ARGUMENT
@@ -135,6 +138,9 @@ private val orchardDefaultBlacklist = setOf(
     "ORCHARD_TEAM_SPREAD_PERSON",       // 合种/帮帮种多人施肥
     "ORCHARD_HELP_TEAM_MEMBER_COUNT",   // 帮帮种组队
     "NTFARM_ORCHARD_NORMAL_FQHB_NEW1",  // 去天猫攒福气兑红包
+    "龙迹之城击杀10只怪物",
+    "寻道大千砍树20次",
+    "点击立得，最高3500肥",
     "试玩农场乐园火爆新游",
     "分享给好友",
     "合种/帮帮种多人施肥",
@@ -170,6 +176,7 @@ private val farmDefaultBlacklist = setOf(
 private val oceanDefaultBlacklist = setOf(
     // 神奇海洋
     "玩一玩生存33天",
+    "AIFISH_ZHUANHUA_XJSKP|玩一玩向僵尸开炮", // finishTask 返回 400000040，不支持rpc调用
     "DAOLIU_SCSST_GAME_NEW",
     "LMCT_QDRW_HAIYANG",       // finishTask 返回 400000040，不支持rpc调用
     "CNXDY_QDRW_HAIYANG|随机任务：玩一玩超能下蛋鸭", // finishTask 返回 400000040，不支持rpc调用

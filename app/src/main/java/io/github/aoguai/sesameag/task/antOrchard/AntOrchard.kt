@@ -16,6 +16,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
 import io.github.aoguai.sesameag.task.common.TaskFlowDecision
+import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
@@ -876,7 +877,7 @@ class AntOrchard : ModelTask() {
             val manureFactory = latestListTaskResponse.optJSONObject("manureFactory") ?: return false
             if (!manureFactory.optBoolean("canCollect", false)) {
                 // orchardListTask can keep this task as TODO after the pot has already been collected.
-                logTaskSkipOnce(item, "肥料池当前不可收取，跳过本轮")
+                logTaskSkipOnce(item, "肥料池前置条件未满足，本轮明确延后")
                 return true
             }
             return false
@@ -981,9 +982,9 @@ class AntOrchard : ModelTask() {
     ): TaskFlowActionResult {
         try {
             if (skipManurePotCollectThisRound) {
-                return TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.BUSINESS_LIMIT,
-                    message = "本轮已触发肥料太少保护，跳过重复收取",
+                return TaskFlowActionResult.defer(
+                    deferredReason = DeferredReason.PREREQUISITE_PENDING,
+                    message = "本轮已触发肥料太少保护，等待后续前置动作推进",
                     rpc = "AntOrchardRpcCall.collectManurePot",
                     detail = orchardActionDetail(item, "collectManurePot")
                 )
@@ -998,9 +999,9 @@ class AntOrchard : ModelTask() {
                 )
             }
             if (!manureFactory.optBoolean("canCollect", false)) {
-                return TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.BUSINESS_LIMIT,
-                    message = "当前不可收取（canCollect=false）",
+                return TaskFlowActionResult.defer(
+                    deferredReason = DeferredReason.PREREQUISITE_PENDING,
+                    message = "当前不可收取（canCollect=false），等待后续前置动作推进",
                     rpc = "AntOrchardRpcCall.collectManurePot",
                     detail = orchardActionDetail(item, "collectManurePot")
                 )
@@ -1045,10 +1046,9 @@ class AntOrchard : ModelTask() {
                     .ifBlank { collectResp.optString("desc", collectResp.optString("resultDesc")) }
                 if (resultCode == "G03" || desc.contains("肥料太少")) {
                     skipManurePotCollectThisRound = true
-                    return TaskFlowActionResult.failure(
-                        failureType = TaskRpcFailureType.BUSINESS_LIMIT,
-                        code = resultCode,
-                        message = desc,
+                    return TaskFlowActionResult.defer(
+                        deferredReason = DeferredReason.PREREQUISITE_PENDING,
+                        message = desc.ifBlank { "肥料太少，等待后续前置动作推进" },
                         rpc = "AntOrchardRpcCall.collectManurePot",
                         raw = collectResp.toString(),
                         detail = orchardActionDetail(item, "collectManurePot")

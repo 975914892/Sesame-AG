@@ -66,6 +66,12 @@ interface EnergyCollectCallback {
 /**
  * 收取结果数据类
  */
+enum class WaitingCollectOutcome {
+    SUCCESS,
+    SOFT_EXPIRED,
+    HARD_FAIL
+}
+
 data class CollectResult(
     val success: Boolean,
     val userName: String?,
@@ -76,7 +82,8 @@ data class CollectResult(
     val totalCollected: Int = 0,  // 累加后的总能量
     val failedBubbleIds: Set<Long> = emptySet(),
     val allRequestedBubblesFailed: Boolean = false,
-    val paused: Boolean = false
+    val paused: Boolean = false,
+    val waitingOutcome: WaitingCollectOutcome = WaitingCollectOutcome.SUCCESS
 )
 
 /**
@@ -207,6 +214,7 @@ object EnergyWaitingManager {
     // 蹲点任务存储
     private val waitingTasks = ConcurrentHashMap<String, WaitingTask>()
     private val waitingJobs = ConcurrentHashMap<String, Job>()
+    private val bubbleCooldownTombstones = ConcurrentHashMap<String, Long>()
     private val loggedFrontLaunchDisabledWaitingTasks = ConcurrentHashMap.newKeySet<String>()
 
     // 智能重试策略
@@ -228,6 +236,7 @@ object EnergyWaitingManager {
     // 最小间隔时间（毫秒） - 精确蹲点模式，快速收取
     private const val MIN_INTERVAL_MS = 500L  // 最小0.5秒（精确蹲点模式）
     private const val MAX_INTERVAL_MS = 1500L // 最大1.5秒（精确蹲点模式）
+    private const val FAILED_BUBBLE_COOLDOWN_MS = 30 * 60 * 1000L
 
     // 最大等待时间（毫秒） - 8小时
     private const val MAX_WAIT_TIME_MS = 8 * 60 * 60 * 1000L
@@ -287,6 +296,50 @@ object EnergyWaitingManager {
     private fun taskIdFromForestWaitingDedupeKey(dedupeKey: String): String {
         val body = dedupeKey.removePrefix(FOREST_WAITING_DEDUPE_PREFIX)
         return body.substringAfter("::", body)
+    }
+
+    private fun bubbleCooldownKey(userId: String, bubbleId: Long): String {
+        return "$userId#$bubbleId"
+    }
+
+    private fun cleanupExpiredBubbleCooldowns(now: Long = System.currentTimeMillis()) {
+        for ((key, expireAt) in bubbleCooldownTombstones.entries) {
+            if (expireAt <= now) {
+                bubbleCooldownTombstones.remove(key, expireAt)
+            }
+        }
+    }
+
+    fun isBubbleInCooldown(userId: String, bubbleId: Long, now: Long = System.currentTimeMillis()): Boolean {
+        cleanupExpiredBubbleCooldowns(now)
+        val expireAt = bubbleCooldownTombstones[bubbleCooldownKey(userId, bubbleId)] ?: return false
+        return expireAt > now
+    }
+
+    fun markBubbleNoProgressCooldown(
+        userId: String,
+        bubbleId: Long,
+        reason: String,
+        cooldownMs: Long = FAILED_BUBBLE_COOLDOWN_MS
+    ) {
+        if (userId.isBlank() || bubbleId <= 0L) {
+            return
+        }
+        val expireAt = System.currentTimeMillis() + cooldownMs
+        bubbleCooldownTombstones[bubbleCooldownKey(userId, bubbleId)] = expireAt
+        Log.forest(
+            "森林蹲点冷却墓碑[user=$userId,bubbleId=$bubbleId] 生效至[${TimeUtil.getCommonDate(expireAt)}]，原因：$reason"
+        )
+    }
+
+    private fun markBubbleNoProgressCooldowns(
+        userId: String,
+        bubbleIds: Set<Long>,
+        reason: String
+    ) {
+        for (bubbleId in bubbleIds) {
+            markBubbleNoProgressCooldown(userId, bubbleId, reason)
+        }
     }
 
     private fun isReadyForWaitingExecution(): Boolean {
@@ -547,6 +600,17 @@ object EnergyWaitingManager {
             taskMutex.withLock {
                 val currentTime = System.currentTimeMillis()
                 val taskId = "${userId}_${bubbleId}"
+                cleanupExpiredBubbleCooldowns(currentTime)
+
+                if (isBubbleInCooldown(userId, bubbleId, currentTime)) {
+                    val expireAt = bubbleCooldownTombstones[bubbleCooldownKey(userId, bubbleId)] ?: currentTime
+                    Log.forest(
+                        "跳过蹲点任务[$taskId][userId=$userId,bubbleId=$bubbleId,from=$fromTag]：命中冷却墓碑，等待至[${TimeUtil.getCommonDate(expireAt)}]"
+                    )
+                    removeWaitingTask(taskId)
+                    EnergyWaitingPersistence.saveTasks(waitingTasks)
+                    return@withLock
+                }
 
                 // 检查是否已存在相同的任务
                 val existingTask = waitingTasks[taskId]
@@ -1053,11 +1117,34 @@ object EnergyWaitingManager {
                         }
                     }
                 } else {
-                    Log.forest("❌ 蹲点收取[${task.getUserTypeTag()}${task.userName}]失败：${result.message}")
+                    if (result.waitingOutcome == WaitingCollectOutcome.SOFT_EXPIRED) {
+                        Log.forest("ℹ️ 蹲点收取[${task.getUserTypeTag()}${task.userName}]竞态失效：${result.message}")
+                    } else {
+                        Log.forest("❌ 蹲点收取[${task.getUserTypeTag()}${task.userName}]失败：${result.message}")
+                    }
 
                     // 根据失败原因决定是否重试
                     when {
+                        result.allRequestedBubblesFailed &&
+                            result.waitingOutcome == WaitingCollectOutcome.SOFT_EXPIRED -> {
+                            markBubbleNoProgressCooldowns(
+                                task.userId,
+                                (result.failedBubbleIds + task.bubbleId).filter { it > 0L }.toSet(),
+                                "目标能量球已竞态失效"
+                            )
+                            Log.forest("  → 目标能量球已竞态失效，移除当前气泡蹲点并保留复核后重建的新任务 failedBubbleIds=${result.failedBubbleIds}")
+                            removeWaitingTask(task.taskId)
+                            for (bubbleId in result.failedBubbleIds) {
+                                removeWaitingTask("${task.userId}_${bubbleId}")
+                            }
+                            EnergyWaitingPersistence.saveTasks(waitingTasks)
+                        }
                         result.allRequestedBubblesFailed -> {
+                            markBubbleNoProgressCooldowns(
+                                task.userId,
+                                (result.failedBubbleIds + task.bubbleId).filter { it > 0L }.toSet(),
+                                "服务端标记目标能量球收取失败"
+                            )
                             Log.forest("  → 服务端标记目标能量球收取失败，立即移除当前气泡蹲点并停止普通重试 failedBubbleIds=${result.failedBubbleIds}")
                             removeWaitingTask(task.taskId)
                             for (bubbleId in result.failedBubbleIds) {
@@ -1071,6 +1158,7 @@ object EnergyWaitingManager {
                             EnergyWaitingPersistence.saveTasks(waitingTasks) // 保存更新
                         }
                         result.message.contains("用户无可收取的能量球") -> {
+                            markBubbleNoProgressCooldown(task.userId, task.bubbleId, "主页复核仍无可收取能量球")
                             Log.forest("  → 能量球已不存在，移除任务")
                             removeWaitingTask(task.taskId)
                             EnergyWaitingPersistence.saveTasks(waitingTasks) // 保存更新
@@ -1132,7 +1220,8 @@ object EnergyWaitingManager {
                 CollectResult(
                     success = false,
                     userName = task.userName,
-                    message = "回调未设置"
+                    message = "回调未设置",
+                    waitingOutcome = WaitingCollectOutcome.HARD_FAIL
                 )
             }
         } catch (e: Exception) {
@@ -1140,7 +1229,8 @@ object EnergyWaitingManager {
             CollectResult(
                 success = false,
                 userName = task.userName,
-                message = "异常：${e.message}"
+                message = "异常：${e.message}",
+                waitingOutcome = WaitingCollectOutcome.HARD_FAIL
             )
         }
     }
@@ -1548,6 +1638,10 @@ object EnergyWaitingManager {
                     taskMutex.withLock {
                         try {
                             if (!isRunSessionCurrent(ownerUserId, sessionEpoch)) {
+                                return@withLock false
+                            }
+                            if (isBubbleInCooldown(task.userId, task.bubbleId)) {
+                                Log.forest("任务[${task.taskId}]命中冷却墓碑，跳过恢复")
                                 return@withLock false
                             }
                             // 检查任务是否已经存在（避免重复添加）

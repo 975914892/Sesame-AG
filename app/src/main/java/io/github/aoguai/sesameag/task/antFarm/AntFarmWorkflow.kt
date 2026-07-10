@@ -171,9 +171,6 @@ internal suspend fun AntFarm.runFarmSocialWorkflow(
         tc.countDebug("抽抽乐")
         ChouChouLe().run(this)
         handleMultiStageTasksLoop()
-        if (pendingFinalization) {
-            pendingFinalization = finalizeFarmTaskAfterMultiStage("抽抽乐流程后")
-        }
         refreshFarmStatus("抽抽乐流程后")
     }
 
@@ -184,9 +181,6 @@ internal suspend fun AntFarm.runFarmSocialWorkflow(
     if (enableDdrawGameCenterAward?.value == true) {
         FarmGame.drawGameCenterAward()
         tc.countDebug("开宝箱")
-        if (pendingFinalization) {
-            pendingFinalization = finalizeFarmTaskAfterMultiStage("开宝箱流程后")
-        }
     }
     if (paradiseCoinExchangeBenefit?.value == true) {
         paradiseCoinExchangeBenefit()
@@ -209,7 +203,7 @@ internal suspend fun AntFarm.runFarmFinalizeWorkflow(
     tc.countDebug("小鸡睡觉&起床")
 
     if (pendingFarmTaskFinalization) {
-        finalizeFarmTaskAfterMultiStage("睡觉流程后")
+        finalizeFarmTaskAfterMultiStage("抽抽乐/开宝箱/睡觉流程尾刷")
     }
 
     syncAnimalStatus(ownerFarmId)

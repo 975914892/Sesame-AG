@@ -19,7 +19,7 @@ object SettingsTransferCodec {
 
     fun encodePackage(settingsPackage: SettingsTransferPackageV1): String {
         return JsonUtil.copyMapper()
-            .apply { setSerializationInclusion(JsonInclude.Include.ALWAYS) }
+            .apply { setDefaultPropertyInclusion(JsonInclude.Include.ALWAYS) }
             .writerWithDefaultPrettyPrinter()
             .writeValueAsString(settingsPackage)
     }
@@ -37,12 +37,12 @@ object SettingsTransferCodec {
         }
         val knownModelCodes = Model.getModelConfigMap().keys
         val snapshot = ConfigTransferSnapshot()
-        modelsNode.fields().forEach { (modelCode, modelNode) ->
+        modelsNode.properties().forEach { (modelCode, modelNode) ->
             if (!knownModelCodes.contains(modelCode) || !modelNode.isObject) {
                 return@forEach
             }
             val fieldMap = linkedMapOf<String, String?>()
-            modelNode.fields().forEach { (fieldCode, fieldNode) ->
+            modelNode.properties().forEach { (fieldCode, fieldNode) ->
                 val field = Model.getModelConfigMap()[modelCode]?.getModelField(fieldCode)
                 fieldMap[fieldCode] = extractLegacyConfigValue(fieldNode, field, mapper)
             }

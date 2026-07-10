@@ -250,6 +250,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
     private var robMultiplierCard: ChoiceModelField? = null // 收好友N倍卡
     private var robMultiplierCardTime: TimeTriggerModelField? = null // 收好友N倍卡时间
+    private var robMultiplierCardReplaceRemainDays: IntegerModelField? = null // 高倍率替换剩余天数
+    private var robMultiplierCardForceReplaceExpireDays: IntegerModelField? = null // 临期强制替换天数
 
     private var cycleinterval: IntegerModelField? = null
     internal var energyRainChance: BooleanModelField? = null
@@ -645,6 +647,28 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 )
             ).withDesc("仅在这些时间点或允许时间段内尝试使用非限时收好友 N 倍卡；支持 HHmm、HHmm-HHmm，填 -1 关闭。").also {
                 robMultiplierCardTime = it
+            }
+        )
+        modelFields.addField(
+            IntegerModelField(
+                "robExpandCardReplaceRemainDays",
+                "收好友N倍卡 | 高倍率替换剩余天数",
+                7,
+                0,
+                365
+            ).withDesc("当前生效卡剩余时间小于等于该天数时，才允许自动替换为更高倍率卡；填 0 关闭普通高倍率替换。").also {
+                robMultiplierCardReplaceRemainDays = it
+            }
+        )
+        modelFields.addField(
+            IntegerModelField(
+                "robExpandCardForceReplaceExpireDays",
+                "收好友N倍卡 | 临期强制替换天数",
+                1,
+                0,
+                365
+            ).withDesc("更高倍率候选卡在背包中的剩余可使用时间小于等于该天数时，允许无视普通替换阈值和时长保护直接替换；填 0 关闭临期强制替换。").also {
+                robMultiplierCardForceReplaceExpireDays = it
             }
         )
         modelFields.addField(
@@ -2592,7 +2616,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
      * @param bubbleIds   能量球ID列表
      * @param fromTag     收取来源标识
      */
-    @Throws(JSONException::class)
+    private data class CollectVivaResult(
+        val failedBubbleIds: Set<Long>,
+        val allFailedBubblesExpired: Boolean
+    )
+
     /**
      * 收取活力能量
      * @param userId 用户ID
@@ -2601,6 +2629,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
      * @param fromTag 来源标识
      * @param skipPropCheck 是否跳过道具检查（用于蹲点收取快速通道）
      */
+    @Throws(JSONException::class)
     private fun collectVivaEnergy(
         userId: String?,
         userHomeObj: JSONObject?,
@@ -2608,11 +2637,12 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         fromTag: String?,
         skipPropCheck: Boolean = false,
         rpcSource: String? = null
-    ): Set<Long> {
+    ): CollectVivaResult {
         val bizType = "GREEN"
         val failedBubbleIds = linkedSetOf<Long>()
-        val safeUserId = userId ?: return failedBubbleIds
-        if (bubbleIds.isEmpty()) return failedBubbleIds
+        val safeUserId = userId ?: return CollectVivaResult(emptySet(), false)
+        if (bubbleIds.isEmpty()) return CollectVivaResult(emptySet(), false)
+        var allFailedBubblesExpired = true
         val isBatchCollect = shouldUseBatchRobEnergyOnForestHomePage(fromTag, bubbleIds.size)
         if (isBatchCollect) {
             var i = 0
@@ -2630,6 +2660,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 )
                 collectEnergy(collectEnergyEntity)
                 failedBubbleIds.addAll(collectEnergyEntity.failedBubbleIds)
+                if (collectEnergyEntity.failedBubbleIds.isNotEmpty()) {
+                    allFailedBubblesExpired = allFailedBubblesExpired && collectEnergyEntity.areAllFailedBubblesExpired()
+                }
                 i += MAX_BATCH_SIZE
             }
         } else {
@@ -2645,9 +2678,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 )
                 collectEnergy(collectEnergyEntity)
                 failedBubbleIds.addAll(collectEnergyEntity.failedBubbleIds)
+                if (collectEnergyEntity.failedBubbleIds.isNotEmpty()) {
+                    allFailedBubblesExpired = allFailedBubblesExpired && collectEnergyEntity.areAllFailedBubblesExpired()
+                }
             }
         }
-        return failedBubbleIds
+        return CollectVivaResult(
+            failedBubbleIds = failedBubbleIds,
+            allFailedBubblesExpired = failedBubbleIds.isNotEmpty() && allFailedBubblesExpired
+        )
     }
 
     // “一键收取”配置只对应好友/PK 好友主页的批量按钮语义，不能外溢到找能量或蹲点链路。
@@ -3615,6 +3654,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     val failedBubbleIds = jo.optJSONArray("failedBubbleIds")
                     if (failedBubbleIds != null && failedBubbleIds.length() > 0) {
                         collectEnergyEntity.recordFailedBubbleIds(failedBubbleIds)
+                        collectEnergyEntity.recordFailedBubbleStates(jo)
                         Log.runtime(TAG, "[" + getAndCacheUserName(userId) + "]收取能量部分成功: " + jo.optString("resultDesc") + ", failedBubbleIds=" + failedBubbleIds)
                     }
                 }
@@ -7451,6 +7491,19 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         )
     }
 
+    private fun sortRobMultiplierUrgentCandidates(candidates: MutableList<RobMultiplierCandidate>) {
+        Collections.sort(
+            candidates,
+            Comparator { c1: RobMultiplierCandidate, c2: RobMultiplierCandidate ->
+                when {
+                    c1.expireTime != c2.expireTime -> c1.expireTime.compareTo(c2.expireTime)
+                    !isSameRobMultiplierFactor(c1.factor, c2.factor) -> c2.factor.compareTo(c1.factor)
+                    else -> c1.durationMs.compareTo(c2.durationMs)
+                }
+            }
+        )
+    }
+
     private fun selectPreferredRobMultiplierProp(
         bagObject: JSONObject?,
         now: Long = System.currentTimeMillis()
@@ -7477,23 +7530,59 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
         val higherCandidates = candidates.filter { it.factor > active.factor + ROB_MULTIPLIER_FACTOR_EPS }
             .toMutableList()
-        val safeHigherCandidates = higherCandidates.filter { it.durationMs >= activeRemainingMs }
-            .toMutableList()
-        if (safeHigherCandidates.isNotEmpty()) {
-            sortRobMultiplierCandidates(safeHigherCandidates)
-            val selected = safeHigherCandidates.first()
-            Log.forest(
-                "准备用更高倍率${formatRobMultiplierFactor(selected.factor)}倍卡[${selected.propName}]" +
-                        "替换当前${formatRobMultiplierFactor(active.factor)}倍卡，候选时长不短于当前剩余时间"
-            )
-            return selected
-        } else if (higherCandidates.isNotEmpty()) {
-            sortRobMultiplierCandidates(higherCandidates)
-            val bestHigher = higherCandidates.first()
-            Log.forest(
-                "跳过更高倍率${formatRobMultiplierFactor(bestHigher.factor)}倍卡[${bestHigher.propName}]，" +
-                        "候选时长${formatTimeDifference(bestHigher.durationMs)}短于当前剩余${formatTimeDifference(activeRemainingMs)}，避免替换浪费"
-            )
+        if (higherCandidates.isNotEmpty()) {
+            val forceReplaceExpireDays = (robMultiplierCardForceReplaceExpireDays?.value ?: 0).coerceAtLeast(0)
+            if (forceReplaceExpireDays > 0) {
+                val forceReplaceExpireMs = forceReplaceExpireDays * TimeFormatter.ONE_DAY_MS
+                val urgentHigherCandidates = higherCandidates.filter { candidate ->
+                    candidate.expireTime != Long.MAX_VALUE && candidate.expireTime - now <= forceReplaceExpireMs
+                }.toMutableList()
+                if (urgentHigherCandidates.isNotEmpty()) {
+                    sortRobMultiplierUrgentCandidates(urgentHigherCandidates)
+                    val selected = urgentHigherCandidates.first()
+                    val candidateRemainingMs = (selected.expireTime - now).coerceAtLeast(0L)
+                    Log.forest(
+                        "更高倍率${formatRobMultiplierFactor(selected.factor)}倍卡[${selected.propName}]背包剩余" +
+                                "${formatTimeDifference(candidateRemainingMs)}，满足临期强制替换条件(${forceReplaceExpireDays}天)，" +
+                                "直接替换当前${formatRobMultiplierFactor(active.factor)}倍卡"
+                    )
+                    return selected
+                }
+            }
+
+            val replaceRemainDays = (robMultiplierCardReplaceRemainDays?.value ?: 0).coerceAtLeast(0)
+            if (replaceRemainDays > 0) {
+                val replaceRemainMs = replaceRemainDays * TimeFormatter.ONE_DAY_MS
+                if (activeRemainingMs <= replaceRemainMs) {
+                    val safeHigherCandidates = higherCandidates.filter { it.durationMs >= activeRemainingMs }
+                        .toMutableList()
+                    if (safeHigherCandidates.isNotEmpty()) {
+                        sortRobMultiplierCandidates(safeHigherCandidates)
+                        val selected = safeHigherCandidates.first()
+                        Log.forest(
+                            "当前${formatRobMultiplierFactor(active.factor)}倍卡剩余${formatTimeDifference(activeRemainingMs)}，" +
+                                    "已到高倍率替换阈值(${replaceRemainDays}天)，准备用更高倍率" +
+                                    "${formatRobMultiplierFactor(selected.factor)}倍卡[${selected.propName}]替换"
+                        )
+                        return selected
+                    }
+                    sortRobMultiplierCandidates(higherCandidates)
+                    val bestHigher = higherCandidates.first()
+                    Log.forest(
+                        "当前${formatRobMultiplierFactor(active.factor)}倍卡剩余${formatTimeDifference(activeRemainingMs)}，" +
+                                "已到高倍率替换阈值(${replaceRemainDays}天)，但更高倍率" +
+                                "${formatRobMultiplierFactor(bestHigher.factor)}倍卡[${bestHigher.propName}]候选时长" +
+                                "${formatTimeDifference(bestHigher.durationMs)}短于当前剩余${formatTimeDifference(activeRemainingMs)}，跳过普通替换"
+                    )
+                } else {
+                    Log.forest(
+                        "当前${formatRobMultiplierFactor(active.factor)}倍卡剩余${formatTimeDifference(activeRemainingMs)}，" +
+                                "未到高倍率替换阈值(${replaceRemainDays}天)，跳过普通高倍率替换"
+                    )
+                }
+            } else {
+                Log.forest("高倍率普通替换已关闭，跳过更高倍率收好友N倍卡自动替换")
+            }
         }
 
         val sameFactorCandidates = candidates.filter {
@@ -9209,7 +9298,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     userName = userName,
                     message = "有保护，已跳过",
                     hasShield = hasShield,
-                    hasBomb = hasBomb
+                    hasBomb = hasBomb,
+                    waitingOutcome = WaitingCollectOutcome.HARD_FAIL
                 )
             }
 
@@ -9222,7 +9312,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val queryResult = collectEnergy(userId, userHomeObj, fromTag) ?: return CollectResult(
                 success = false,
                 userName = userName,
-                message = "无法查询用户能量信息"
+                message = "无法查询用户能量信息",
+                waitingOutcome = WaitingCollectOutcome.HARD_FAIL
             )
 
             // 提取可收取的能量球ID
@@ -9241,7 +9332,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 return CollectResult(
                     success = false,
                     userName = userName,
-                    message = "用户无可收取的能量球"
+                    message = "用户无可收取的能量球",
+                    waitingOutcome = WaitingCollectOutcome.HARD_FAIL
                 )
             }
 
@@ -9251,7 +9343,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val beforeTotal = totalCollected
 
             // 🚀 启用快速收取通道：跳过道具检查，加速蹲点收取
-            val failedBubbleIds = collectVivaEnergy(userId, queryResult, availableBubbles, fromTag, skipPropCheck = true)
+            val collectVivaResult = collectVivaEnergy(
+                userId,
+                queryResult,
+                availableBubbles,
+                fromTag,
+                skipPropCheck = true
+            )
+            val failedBubbleIds = collectVivaResult.failedBubbleIds
 
             // 计算收取的能量数量
             val collectedEnergy = totalCollected - beforeTotal
@@ -9265,7 +9364,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     energyCount = collectedEnergy,
                     totalCollected = totalCollected,
                     message = "收取成功，共收取${availableBubbles.size}个能量球，${collectedEnergy}g能量",
-                    failedBubbleIds = failedBubbleIds
+                    failedBubbleIds = failedBubbleIds,
+                    waitingOutcome = WaitingCollectOutcome.SUCCESS
                 )
             } else if (allRequestedFailed) {
                 CollectResult(
@@ -9273,13 +9373,19 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     userName = userName,
                     message = "服务端标记目标能量球收取失败",
                     failedBubbleIds = failedBubbleIds,
-                    allRequestedBubblesFailed = true
+                    allRequestedBubblesFailed = true,
+                    waitingOutcome = if (collectVivaResult.allFailedBubblesExpired) {
+                        WaitingCollectOutcome.SOFT_EXPIRED
+                    } else {
+                        WaitingCollectOutcome.HARD_FAIL
+                    }
                 )
             } else {
                 CollectResult(
                     success = false,
                     userName = userName,
-                    message = "未收取到任何能量"
+                    message = "未收取到任何能量",
+                    waitingOutcome = WaitingCollectOutcome.HARD_FAIL
                 )
             }
         } catch (e: Exception) {
@@ -9287,7 +9393,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return CollectResult(
                 success = false,
                 userName = userName,
-                message = "收取异常：${e.message}"
+                message = "收取异常：${e.message}",
+                waitingOutcome = WaitingCollectOutcome.HARD_FAIL
             )
         }
     }
@@ -9301,26 +9408,88 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
     }
 
+    private data class WaitingFailedCollectRecheckResult(
+        val message: String,
+        val outcome: WaitingCollectOutcome
+    )
+
     private fun recheckWaitingBubblesAfterFailedCollect(
         task: EnergyWaitingManager.WaitingTask,
         userName: String?,
-        failedBubbleIds: Set<Long>
-    ): String {
+        failedBubbleIds: Set<Long>,
+        initialOutcome: WaitingCollectOutcome
+    ): WaitingFailedCollectRecheckResult {
         val latestHome = queryWaitingTargetHome(task)
-            ?: return "服务端标记目标能量球收取失败，主页复核失败"
+            ?: return WaitingFailedCollectRecheckResult(
+                message = if (initialOutcome == WaitingCollectOutcome.SOFT_EXPIRED) {
+                    "目标能量球已竞态失效，主页复核失败"
+                } else {
+                    "服务端标记目标能量球收取失败，主页复核失败"
+                },
+                outcome = initialOutcome
+            )
         val latestUserName = getAndCacheUserName(task.userId, latestHome, task.fromTag)
             ?: userName
             ?: task.userName
+        val finalOutcome = classifyWaitingFailedBubbleOutcome(latestHome, failedBubbleIds, initialOutcome)
         val rebuiltCount = rebuildWaitingTasksAfterFailedCollect(
             task,
             latestHome,
             latestUserName,
             failedBubbleIds
         )
-        return if (rebuiltCount > 0) {
-            "服务端标记目标能量球收取失败，已复核并重建${rebuiltCount}个新蹲点任务"
+        val messagePrefix = if (finalOutcome == WaitingCollectOutcome.SOFT_EXPIRED) {
+            "目标能量球已竞态失效"
         } else {
-            "服务端标记目标能量球收取失败，已复核未发现新的可蹲点能量球"
+            "服务端标记目标能量球收取失败"
+        }
+        val message = if (rebuiltCount > 0) {
+            "$messagePrefix，已复核并重建${rebuiltCount}个新蹲点任务"
+        } else {
+            "$messagePrefix，已复核未发现新的可蹲点能量球"
+        }
+        return WaitingFailedCollectRecheckResult(message, finalOutcome)
+    }
+
+    private fun classifyWaitingFailedBubbleOutcome(
+        latestHome: JSONObject,
+        failedBubbleIds: Set<Long>,
+        initialOutcome: WaitingCollectOutcome
+    ): WaitingCollectOutcome {
+        if (initialOutcome == WaitingCollectOutcome.SOFT_EXPIRED) {
+            return WaitingCollectOutcome.SOFT_EXPIRED
+        }
+        if (failedBubbleIds.isEmpty()) {
+            return initialOutcome
+        }
+        val bubbles = if (isTeam(latestHome)) {
+            latestHome.optJSONObject("teamHomeResult")
+                ?.optJSONObject("mainMember")
+                ?.optJSONArray("bubbles")
+        } else {
+            latestHome.optJSONArray("bubbles")
+        } ?: return initialOutcome
+
+        val bubbleStateMap = HashMap<Long, JSONObject>()
+        for (i in 0 until bubbles.length()) {
+            val bubble = bubbles.optJSONObject(i) ?: continue
+            val bubbleId = bubble.optLong("id", 0L)
+            if (bubbleId > 0L) {
+                bubbleStateMap[bubbleId] = bubble
+            }
+        }
+        val allExpired = failedBubbleIds.all { bubbleId ->
+            val bubble = bubbleStateMap[bubbleId] ?: return@all true
+            val collectStatus = bubble.optString("collectStatus")
+            bubble.optBoolean("robbedToday") ||
+                bubble.optBoolean("unavailable") ||
+                collectStatus.equals(CollectStatus.ROBBED.name, ignoreCase = true) ||
+                collectStatus.equals("COLLECTED", ignoreCase = true)
+        }
+        return if (allExpired) {
+            WaitingCollectOutcome.SOFT_EXPIRED
+        } else {
+            WaitingCollectOutcome.HARD_FAIL
         }
     }
 
@@ -9331,6 +9500,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         failedBubbleIds: Set<Long>
     ): Int {
         val serverTime = userHomeObj.optLong("now", System.currentTimeMillis())
+        val effectiveNow = maxOf(serverTime, System.currentTimeMillis())
         val isSelf = task.isSelf()
         val excludedBubbleIds = failedBubbleIds + task.bubbleId
         val bubbles = if (isTeam(userHomeObj)) {
@@ -9362,10 +9532,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
 
             val produceTime = bubble.optLong("produceTime", 0L)
-            if (produceTime <= serverTime) {
+            if (produceTime <= effectiveNow) {
                 continue
             }
-            if (!isSelf && shouldSkipWaitingTaskDueToProtection(userHomeObj, produceTime, serverTime)) {
+            if (!isSelf && shouldSkipWaitingTaskDueToProtection(userHomeObj, produceTime, effectiveNow)) {
                 continue
             }
             if (EnergyWaitingManager.hasWaitingTask(task.userId, bubbleId, produceTime)) {
@@ -9385,9 +9555,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
         val safeUserName = userName ?: task.userName
         if (rebuiltCount > 0) {
-            Log.forest("蹲点失败复核[$safeUserName]：跳过 failedBubbleIds=$excludedBubbleIds，已重建${rebuiltCount}个新蹲点任务")
+            Log.forest("蹲点复核[$safeUserName]：跳过 failedBubbleIds=$excludedBubbleIds，已重建${rebuiltCount}个新蹲点任务")
         } else {
-            Log.forest("蹲点失败复核[$safeUserName]：跳过 failedBubbleIds=$excludedBubbleIds，未发现新的可蹲点能量球")
+            Log.forest("蹲点复核[$safeUserName]：跳过 failedBubbleIds=$excludedBubbleIds，未发现新的可蹲点能量球")
         }
         return rebuiltCount
     }
@@ -9421,7 +9591,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 success = false,
                 userName = task.userName,
                 message = EnergyWaitingManager.WAITING_PAUSED_COLLECT_DISABLED,
-                paused = true
+                paused = true,
+                waitingOutcome = WaitingCollectOutcome.SUCCESS
             )
         }
         return try {
@@ -9441,17 +9612,28 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             Log.printStackTrace(TAG, "蹲点后领取N倍卡能量失败", it)
                         }
                     }
-                    val finalMessage = if (result.allRequestedBubblesFailed) {
-                        recheckWaitingBubblesAfterFailedCollect(task, realUserName, result.failedBubbleIds)
+                    val finalResult = if (result.allRequestedBubblesFailed) {
+                        val recheckResult = recheckWaitingBubblesAfterFailedCollect(
+                            task,
+                            realUserName,
+                            result.failedBubbleIds,
+                            result.waitingOutcome
+                        )
+                        result.copy(
+                            userName = realUserName,
+                            message = recheckResult.message,
+                            waitingOutcome = recheckResult.outcome
+                        )
                     } else {
-                        result.message
+                        result.copy(userName = realUserName)
                     }
-                    result.copy(userName = realUserName, message = finalMessage)
+                    finalResult
                 } else {
                     CollectResult(
                         success = false,
                         userName = task.userName,
-                        message = "无法获取用户主页信息"
+                        message = "无法获取用户主页信息",
+                        waitingOutcome = WaitingCollectOutcome.HARD_FAIL
                     )
                 }
             }
@@ -9464,7 +9646,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             CollectResult(
                 success = false,
                 userName = task.userName,
-                message = "异常：${e.message}"
+                message = "异常：${e.message}",
+                waitingOutcome = WaitingCollectOutcome.HARD_FAIL
             )
         }
     }

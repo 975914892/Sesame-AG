@@ -230,6 +230,35 @@ object EnergyWaitingPersistence {
         }
     }
 
+    private fun extractHomeBubbles(userHomeObj: org.json.JSONObject): org.json.JSONArray? {
+        val teamHomeResult = userHomeObj.optJSONObject("teamHomeResult")
+        if (teamHomeResult != null) {
+            return teamHomeResult.optJSONObject("mainMember")?.optJSONArray("bubbles")
+        }
+        return userHomeObj.optJSONArray("bubbles")
+    }
+
+    private fun hasCollectableRestoredBubble(
+        userHomeObj: org.json.JSONObject,
+        bubbleId: Long,
+        effectiveNow: Long
+    ): Boolean {
+        val bubbles = extractHomeBubbles(userHomeObj) ?: return false
+        for (i in 0 until bubbles.length()) {
+            val bubble = bubbles.optJSONObject(i) ?: continue
+            if (bubble.optLong("id", 0L) != bubbleId) {
+                continue
+            }
+            val collectStatus = bubble.optString("collectStatus")
+            val produceTime = bubble.optLong("produceTime", 0L)
+            return produceTime <= effectiveNow &&
+                !bubble.optBoolean("robbedToday") &&
+                !bubble.optBoolean("unavailable") &&
+                collectStatus.equals("WAITING", ignoreCase = true)
+        }
+        return false
+    }
+
     /**
      * 验证并重新添加恢复的任务
      *
@@ -325,6 +354,21 @@ object EnergyWaitingPersistence {
                     )
                     skippedCount++
                 } else {
+                    val effectiveNow = maxOf(System.currentTimeMillis(), userHomeObj.optLong("now", 0L))
+                    if (task.produceTime <= effectiveNow &&
+                        !hasCollectableRestoredBubble(userHomeObj, task.bubbleId, effectiveNow)
+                    ) {
+                        EnergyWaitingManager.markBubbleNoProgressCooldown(
+                            task.userId,
+                            task.bubbleId,
+                            "持久化恢复复核仍不可收"
+                        )
+                        Log.forest(
+                            "  ⏸ 跳过[${task.getUserTypeTag()}${task.userName}]球[${task.bubbleId}]：已成熟但主页复核仍不可收，进入30分钟冷却"
+                        )
+                        skippedCount++
+                        return@forEach
+                    }
                     // 好友任务有效，重新添加
                     val success = addTaskCallback(task)
                     if (success) {

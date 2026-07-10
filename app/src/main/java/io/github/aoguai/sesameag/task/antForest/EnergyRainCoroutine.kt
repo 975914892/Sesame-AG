@@ -402,7 +402,7 @@ object EnergyRainCoroutine {
         val thirdLevel: String
     ) {
         val attemptKey: String
-            get() = listOf(taskType, appId.orEmpty(), taskStatus).joinToString("#")
+            get() = listOf(taskType, appId.orEmpty()).joinToString("#")
     }
 
     /**

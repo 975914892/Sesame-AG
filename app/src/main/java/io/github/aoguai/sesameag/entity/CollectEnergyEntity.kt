@@ -3,6 +3,11 @@ package io.github.aoguai.sesameag.entity
 import org.json.JSONArray
 import org.json.JSONObject
 
+data class FailedBubbleState(
+    val robbedToday: Boolean,
+    val unavailable: Boolean
+)
+
 /**
  * 表示一个能量收集实体，包含用户信息及操作相关的状态。
  *
@@ -37,6 +42,9 @@ data class CollectEnergyEntity(
 
     /** 本次 RPC 返回的失败能量球 ID，仅用于收取结果诊断 */
     val failedBubbleIds: MutableSet<Long> = linkedSetOf()
+
+    /** 失败能量球在服务端返回中的状态快照，仅用于蹲点结果分级 */
+    val failedBubbleStates: MutableMap<Long, FailedBubbleState> = linkedMapOf()
 
     /**
      * 增加尝试次数
@@ -92,6 +100,29 @@ data class CollectEnergyEntity(
                 else -> raw?.toString()?.toLongOrNull()
             } ?: continue
             failedBubbleIds.add(id)
+        }
+    }
+
+    fun recordFailedBubbleStates(response: JSONObject?) {
+        val bubbles = response?.optJSONArray("bubbles") ?: return
+        for (i in 0 until bubbles.length()) {
+            val bubble = bubbles.optJSONObject(i) ?: continue
+            val bubbleId = bubble.optLong("id", 0L)
+            if (bubbleId <= 0L || bubbleId !in failedBubbleIds) {
+                continue
+            }
+            failedBubbleStates[bubbleId] = FailedBubbleState(
+                robbedToday = bubble.optBoolean("robbedToday"),
+                unavailable = bubble.optBoolean("unavailable")
+            )
+        }
+    }
+
+    fun areAllFailedBubblesExpired(): Boolean {
+        return failedBubbleIds.isNotEmpty() && failedBubbleIds.all { bubbleId ->
+            failedBubbleStates[bubbleId]?.let { state ->
+                state.robbedToday || state.unavailable
+            } == true
         }
     }
 }
