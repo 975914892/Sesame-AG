@@ -791,6 +791,18 @@ object AntSportsRpcCall {
     }
 
     /**
+     * @brief 查询城市见闻详情及其关联路线
+     *
+     * @remark 对应抓包：com.alipay.sportsplay.biz.rpc.walk.queryCityKnowledgeDetail
+     */
+    fun queryCityKnowledgeDetail(cityId: String): String {
+        return RequestManager.requestString(
+            "com.alipay.sportsplay.biz.rpc.walk.queryCityKnowledgeDetail",
+            """[{"chInfo":"medical_health","cityId":"$cityId","clientOS":"android","features":$FEATURES}]"""
+        )
+    }
+
+    /**
      * @brief 查询城市见闻领取汇总
      *
      * @remark 对应抓包：com.alipay.sportsplay.biz.rpc.walk.queryCityKnowledgeSummary

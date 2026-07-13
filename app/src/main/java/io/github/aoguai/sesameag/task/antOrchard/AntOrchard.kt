@@ -52,7 +52,6 @@ class AntOrchard : ModelTask() {
         private const val ORCHARD_JUMP_TYPE_NEED_CHECK = "NEED_CHECK"
         private val LEYUAN_AWARD_TASK_TYPES = setOf("DAILY_LEYUAN_QIANDAO", "DAILY_GAME_ZADAN*20")
         private val SUPPORTED_TAOBAO_LIMIT_BALLOON_IDS = setOf("TAOBAO_LIMIT", "TAOBAO")
-        private val SUPPORTED_TAOBAO_VISIT_SOURCES = setOf("task_visit", "visittask")
         private val TAOBAO_VISIT_LEGACY_TITLES = setOf("逛助农好货得肥料", "逛农货得肥料")
         private val ORCHARD_BUSINESS_LIMIT_CODES = setOf(
             "CAMP_TRIGGER_ERROR",
@@ -1504,35 +1503,24 @@ class AntOrchard : ModelTask() {
 
     private fun resolveTaobaoVisitSource(task: JSONObject): String? {
         val targetUrl = task.optJSONObject("taskDisplayConfig")?.optString("targetUrl").orEmpty()
-        val source = UrlUtil.getParamValue(targetUrl, "source").orEmpty()
-        return source.takeIf { SUPPORTED_TAOBAO_VISIT_SOURCES.contains(it) }
+        return UrlUtil.getParamValue(targetUrl, "source")?.takeIf { it.isNotBlank() }
     }
 
-    private fun isSupportedTaobaoVisitTask(task: JSONObject): Boolean {
-        if (!isTaobaoVisitTask(task)) return false
-        if (task.optString("groupId") != TAOBAO_VISIT_TASK_GROUP_ID) return false
-        if (task.optString("sceneCode") != TAOBAO_VISIT_SCENE_CODE) return false
-
-        if (resolveTaobaoVisitSource(task) == null) return false
-        val taskDisplayConfig = task.optJSONObject("taskDisplayConfig")
-        val desc = taskDisplayConfig?.optString("desc").orEmpty()
-        val subTitle = taskDisplayConfig?.optString("subTitle").orEmpty()
-        val textHints = listOf(desc, subTitle)
-        return textHints.any { hint ->
-            hint.contains("15秒") && (hint.contains("浏览") || hint.contains("逛"))
-        }
-    }
+    private fun isSupportedTaobaoVisitTask(task: JSONObject): Boolean =
+        isTaobaoVisitTask(task) &&
+            task.optString("groupId") == TAOBAO_VISIT_TASK_GROUP_ID &&
+            task.optString("sceneCode") == TAOBAO_VISIT_SCENE_CODE &&
+            resolveTaobaoVisitSource(task) != null
 
     private fun executeTaobaoVisitTask(task: JSONObject, item: TaskFlowItem): TaskFlowActionResult {
         val title = item.title
         val taskId = task.optString("taskId")
         val actualSource = resolveTaobaoVisitSource(task)
         if (actualSource == null || !isSupportedTaobaoVisitTask(task)) {
-            Log.orchard("农场任务⏭️[$title] TAOBAO浏览任务暂不自动处理，当前仅支持已抓包证实的 task_visit/visittask 浏览15秒链路"
-            )
+            Log.orchard("农场任务⏭️[$title] TAOBAO浏览任务缺少已验证的任务结构，保留后续重试机会")
             return TaskFlowActionResult.failure(
-                failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
-                message = "TAOBAO浏览任务未匹配已验证链路",
+                failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                message = "TAOBAO浏览任务未匹配已验证结构",
                 rpc = "AntOrchardRpcCall.orchardSimple",
                 raw = task.toString(),
                 detail = orchardActionDetail(item, "taobaoVisit")

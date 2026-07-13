@@ -16,11 +16,10 @@ import java.util.UUID
 object AntStallRpcCall {
 
     /** 接口版本号 */
-    private const val VERSION = "0.1.2606011409.44"
+    private const val VERSION = "0.1.2607061424.40"
     private const val BASE_SOURCE = "ch_appcenter__chsub_9patch"
     private const val IEP_SOURCE = "AST"
     private const val SHARE_SOURCE = "ANTSTALL"
-    private const val RANK_SOURCE = "ANTFARM"
     private const val XLIGHT_AD_COMPONENT_TYPE = "FEEDS"
     private const val XLIGHT_AD_COMPONENT_VERSION = "4.30.62"
     private const val XLIGHT_ENABLE_FUSION = true
@@ -145,15 +144,15 @@ object AntStallRpcCall {
     }
 
     /**
-     * @brief 捐赠排名金币
+     * @brief 查询新村捐赠排行榜
+     * @param startNum 服务端分页游标
      * @return 响应字符串
      */
-    fun rankCoinDonate(): String {
-        return RequestManager.requestString(
-            "com.alipay.antstall.rank.coin.donate",
-            "[{\"source\":\"$RANK_SOURCE\",\"systemType\":\"android\",\"version\":\"$VERSION\"}]"
+    fun rankDonateCount(startNum: Int): String =
+        RequestManager.requestString(
+            "com.alipay.antstall.rank.donate.count",
+            "[{\"source\":\"$BASE_SOURCE\",\"startNum\":$startNum,\"systemType\":\"android\",\"version\":\"$VERSION\"}]",
         )
-    }
 
     /**
      * @brief 进入好友的小铺首页

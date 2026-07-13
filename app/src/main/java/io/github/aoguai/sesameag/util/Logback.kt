@@ -28,6 +28,9 @@ object Logback {
     private var appContext: Context? = null
     private var nextMidnightMillis: Long = 0
 
+    // capture.log is shared with the module UI process, so only the Host enables it after loading account config.
+    private var isCaptureFileAppenderEnabled = false
+
     /**
      * 初始化 Logcat (保证控制台一定有日志)
      * 在 Log 类的 init 块中自动调用
@@ -37,24 +40,25 @@ object Logback {
             val lc = LoggerFactory.getILoggerFactory() as LoggerContext
             lc.reset() // 清除之前的配置
 
-            val encoder = PatternLayoutEncoder().apply {
-                context = lc
-                pattern = "[%thread] %logger{80} %msg%n"
-                start()
-            }
+            val encoder =
+                PatternLayoutEncoder().apply {
+                    context = lc
+                    pattern = "[%thread] %logger{80} %msg%n"
+                    start()
+                }
 
-            val logcatAppender = LogcatAppender().apply {
-                context = lc
-                this.encoder = encoder
-                name = "LOGCAT"
-                start()
-            }
+            val logcatAppender =
+                LogcatAppender().apply {
+                    context = lc
+                    this.encoder = encoder
+                    name = "LOGCAT"
+                    start()
+                }
 
             lc.getLogger(Logger.ROOT_LOGGER_NAME).apply {
                 level = Level.DEBUG // 确保 Logcat 能看到所有级别的日志
                 addAppender(logcatAppender)
             }
-
         } catch (e: Exception) {
             Log.e("SesameLog", "Logback initLogcatOnly failed", e)
         }
@@ -65,7 +69,10 @@ object Logback {
      * 这是一个“追加”操作，不会打断 Logcat 日志
      */
     @Synchronized
-    fun initFileLogging(context: Context, force: Boolean = false) {
+    fun initFileLogging(
+        context: Context,
+        force: Boolean = false,
+    ) {
         val now = System.currentTimeMillis()
         // 1. 如果已经初始化过，且还没到跨天刷新的时间，则直接跳过
         if (!force && isFileInitialized && now < nextMidnightMillis) return
@@ -91,6 +98,9 @@ object Logback {
             val allLogNames = (LogCatalog.loggerNames() + listOf("other", "captcha")).distinct()
 
             allLogNames.forEach { logName ->
+                if (logName == LogChannel.CAPTURE.loggerName && !isCaptureFileAppenderEnabled) {
+                    return@forEach
+                }
                 addFileAppender(lc, logName, logDir)
 
                 val logFile = File(logDir, "$logName.log")
@@ -124,21 +134,23 @@ object Logback {
     }
 
     @Synchronized
-    fun reloadFileLogging() {
+    fun reloadFileLogging(enableCaptureAppender: Boolean = isCaptureFileAppenderEnabled) {
+        isCaptureFileAppenderEnabled = enableCaptureAppender
         val context = appContext ?: return
         initFileLogging(context, force = true)
     }
 
-    private fun calculateNextMidnight(now: Long): Long {
-        return Calendar.getInstance().apply {
-            timeInMillis = now
-            add(Calendar.DAY_OF_YEAR, 1)
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-    }
+    private fun calculateNextMidnight(now: Long): Long =
+        Calendar
+            .getInstance()
+            .apply {
+                timeInMillis = now
+                add(Calendar.DAY_OF_YEAR, 1)
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
 
     /**
      * 优先 Files.LOG_DIR -> 失败则回退到 Context.external -> Context.files
@@ -165,7 +177,11 @@ object Logback {
         return targetDir.absolutePath + File.separator
     }
 
-    private fun addFileAppender(lc: LoggerContext, logName: String, logDir: String) {
+    private fun addFileAppender(
+        lc: LoggerContext,
+        logName: String,
+        logDir: String,
+    ) {
         val fileAppender = RollingFileAppender<ILoggingEvent>()
 
         fileAppender.apply {
@@ -175,48 +191,52 @@ object Logback {
             isAppend = true
 
             if (shouldDisableSizeRolling(logName)) {
-                val policy = TimeBasedRollingPolicy<ILoggingEvent>().apply {
-                    context = lc
-                    fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.log"
-                    setTotalSizeCap(FileSize.valueOf("${DEFAULT_LOG_TOTAL_SIZE_CAP_MB}MB"))
-                    maxHistory = 3
-                    isCleanHistoryOnStart = true
-                    setParent(fileAppender)
-                    start()
-                }
+                val policy =
+                    TimeBasedRollingPolicy<ILoggingEvent>().apply {
+                        context = lc
+                        fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.log"
+                        setTotalSizeCap(FileSize.valueOf("${DEFAULT_LOG_TOTAL_SIZE_CAP_MB}MB"))
+                        maxHistory = 3
+                        isCleanHistoryOnStart = true
+                        setParent(fileAppender)
+                        start()
+                    }
                 rollingPolicy = policy
             } else {
-                val policy = SizeAndTimeBasedRollingPolicy<ILoggingEvent>().apply {
-                    context = lc
-                    fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.%i.log"
-                    setMaxFileSize(resolveMaxFileSize(logName))
-                    setTotalSizeCap(FileSize.valueOf("${DEFAULT_LOG_TOTAL_SIZE_CAP_MB}MB"))
-                    maxHistory = 3
-                    isCleanHistoryOnStart = true
-                    setParent(fileAppender)
-                    start()
-                }
+                val policy =
+                    SizeAndTimeBasedRollingPolicy<ILoggingEvent>().apply {
+                        context = lc
+                        fileNamePattern = "${logDir}bak/$logName-%d{yyyy-MM-dd}.%i.log"
+                        setMaxFileSize(resolveMaxFileSize(logName))
+                        setTotalSizeCap(FileSize.valueOf("${DEFAULT_LOG_TOTAL_SIZE_CAP_MB}MB"))
+                        maxHistory = 3
+                        isCleanHistoryOnStart = true
+                        setParent(fileAppender)
+                        start()
+                    }
                 rollingPolicy = policy
             }
 
-            encoder = PatternLayoutEncoder().apply {
+            encoder =
+                PatternLayoutEncoder().apply {
+                    context = lc
+                    pattern = "%d{dd日 HH:mm:ss.SS} %msg%n"
+                    start()
+                }
+
+            start()
+        }
+
+        val asyncAppender =
+            AsyncAppender().apply {
                 context = lc
-                pattern = "%d{dd日 HH:mm:ss.SS} %msg%n"
+                name = "ASYNC-$logName"
+                queueSize = 512 // 内存缓冲队列
+                discardingThreshold = 0 // 不丢弃任何等级的日志
+                isNeverBlock = false // 极端情况下允许阻塞以确保日志不丢失
+                addAppender(fileAppender)
                 start()
             }
-
-            start()
-        }
-
-        val asyncAppender = AsyncAppender().apply {
-            context = lc
-            name = "ASYNC-$logName"
-            queueSize = 512       // 内存缓冲队列
-            discardingThreshold = 0 // 不丢弃任何等级的日志
-            isNeverBlock = false   // 极端情况下允许阻塞以确保日志不丢失
-            addAppender(fileAppender)
-            start()
-        }
 
         lc.getLogger(logName).apply {
             level = Level.ALL
@@ -233,11 +253,12 @@ object Logback {
     }
 
     private fun resolveMaxFileSize(logName: String): FileSize {
-        val sizeMb = if (logName == LogChannel.CAPTURE.loggerName) {
-            (BaseModel.captureLogFileMaxSizeMb.value ?: DEFAULT_LOG_FILE_MAX_SIZE_MB)
-        } else {
-            DEFAULT_LOG_FILE_MAX_SIZE_MB
-        }
+        val sizeMb =
+            if (logName == LogChannel.CAPTURE.loggerName) {
+                (BaseModel.captureLogFileMaxSizeMb.value ?: DEFAULT_LOG_FILE_MAX_SIZE_MB)
+            } else {
+                DEFAULT_LOG_FILE_MAX_SIZE_MB
+            }
         return FileSize.valueOf("${sizeMb.coerceAtLeast(1)}MB")
     }
 }

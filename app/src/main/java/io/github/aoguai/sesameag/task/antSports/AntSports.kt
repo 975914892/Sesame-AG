@@ -14,6 +14,7 @@ import io.github.aoguai.sesameag.hook.HookReadyChecker
 import io.github.aoguai.sesameag.hook.keepalive.PersistentLaunchPolicy
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.ModelFields
@@ -269,6 +270,13 @@ class AntSports : ModelTask() {
         val themeId: String? = null
     )
 
+    private data class RouteKnowledgeEntry(
+        val knowledgeId: String,
+        val pathId: String,
+        val name: String,
+        val status: String
+    )
+
     private data class RouteDecision(
         val candidate: RouteCandidate,
         val reason: String
@@ -498,13 +506,13 @@ class AntSports : ModelTask() {
             ).also { neverlandGrid = it }
         )
         modelFields.addField(
-            BooleanModelField("neverlandAutoReward", "健康岛 | 自动领奖", true).withDesc(
-                "新游戏模式岛屿完成后自动选择奖励；明确非重试错误会记录并尝试下一个奖励。"
+            BooleanModelField("neverlandAutoReward", "健康岛 | 自动领奖", false).withDesc(
+                "开启后在新游戏模式岛屿完成时自动选择奖励；明确非重试错误会记录并尝试下一个奖励。"
             ).also { neverlandAutoReward = it }
         )
         modelFields.addField(
-            BooleanModelField("neverlandPreferMedal", "健康岛 | 优先奖牌", true).withDesc(
-                "健康岛自动领奖时优先选择名称包含“奖牌”的奖励，否则选择服务端返回的首个奖励。"
+            BooleanModelField("neverlandPreferMedal", "健康岛 | 优先奖牌", false).withDesc(
+                "开启后，健康岛自动领奖时优先选择名称包含“奖牌”的奖励，否则选择服务端返回的首个奖励。需开启“健康岛 | 自动领奖”。"
             ).also { neverlandPreferMedal = it }
         )
         modelFields.addField(
@@ -1183,7 +1191,13 @@ class AntSports : ModelTask() {
         UnifiedScheduler.cancelPersistentByDedupeKey(ApplicationHook.appContext, persistentSportsDedupeKey(childId))
     }
 
-    internal fun triggerPersistentChildTask(childId: String, group: String, payloadJson: String, source: String): Boolean {
+    internal fun triggerPersistentChildTask(
+        childId: String,
+        group: String,
+        payloadJson: String,
+        source: String,
+        scheduleId: String,
+    ): Boolean {
         val payload = runCatching { JSONObject(payloadJson.ifBlank { "{}" }) }.getOrDefault(JSONObject())
         val ownerUserId = payload.optString("owner_user_id").trim()
         val payloadSessionEpoch = payload.optLong("session_epoch", 0L)
@@ -1201,7 +1215,28 @@ class AntSports : ModelTask() {
             return true
         }
         GlobalThreadPools.execute {
-            runPersistentChildTask(childId, group, payload, source, currentOwnerUserId.orEmpty(), payloadSessionEpoch)
+            PersistentScheduleRegistry.markRunning(scheduleId)
+            val executionLease = ApplicationHook.appContext?.let { context ->
+                WakeLockManager.acquire(
+                    context = context,
+                    timeoutMs = PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
+                    source = "sports_persistent_child",
+                    scheduleId = scheduleId,
+                )
+            }
+            try {
+                runPersistentChildTask(childId, group, payload, source, currentOwnerUserId.orEmpty(), payloadSessionEpoch)
+                PersistentScheduleRegistry.markFired(ApplicationHook.appContext, scheduleId)
+            } catch (t: Throwable) {
+                Log.printStackTrace(TAG, "运动持久子任务执行失败[$group][$childId]", t)
+                PersistentScheduleRegistry.markFailed(
+                    ApplicationHook.appContext,
+                    scheduleId,
+                    t.message ?: t.javaClass.name,
+                )
+            } finally {
+                executionLease?.close()
+            }
         }
         return true
     }
@@ -1220,20 +1255,15 @@ class AntSports : ModelTask() {
         ownerUserId: String,
         sessionEpoch: Long
     ) {
-        try {
-            if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) {
-                Log.sports("运动持久子任务[$group][$childId]会话已切换，取消执行: owner=$ownerUserId session=$sessionEpoch")
-                return
-            }
-            Log.sports("运动持久子任务触发[$group][$childId] source=$source")
-            cancelPersistentChildTask(childId)
-            when (group) {
-                "syncStep" -> runPersistentSyncStepTask(childId)
-                "BX" -> runTreasureBoxPersistentTask(childId, payload)
-                else -> Log.sports("未知运动持久子任务[$group][$childId]，跳过")
-            }
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "运动持久子任务执行失败[$group][$childId]", t)
+        if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) {
+            Log.sports("运动持久子任务[$group][$childId]会话已切换，取消执行: owner=$ownerUserId session=$sessionEpoch")
+            return
+        }
+        Log.sports("运动持久子任务触发[$group][$childId] source=$source")
+        when (group) {
+            "syncStep" -> runPersistentSyncStepTask(childId)
+            "BX" -> runTreasureBoxPersistentTask(childId, payload)
+            else -> Log.sports("未知运动持久子任务[$group][$childId]，跳过")
         }
     }
 
@@ -3873,10 +3903,14 @@ class AntSports : ModelTask() {
                 continue
             }
             val cityPathData = queryCityPath(city.cityId) ?: continue
-            val pathList = cityPathData.optJSONArray("cityPathList") ?: continue
-            var hasRouteInCity = false
-            var loopCandidate: RouteCandidate? = null
-            var excludedLoopCandidate: RouteCandidate? = null
+            val pathList = cityPathData.optJSONArray("cityPathList")
+            if (pathList == null) {
+                Log.sports(
+                    "行走路线🚶🏻‍♂️城市见闻未完成但当前城市路线列表为空[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]，跳过城市"
+                )
+                continue
+            }
+            val candidatesByPathId = LinkedHashMap<String, RouteCandidate>()
             for (j in 0 until pathList.length()) {
                 val cityPath = pathList.optJSONObject(j) ?: continue
                 val candidate = RouteCandidate(
@@ -3888,57 +3922,145 @@ class AntSports : ModelTask() {
                     cityId = city.cityId,
                     status = cityPath.optString("pathCompleteStatus", "")
                 )
-                if (candidate.pathId.isBlank()) {
-                    continue
+                if (candidate.pathId.isNotBlank()) {
+                    candidatesByPathId.putIfAbsent(candidate.pathId, candidate)
                 }
-                hasRouteInCity = true
-                val isExcluded = (!excludePathId.isNullOrBlank() && candidate.pathId == excludePathId) ||
+            }
+            if (candidatesByPathId.isEmpty()) {
+                Log.sports(
+                    "行走路线🚶🏻‍♂️城市见闻未完成但当前城市无可用路线[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]，跳过城市"
+                )
+                continue
+            }
+
+            val isExcluded: (RouteCandidate) -> Boolean = { candidate ->
+                (!excludePathId.isNullOrBlank() && candidate.pathId == excludePathId) ||
                     (!excludePathName.isNullOrBlank() &&
                         candidate.name.isNotBlank() &&
                         candidate.name == excludePathName)
-                if (!isExcluded && !isRouteCompleted(candidate.status)) {
+            }
+            val knowledgeEntries = queryRouteKnowledgeEntries(city.cityId)
+            if (knowledgeEntries != null) {
+                val pendingKnowledge = knowledgeEntries.filter {
+                    it.status.equals("NOT_RECEIVE", ignoreCase = true)
+                }
+                if (pendingKnowledge.isEmpty()) {
                     Log.sports(
-                        "行走路线📍城市见闻优先[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total} status=${city.status.ifBlank { "UNKNOWN" }}]" +
-                            " -> [${candidate.name.ifBlank { candidate.pathId }}]"
+                        "行走路线🚶🏻‍♂️城市见闻跳过[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#勋章未完成但详情未返回待收碎片"
                     )
-                    return RouteDecision(
-                        candidate,
-                        "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]"
+                    continue
+                }
+
+                val unavailableKnowledge = pendingKnowledge.filter {
+                    it.pathId.isBlank() || !candidatesByPathId.containsKey(it.pathId)
+                }
+                if (unavailableKnowledge.isNotEmpty()) {
+                    val skipped = unavailableKnowledge.joinToString("、") { knowledge ->
+                        "${knowledge.name.ifBlank { knowledge.knowledgeId.ifBlank { "无名称" } }}(pathId=${knowledge.pathId.ifBlank { "无pathId" }})"
+                    }
+                    Log.sports(
+                        "行走路线📍城市见闻跳过失效碎片[${city.cityName.ifBlank { city.cityId }}]#当前路线列表未返回:$skipped"
                     )
                 }
-                if (!isExcluded && loopCandidate == null) {
-                    loopCandidate = candidate
+
+                val availableKnowledgeRoutes = pendingKnowledge.mapNotNull { knowledge ->
+                    candidatesByPathId[knowledge.pathId]?.let { knowledge to it }
                 }
-                if (isExcluded && excludedLoopCandidate == null) {
-                    excludedLoopCandidate = candidate
+                if (availableKnowledgeRoutes.isEmpty()) {
+                    Log.sports(
+                        "行走路线🚶🏻‍♂️城市见闻跳过[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#所有待收碎片对应路线已下线或不存在"
+                    )
+                    continue
                 }
-            }
-            if (loopCandidate != null) {
+
+                val selected = availableKnowledgeRoutes.firstOrNull { (_, candidate) ->
+                    !isExcluded(candidate) && !isRouteCompleted(candidate.status)
+                } ?: availableKnowledgeRoutes.firstOrNull { (_, candidate) ->
+                    !isExcluded(candidate)
+                } ?: availableKnowledgeRoutes.first()
+                val knowledge = selected.first
+                val candidate = selected.second
                 Log.sports(
                     "行走路线📍城市见闻优先[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total} status=${city.status.ifBlank { "UNKNOWN" }}]" +
-                        " -> [${loopCandidate.name.ifBlank { loopCandidate.pathId }}]#循环"
+                        " -> [${candidate.name.ifBlank { candidate.pathId }}]#待收见闻[${knowledge.name.ifBlank { knowledge.knowledgeId }}]"
                 )
                 return RouteDecision(
-                    loopCandidate,
-                    "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#优先循环路线"
+                    candidate,
+                    "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#待收见闻[${knowledge.name.ifBlank { knowledge.knowledgeId }}]"
                 )
             }
-            if (excludedLoopCandidate != null) {
+
+            val candidates = candidatesByPathId.values.toList()
+            candidates.firstOrNull { !isExcluded(it) && !isRouteCompleted(it.status) }?.let { candidate ->
                 Log.sports(
-                    "行走路线📍城市见闻优先[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total} status=${city.status.ifBlank { "UNKNOWN" }}]" +
-                        " -> [${excludedLoopCandidate.name.ifBlank { excludedLoopCandidate.pathId }}]#当前路线"
+                    "行走路线📍城市见闻详情查询失败，回退路线扫描[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]" +
+                        " -> [${candidate.name.ifBlank { candidate.pathId }}]"
                 )
                 return RouteDecision(
-                    excludedLoopCandidate,
-                    "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#仅当前路线可循环"
+                    candidate,
+                    "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#详情查询失败回退"
                 )
             }
-            if (hasRouteInCity) {
-                Log.sports("行走路线🚶🏻‍♂️城市见闻未完成但无未完成路线可切换[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]"
+            candidates.firstOrNull { !isExcluded(it) }?.let { candidate ->
+                Log.sports(
+                    "行走路线📍城市见闻详情查询失败，回退循环路线[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]" +
+                        " -> [${candidate.name.ifBlank { candidate.pathId }}]"
+                )
+                return RouteDecision(
+                    candidate,
+                    "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#详情查询失败回退循环路线"
+                )
+            }
+            candidates.firstOrNull()?.let { candidate ->
+                Log.sports(
+                    "行走路线📍城市见闻详情查询失败，仅当前路线可循环[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]" +
+                        " -> [${candidate.name.ifBlank { candidate.pathId }}]"
+                )
+                return RouteDecision(
+                    candidate,
+                    "城市见闻未完成[${city.cityName.ifBlank { city.cityId }}:${city.received}/${city.total}]#详情查询失败仅当前路线可循环"
                 )
             }
         }
         return null
+    }
+
+    private fun queryRouteKnowledgeEntries(cityId: String): List<RouteKnowledgeEntry>? {
+        return try {
+            val response = JSONObject(AntSportsRpcCall.queryCityKnowledgeDetail(cityId))
+            if (!isSportsRpcSuccess(response)) {
+                Log.error(
+                    TAG,
+                    "行走路线🚶🏻‍♂️查询城市见闻详情失败[cityId=$cityId][code=${extractSportsRpcErrorCode(response).ifEmpty { "UNKNOWN" }}][msg=${extractSportsRpcErrorMessage(response)}] raw=$response"
+                )
+                null
+            } else {
+                val knowledgeList = unwrapSportsRpcPayload(response)
+                    .optJSONObject("data")
+                    ?.optJSONArray("cityKnowledgeList")
+                if (knowledgeList == null) {
+                    Log.error(TAG, "行走路线🚶🏻‍♂️查询城市见闻详情成功但 cityKnowledgeList 为空[cityId=$cityId] raw=$response")
+                    null
+                } else {
+                    buildList {
+                        for (i in 0 until knowledgeList.length()) {
+                            val knowledge = knowledgeList.optJSONObject(i) ?: continue
+                            add(
+                                RouteKnowledgeEntry(
+                                    knowledgeId = knowledge.optString("knowledgeId", ""),
+                                    pathId = knowledge.optString("pathId", ""),
+                                    name = knowledge.optString("name", ""),
+                                    status = knowledge.optString("status", "")
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "queryRouteKnowledgeEntries err", t)
+            null
+        }
     }
 
     private fun queryRouteKnowledgeCities(): List<RouteKnowledgeCity> {

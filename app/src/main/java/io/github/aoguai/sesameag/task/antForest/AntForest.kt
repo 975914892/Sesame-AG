@@ -347,6 +347,12 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         val expireTime: Long
     )
 
+    private enum class RobMultiplierStateVerification {
+        ACTIVE,
+        CONFIRMED_NONE,
+        INCONCLUSIVE
+    }
+
     // {{ 新增接口定义：收自己能量的方式 }}
     interface CollectSelfType {
         companion object {
@@ -435,7 +441,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 "collectEnergy",
                 "收集能量 | 开启",
                 false
-            ).withDesc("开启后收取自己、好友和可访问 PK 森友的可见绿色能量。").also { collectEnergy = it })
+            ).withDesc("开启后仅处理收取自己、好友和可访问 PK 森友主页内的可见绿色能量球相关链路。").also { collectEnergy = it })
         modelFields.addField(
             BooleanModelField(
                 "batchRobEnergy",
@@ -446,8 +452,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             BooleanModelField(
                 "takeLookEnergy",
                 "收集能量 | 是否启用找能量",
-                true
-            ).withDesc("关闭后跳过找能量接口，直接按现有流程继续好友与PK好友主页遍历。").also { takeLookEnergy = it })
+                false
+            ).withDesc("开启后使用找能量接口；关闭时直接按现有流程继续好友与 PK 好友主页遍历。").also { takeLookEnergy = it })
         modelFields.addField(
             BooleanModelField(
                 "pkEnergy",
@@ -653,10 +659,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             IntegerModelField(
                 "robExpandCardReplaceRemainDays",
                 "收好友N倍卡 | 高倍率替换剩余天数",
-                7,
+                0,
                 0,
                 365
-            ).withDesc("当前生效卡剩余时间小于等于该天数时，才允许自动替换为更高倍率卡；填 0 关闭普通高倍率替换。").also {
+            ).withDesc("当前生效卡剩余时间小于等于该天数时，才允许自动替换为更高倍率卡；默认 0 表示关闭普通高倍率替换。").also {
                 robMultiplierCardReplaceRemainDays = it
             }
         )
@@ -664,10 +670,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             IntegerModelField(
                 "robExpandCardForceReplaceExpireDays",
                 "收好友N倍卡 | 临期强制替换天数",
-                1,
+                0,
                 0,
                 365
-            ).withDesc("更高倍率候选卡在背包中的剩余可使用时间小于等于该天数时，允许无视普通替换阈值和时长保护直接替换；填 0 关闭临期强制替换。").also {
+            ).withDesc("更高倍率候选卡在背包中的剩余可使用时间小于等于该天数时，允许无视普通替换阈值和时长保护直接替换；默认 0 表示关闭临期强制替换。").also {
                 robMultiplierCardForceReplaceExpireDays = it
             }
         )
@@ -690,8 +696,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             BooleanModelField(
                 "wateringEnabled",
                 "浇水 | 开启",
-                true
-            ).withDesc("统一控制普通浇水、随机浇水任务、回浇和浇水金球/保护回赠收取；关闭后不影响复活金球与任务领奖。").also {
+                false
+            ).withDesc("开启后统一控制普通浇水、随机浇水任务、回浇和浇水金球/保护回赠收取；关闭后不影响复活金球与任务领奖。").also {
                 wateringEnabled = it
             })
         modelFields.addField(
@@ -1191,7 +1197,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val robbedTotal = summary.optInt("robbedTotal", 0)
 
             val selfName = UserMap.get(uid)?.showName ?: UserMap.getMaskName(uid) ?: uid
-            Log.forest("森林能量🌳[$selfName]收取${obtainTotal}g;被收${robbedTotal}g;当前${currentEnergy}g")
+            Log.forest("森林能量🌳[$selfName]今日累计获得${obtainTotal}g;今日被收${robbedTotal}g;当前${currentEnergy}g（服务端今日汇总）")
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "logForestEnergyInfo err", t)
         }
@@ -7401,6 +7407,40 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         )
     }
 
+    private fun hasUsingPropStatePayload(homeObj: JSONObject): Boolean {
+        if (homeObj.optJSONArray("usingUserPropsNew") != null ||
+            homeObj.optJSONArray("loginUserUsingPropNew") != null
+        ) {
+            return true
+        }
+        return isTeam(homeObj) && homeObj.optJSONObject("teamHomeResult")
+            ?.optJSONObject("mainMember")
+            ?.optJSONArray("usingUserProps") != null
+    }
+
+    private fun verifyMissingRobMultiplierStateBeforeUse(): RobMultiplierStateVerification {
+        Log.forest("收好友N倍卡本地状态缺失，复核本人主页")
+        val homeObj = querySelfHome()
+        if (homeObj == null) {
+            Log.forest("收好友N倍卡主页复核失败，默认失败并跳过本轮使用/补兑")
+            return RobMultiplierStateVerification.INCONCLUSIVE
+        }
+        if (!hasUsingPropStatePayload(homeObj)) {
+            Log.forest("收好友N倍卡主页复核缺少使用中道具字段，默认失败并跳过本轮使用/补兑")
+            return RobMultiplierStateVerification.INCONCLUSIVE
+        }
+        val active = currentRobMultiplierState()
+        if (active != null) {
+            Log.forest(
+                "收好友N倍卡主页复核发现生效卡[${active.propName}]，" +
+                    "剩余${formatTimeDifference(active.endTime - System.currentTimeMillis())}"
+            )
+            return RobMultiplierStateVerification.ACTIVE
+        }
+        Log.forest("收好友N倍卡主页复核确认无生效卡，允许按策略选择候选")
+        return RobMultiplierStateVerification.CONFIRMED_NONE
+    }
+
     private fun hasPropStock(propObject: JSONObject?): Boolean {
         if (propObject == null) {
             return false
@@ -7717,6 +7757,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val propName = propConfigVO.getString("propName")
             propEmoji(propName)
             val jo: JSONObject?
+            var usedPropName = propName
             val isRenewable = isRenewableProp(propType)
             Log.forest("道具 $propName (类型: $propType), 是否可续用: $isRenewable, 当前持有数量: $holdsNum"
             )
@@ -7741,10 +7782,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     val confirmResponseStr =
                         AntForestRpcCall.consumeProp(propGroup, propId, propType, true, actualConsumeContext)
                     jo = JSONObject(confirmResponseStr)
-                    // 提取道具名称用于日志显示
+                    // 成功日志统一延后到最终响应通过校验后输出，避免二次确认失败被误记为已使用。
                     val userPropVO = unwrapResData(jo).optJSONObject("userPropVO")
-                    val usedPropName = userPropVO?.optString("propName") ?: propName
-                    Log.forest("已使用$usedPropName")
+                    usedPropName = userPropVO?.optString("propName")?.takeIf { it.isNotBlank() } ?: propName
 
                 } else {
                     // 其他所有情况都视为最终结果，通常是失败
@@ -7755,15 +7795,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 // 非续用类道具，直接使用
                 val consumeResponse = AntForestRpcCall.consumeProp2(propGroup, propId, propType, actualConsumeContext)
                 jo = JSONObject(consumeResponse)
-                // 提取道具名称用于日志显示
+                // 成功日志统一延后到最终响应通过校验后输出。
                 val userPropVO = unwrapResData(jo).optJSONObject("userPropVO")
-                val usedPropName = userPropVO?.optString("propName") ?: propName
-                Log.forest("已使用$usedPropName")
+                usedPropName = userPropVO?.optString("propName")?.takeIf { it.isNotBlank() } ?: propName
             }
 
             // 统一结果处理
             val resultData = unwrapResData(jo)
             if (ResChecker.checkRes(TAG, "使用道具失败:", resultData)) {
+                Log.forest("已使用$usedPropName")
                 invalidatePropBagCache()
                 // ⚡ 优化点：根据参数决定是否执行耗时的刷新操作
                 if (needRefreshHome) {
@@ -8203,20 +8243,45 @@ class AntForest : ModelTask(), EnergyCollectCallback {
      */
     private fun useRobMultiplierCard(bag: JSONObject? = queryPropList()) {
         try {
-            val now = System.currentTimeMillis()
-            var selected = selectPreferredRobMultiplierProp(bag, now)
-            if (selected == null) {
-                val refreshedBag = replenishSelectedRewardsForMissingProp(
+            if (bag == null) {
+                Log.forest("收好友N倍卡背包查询为空，保护性跳过使用/补兑")
+                return
+            }
+
+            if (currentRobMultiplierState() == null &&
+                verifyMissingRobMultiplierStateBeforeUse() == RobMultiplierStateVerification.INCONCLUSIVE
+            ) {
+                return
+            }
+
+            val candidates = collectRobMultiplierCandidates(bag)
+            val selected = if (candidates.isNotEmpty()) {
+                selectPreferredRobMultiplierProp(bag)
+                    ?: run {
+                        Log.forest("背包中存在收好友N倍卡但不满足当前替换/延期规则，跳过补兑")
+                        return
+                    }
+            } else {
+                if (currentRobMultiplierState() != null) {
+                    Log.forest("当前有生效收好友N倍卡且背包无可用候选，跳过补兑")
+                    return
+                }
+                val replenishedBag = replenishSelectedRewardsForMissingProp(
                     "收好友N倍卡",
                     robMultiplierCard?.value != ApplyPropType.CLOSE,
                     ExchangeEffectNeed.FOREST_ROB_MULTIPLIER
                 )
-                selected = selectPreferredRobMultiplierProp(refreshedBag, now)
-                if (selected == null) {
-                    Log.forest("背包中无可用或无需使用的收好友N倍卡")
+                if (replenishedBag == null) {
+                    Log.forest("背包中无可用收好友N倍卡，补兑未完成")
                     return
                 }
+                selectPreferredRobMultiplierProp(replenishedBag)
+                    ?: run {
+                        Log.forest("补兑后仍无可用收好友N倍卡")
+                        return
+                    }
             }
+
             if (!isLimitedRobMultiplierProp(selected.propType)) {
                 val decision = evaluateTriggerDecision(robMultiplierCardTime, StatusFlags.FLAG_ANTFOREST_ROB_MULTIPLIER_CARD_TRIGGER_INDEX)
                 if (decision?.allowNow != true) {
@@ -8226,6 +8291,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 consumeTriggerSlot(StatusFlags.FLAG_ANTFOREST_ROB_MULTIPLIER_CARD_TRIGGER_INDEX, decision.matchedSlotIndex)
             }
             if (usePropBag(selected.prop)) {
+                val now = System.currentTimeMillis()
                 val fallbackDuration = selected.durationMs.takeIf { it > 0L } ?: (5 * TimeFormatter.ONE_MINUTE_MS)
                 robMultiplierCardEndTime = maxOf(robMultiplierCardEndTime, now + fallbackDuration)
                 robMultiplierCardFactor = selected.factor

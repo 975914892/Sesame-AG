@@ -135,8 +135,11 @@ class AntMember : ModelTask() {
     // 黄金票配置 - 提取/兑换
     internal var enableGoldTicketConsume: BooleanModelField? = null
 
-    /** 账单 贴纸 功能开关 */
+    /** 账单贴纸领取功能开关 */
     private var collectStickers: BooleanModelField? = null
+
+    /** 账单拼贴世界自动推进功能开关 */
+    private var billBlockWorld: BooleanModelField? = null
 
     private val goldTicketTaskBlacklistModule = "黄金票"
     private val beanTaskCenterHandledLimitCodes = setOf(
@@ -425,6 +428,11 @@ class AntMember : ModelTask() {
                 "扫描并领取当前账单周期内可领取的贴纸奖励。"
             ).also { collectStickers = it }
         )
+        modelFields.addField(
+            BooleanModelField("billBlockWorld", "账单拼贴世界 | 自动推进", false).withDesc(
+                "自动放置、合成、回收本轮贴纸块并推进章节；只整理本轮新放置的贴纸。"
+            ).also { billBlockWorld = it }
+        )
 
 
 
@@ -459,6 +467,9 @@ class AntMember : ModelTask() {
 
                 if (collectStickers?.value == true) {
                     queryAndCollectStickers()
+                }
+                if (billBlockWorld?.value == true) {
+                    runBillBlockWorld()
                 }
 
                 deferredTasks.awaitAll()
@@ -5106,6 +5117,7 @@ class AntMember : ModelTask() {
             var pointBallResult = DailyTaskProcessResult.UNKNOWN_FAILURE
             var p2eTaskResult = DailyTaskProcessResult.UNKNOWN_FAILURE
             var p2eSignInResult = DailyTaskProcessResult.UNKNOWN_FAILURE
+            var p2eDrawGoldResult = DailyTaskProcessResult.UNKNOWN_FAILURE
 
             // 1. 查询签到状态并尝试签到
             try {
@@ -5243,12 +5255,20 @@ class AntMember : ModelTask() {
                 Log.printStackTrace(TAG, "enableGameCenter.p2eSignIn err:", th)
             }
 
+            // 6. 游戏中心赚现金抽金币
+            try {
+                p2eDrawGoldResult = doGameCenterP2eDrawGold()
+            } catch (th: Throwable) {
+                Log.printStackTrace(TAG, "enableGameCenter.p2eDrawGold err:", th)
+            }
+
             if (listOf(
                     signInResult,
                     platformTaskResult,
                     pointBallResult,
                     p2eTaskResult,
-                    p2eSignInResult
+                    p2eSignInResult,
+                    p2eDrawGoldResult
                 ).all { it == DailyTaskProcessResult.HANDLED }
             ) {
                 setFlagToday(StatusFlags.FLAG_ANTMEMBER_GAME_CENTER_DONE)
@@ -6373,6 +6393,74 @@ class AntMember : ModelTask() {
         }
     }
 
+    private fun doGameCenterP2eDrawGold(): DailyTaskProcessResult {
+        val homeResponse = AntMemberRpcCall.queryGameCenterP2eHomePage(AntMemberRpcCall.GAME_CENTER_SOURCE)
+        val home = JSONObject(homeResponse)
+        if (!ResChecker.checkRes(TAG, home)) {
+            return logGameCenterP2eFailure("赚现金抽金币查询", home, homeResponse)
+        }
+
+        val data = home.optJSONObject("data")
+        if (data == null) {
+            Log.member("游戏中心🎮[赚现金暂无抽金币模块]")
+            return DailyTaskProcessResult.HANDLED
+        }
+        if (data.optBoolean("hitRiskControl", false) || data.optBoolean("hitFourControlLimit", false)) {
+            Log.member("游戏中心🎮[赚现金抽金币业务受限，跳过]")
+            return DailyTaskProcessResult.HANDLED
+        }
+
+        val drawModule = data.optJSONObject("drawGoldCoinModuleVO")
+        if (drawModule == null) {
+            Log.member("游戏中心🎮[赚现金暂无抽金币模块]")
+            return DailyTaskProcessResult.HANDLED
+        }
+        when (drawModule.optString("status")) {
+            "DRAWN" -> {
+                Log.member("游戏中心🎮[赚现金抽金币已完成]#奖励次日解锁领取")
+                return DailyTaskProcessResult.HANDLED
+            }
+            "FULFILL_FAILED" -> Unit
+            else -> {
+                Log.error(
+                    "$TAG.enableGameCenter.p2eDrawGold",
+                    "游戏中心🎮[赚现金抽金币状态未识别]#status=${drawModule.optString("status")}"
+                )
+                return DailyTaskProcessResult.UNKNOWN_FAILURE
+            }
+        }
+
+        val drawResponse = AntMemberRpcCall.drawGameCenterP2eGold()
+        val drawResult = JSONObject(drawResponse)
+        if (!ResChecker.checkRes(TAG, drawResult)) {
+            return logGameCenterP2eFailure("赚现金抽金币", drawResult, drawResponse)
+        }
+
+        val refreshedResponse = AntMemberRpcCall.queryGameCenterP2eHomePage(AntMemberRpcCall.GAME_CENTER_SOURCE)
+        val refreshedHome = JSONObject(refreshedResponse)
+        if (!ResChecker.checkRes(TAG, refreshedHome)) {
+            return logGameCenterP2eFailure("赚现金抽金币回查", refreshedHome, refreshedResponse)
+        }
+        val refreshedStatus = refreshedHome.optJSONObject("data")
+            ?.optJSONObject("drawGoldCoinModuleVO")
+            ?.optString("status")
+            .orEmpty()
+        if (refreshedStatus == "DRAWN") {
+            val popupTitle = drawResult.optJSONObject("data")
+                ?.optJSONObject("popupInfoVO")
+                ?.optString("mainTitle")
+                .orEmpty()
+            Log.member("游戏中心🎮[赚现金抽金币成功]${if (popupTitle.isBlank()) "#奖励次日解锁领取" else "#$popupTitle"}")
+            return DailyTaskProcessResult.HANDLED
+        }
+
+        Log.error(
+            "$TAG.enableGameCenter.p2eDrawGold",
+            "游戏中心🎮[赚现金抽金币回查未确认]#status=$refreshedStatus"
+        )
+        return DailyTaskProcessResult.UNKNOWN_FAILURE
+    }
+
     private fun findGameCenterP2eTodaySignRecord(signUpModule: JSONObject?): JSONObject? {
         if (signUpModule == null) {
             return null
@@ -6410,12 +6498,12 @@ class AntMember : ModelTask() {
             }
 
             !response.optBoolean("retryable", true) -> {
-                Log.error("$TAG.enableGameCenter.p2eSignIn", "游戏中心🎮[$scene]#非重试失败:$message")
+                Log.error("$TAG.enableGameCenter.p2e", "游戏中心🎮[$scene]#非重试失败:$message")
                 DailyTaskProcessResult.UNKNOWN_FAILURE
             }
 
             else -> {
-                Log.error("$TAG.enableGameCenter.p2eSignIn", "游戏中心🎮[$scene]#失败:$message")
+                Log.error("$TAG.enableGameCenter.p2e", "游戏中心🎮[$scene]#失败:$message")
                 DailyTaskProcessResult.RETRYABLE_FAILURE
             }
         }

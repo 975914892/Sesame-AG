@@ -12,6 +12,7 @@ object AntMemberRpcCall {
 
     internal const val GAME_CENTER_SOURCE = "ch_appcollect__chsub_my-recentlyUsed"
     internal const val GAME_CENTER_P2E_SOURCE = "ch_appcenter__chsub_recentUSE"
+    internal const val GAME_CENTER_GIT = "9e159d58cce04c13a"
     internal const val INSURED_GOLD_DEFAULT_ENTRANCE = "cfsy"
     private const val INSURED_GOLD_PRODUCT_CODE = "GIFT_UNIVERSAL_COVERAGE"
     private const val BEAN_POSITION_ENTRANCE = "insplatform_mine_anxindou"
@@ -575,7 +576,7 @@ object AntMemberRpcCall {
     fun querySignInBall(): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.v3.querySignInBall",
-            """[{"source":"$GAME_CENTER_SOURCE"}]"""
+            """[{"__git":"$GAME_CENTER_GIT","source":"$GAME_CENTER_SOURCE"}]"""
         )
     }
 
@@ -586,7 +587,7 @@ object AntMemberRpcCall {
     fun continueSignIn(): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.continueSignIn",
-            """[{"sceneId":"GAME_CENTER","signType":"NORMAL_SIGN","source":"$GAME_CENTER_SOURCE"}]"""
+            """[{"__git":"$GAME_CENTER_GIT","sceneId":"GAME_CENTER","signType":"NORMAL_SIGN","source":"$GAME_CENTER_SOURCE"}]"""
         )
     }
 
@@ -597,7 +598,7 @@ object AntMemberRpcCall {
     fun queryGameCenterTaskList(): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.v4.queryTaskList",
-            """[{"source":"$GAME_CENTER_SOURCE"}]"""
+            """[{"__git":"$GAME_CENTER_GIT","source":"$GAME_CENTER_SOURCE"}]"""
         )
     }
 
@@ -608,7 +609,7 @@ object AntMemberRpcCall {
     fun doTaskSend(taskId: String): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.v3.doTaskSend",
-            """[{"taskId":"$taskId"}]"""
+            """[{"__git":"$GAME_CENTER_GIT","taskId":"$taskId"}]"""
         )
     }
 
@@ -619,7 +620,7 @@ object AntMemberRpcCall {
     fun doTaskSignup(taskId: String): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.v3.doTaskSignup",
-            """[{"source":"$GAME_CENTER_SOURCE","taskId":"$taskId"}]"""
+            """[{"__git":"$GAME_CENTER_GIT","source":"$GAME_CENTER_SOURCE","taskId":"$taskId"}]"""
         )
     }
 
@@ -630,7 +631,7 @@ object AntMemberRpcCall {
     fun queryPointBallList(): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.v3.queryPointBallList",
-            """[{"source":"$GAME_CENTER_SOURCE"}]"""
+            """[{"__git":"$GAME_CENTER_GIT","source":"$GAME_CENTER_SOURCE"}]"""
         )
     }
 
@@ -641,7 +642,7 @@ object AntMemberRpcCall {
     fun batchReceivePointBall(): String {
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.v3.batchReceivePointBall",
-            "[{}]"
+            "[{\"__git\":\"$GAME_CENTER_GIT\"}]"
         )
     }
 
@@ -656,6 +657,7 @@ object AntMemberRpcCall {
             put("screenType", 10)
             put("source", source)
             put("subscribePanelCheck", true)
+            put("__git", GAME_CENTER_GIT)
             put("unityDeviceLevel", "high")
         }
         return RequestManager.requestString(
@@ -679,6 +681,7 @@ object AntMemberRpcCall {
             put("setHeadPanelCheck", true)
             put("source", source)
             put("subscribePanelCheck", true)
+            put("__git", GAME_CENTER_GIT)
             put("unityDeviceLevel", "high")
         }
         return RequestManager.requestString(
@@ -708,6 +711,7 @@ object AntMemberRpcCall {
         }
         val args = JSONObject().apply {
             put("exposedTaskList", exposedTaskList)
+            put("__git", GAME_CENTER_GIT)
         }
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.p2e.reportExposedTasks",
@@ -774,6 +778,7 @@ object AntMemberRpcCall {
         val args = JSONObject().apply {
             put("actionChannel", actionChannel)
             put("activityId", task.optString("activityId").ifBlank { "P2E_PLATFORM_TASK" })
+            put("__git", GAME_CENTER_GIT)
             put("oriChInfo", oriChInfo)
             put("source", source)
             put("taskId", task.optString("taskId"))
@@ -801,6 +806,7 @@ object AntMemberRpcCall {
             put("index", index)
             put("signSequenceId", signSequenceId)
             put("source", source)
+            put("__git", GAME_CENTER_GIT)
         }
         return RequestManager.requestString(
             "com.alipay.gamecenteruprod.biz.rpc.p2e.signIn",
@@ -809,6 +815,14 @@ object AntMemberRpcCall {
     }
 
 
+    @JvmStatic
+    fun drawGameCenterP2eGold(): String {
+        val args = JSONObject().put("__git", GAME_CENTER_GIT)
+        return RequestManager.requestString(
+            "com.alipay.gamecenteruprod.biz.rpc.p2e.drawGold",
+            JSONArray().put(args).toString()
+        )
+    }
     /**
      * 获取保障金信息
      */
@@ -1658,4 +1672,83 @@ object AntMemberRpcCall {
         )
     }
 
+    @JvmStatic
+    fun queryBillBlockWorldHome(): String {
+        return RequestManager.requestString("alipay.memberasset.block.queryBlockHome", "[{}]")
+    }
+
+    @JvmStatic
+    fun collectBillBlockWorldBlock(blockRecordId: String, posX: Int, posY: Int): String {
+        val args = JSONObject().apply {
+            put("blockRecordId", blockRecordId)
+            put("posX", posX)
+            put("posY", posY)
+        }
+        return RequestManager.requestString(
+            "alipay.memberasset.block.collectBlock",
+            JSONArray().put(args).toString()
+        )
+    }
+
+    @JvmStatic
+    fun syncBillBlockWorldCanvas(seasonId: String, blockPositions: JSONArray): String {
+        val args = JSONObject().apply {
+            put("blockPositions", blockPositions)
+            put("seasonId", seasonId)
+        }
+        return RequestManager.requestString(
+            "alipay.memberasset.block.syncCanvas",
+            JSONArray().put(args).toString()
+        )
+    }
+
+    @JvmStatic
+    fun mergeBillBlockWorldBlocks(
+        mainBlockId: String,
+        mergedBlockIds: List<String>,
+        posX: Int,
+        posY: Int
+    ): String {
+        val args = JSONObject().apply {
+            put("mainBlockId", mainBlockId)
+            put("mergedBlockIds", JSONArray(mergedBlockIds))
+            put("posX", posX)
+            put("posY", posY)
+        }
+        return RequestManager.requestString(
+            "alipay.memberasset.block.mergeBlock",
+            JSONArray().put(args).toString()
+        )
+    }
+
+    @JvmStatic
+    fun reclaimBillBlockWorldBlock(blockRecordId: String): String {
+        val args = JSONObject().put("blockRecordId", blockRecordId)
+        return RequestManager.requestString(
+            "alipay.memberasset.block.reclaimBlock",
+            JSONArray().put(args).toString()
+        )
+    }
+
+    @JvmStatic
+    fun placeBillBlockWorldBlock(blockRecordId: String, posX: Int, posY: Int): String {
+        val args = JSONObject().apply {
+            put("blockRecordId", blockRecordId)
+            put("posX", posX)
+            put("posY", posY)
+        }
+        return RequestManager.requestString(
+            "alipay.memberasset.block.placeBlock",
+            JSONArray().put(args).toString()
+        )
+    }
+
+    @JvmStatic
+    fun advanceBillBlockWorldChapter(chapterId: String): String {
+        val args = JSONObject().put("chapterId", chapterId)
+        return RequestManager.requestString(
+            "alipay.memberasset.block.advanceChapter",
+            JSONArray().put(args).toString()
+        )
+    }
 }

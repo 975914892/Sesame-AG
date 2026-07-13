@@ -23,6 +23,7 @@ import io.github.aoguai.sesameag.hook.Toast
 import io.github.aoguai.sesameag.hook.keepalive.PersistentLaunchPolicy
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit.addIntervalLimit
 import io.github.aoguai.sesameag.model.BaseModel
@@ -80,6 +81,7 @@ import io.github.aoguai.sesameag.util.TimeTriggerEvaluator
 import io.github.aoguai.sesameag.util.TimeTriggerParseOptions
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.UserDataStoreManager
+import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.util.friend.FriendCapabilityRecorder
 import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.maps.IdMapManager
@@ -708,8 +710,8 @@ class AntFarm : ModelTask() {
             BooleanModelField(
                 "receiveDonationCompetitionAward",
                 "捐蛋排位赛 | 领取我的奖励",
-                true
-            ).withDesc("每轮结算后自动领取【我的奖励】中的普通美食、装扮币和段位装扮等奖励。需开启“捐蛋排位赛 | 开启”。").also {
+                false
+            ).withDesc("开启后，每轮结算自动领取【我的奖励】中的普通美食、装扮币和段位装扮等奖励。需开启“捐蛋排位赛 | 开启”。").also {
                 receiveDonationCompetitionAward = it
             })
         modelFields.addField(
@@ -1161,7 +1163,13 @@ class AntFarm : ModelTask() {
         UnifiedScheduler.cancelPersistentByDedupeKey(ApplicationHook.appContext, persistentFarmDedupeKey(childId))
     }
 
-    internal fun triggerPersistentChildTask(childId: String, group: String, payloadJson: String, source: String): Boolean {
+    internal fun triggerPersistentChildTask(
+        childId: String,
+        group: String,
+        payloadJson: String,
+        source: String,
+        scheduleId: String,
+    ): Boolean {
         val payload = runCatching { JSONObject(payloadJson.ifBlank { "{}" }) }.getOrDefault(JSONObject())
         val ownerUserId = payload.optString("owner_user_id").trim()
         val payloadSessionEpoch = payload.optLong("session_epoch", 0L)
@@ -1179,7 +1187,28 @@ class AntFarm : ModelTask() {
             return true
         }
         GlobalThreadPools.execute(GlobalThreadPools.computeDispatcher) {
-            runPersistentChildTask(childId, group, payload, source, currentOwnerUserId.orEmpty(), payloadSessionEpoch)
+            PersistentScheduleRegistry.markRunning(scheduleId)
+            val executionLease = ApplicationHook.appContext?.let { context ->
+                WakeLockManager.acquire(
+                    context = context,
+                    timeoutMs = PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
+                    source = "farm_persistent_child",
+                    scheduleId = scheduleId,
+                )
+            }
+            try {
+                runPersistentChildTask(childId, group, payload, source, currentOwnerUserId.orEmpty(), payloadSessionEpoch)
+                PersistentScheduleRegistry.markFired(ApplicationHook.appContext, scheduleId)
+            } catch (t: Throwable) {
+                Log.printStackTrace(TAG, "庄园持久子任务执行失败[$group][$childId]", t)
+                PersistentScheduleRegistry.markFailed(
+                    ApplicationHook.appContext,
+                    scheduleId,
+                    t.message ?: t.javaClass.name,
+                )
+            } finally {
+                executionLease?.close()
+            }
         }
         return true
     }
@@ -1198,24 +1227,19 @@ class AntFarm : ModelTask() {
         ownerUserId: String,
         sessionEpoch: Long
     ) {
-        try {
-            if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) {
-                Log.farm("庄园持久子任务[$group][$childId]会话已切换，取消执行: owner=$ownerUserId session=$sessionEpoch")
-                return
-            }
-            Log.farm("庄园持久子任务触发[$group][$childId] source=$source")
-            cancelPersistentChildTask(childId)
-            when (group) {
-                "AS" -> runSleepChildTask()
-                "AW" -> runWakeUpChildTask()
-                "FA" -> runFeedChildTask()
-                "KC" -> runSendBackChildTask()
-                "HIRE" -> runHireChildTask()
-                "DR" -> runDonationCompetitionPersistentTask(payload)
-                else -> Log.farm("未知庄园持久子任务[$group][$childId]，跳过")
-            }
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "庄园持久子任务执行失败[$group][$childId]", t)
+        if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) {
+            Log.farm("庄园持久子任务[$group][$childId]会话已切换，取消执行: owner=$ownerUserId session=$sessionEpoch")
+            return
+        }
+        Log.farm("庄园持久子任务触发[$group][$childId] source=$source")
+        when (group) {
+            "AS" -> runSleepChildTask()
+            "AW" -> runWakeUpChildTask()
+            "FA" -> runFeedChildTask()
+            "KC" -> runSendBackChildTask()
+            "HIRE" -> runHireChildTask()
+            "DR" -> runDonationCompetitionPersistentTask(payload)
+            else -> Log.farm("未知庄园持久子任务[$group][$childId]，跳过")
         }
     }
 

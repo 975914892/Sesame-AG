@@ -7,6 +7,10 @@ import org.json.JSONObject
 
 private val FOREST_TAG: String = AntForest::class.java.simpleName
 
+private fun logVisibleEnergyCollectionDisabled() {
+    Log.forest("收集能量开关关闭：仅跳过自己、好友和 PK 森友的可见绿色能量球收集相关链路；独立奖励任务仍按各自开关执行")
+}
+
 internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: TimeCounter): JSONObject? {
     if (shouldRunWaterFriendsBeforeCollect()) {
         Log.forest("🚿 【正常流程】执行预收能量浇水")
@@ -34,7 +38,7 @@ internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: Tim
             Log.forest("✅ 【正常流程】收取自己的能量完成")
             tc.countDebug("收取自己的能量")
         } else {
-            Log.forest("收集能量开关关闭，跳过自己的能量收取")
+            logVisibleEnergyCollectionDisabled()
             tc.countDebug("跳过自己的能量收取（未开启）")
         }
     } else {
@@ -101,7 +105,7 @@ internal fun AntForest.runEnergyOnlyCollectionWorkflow(tc: TimeCounter): JSONObj
             Log.forest("✅ 【只收能量】收取自己的能量完成")
             tc.countDebug("只收能量-收取自己的能量")
         } else {
-            Log.forest("收集能量开关关闭，跳过自己的能量收取")
+            logVisibleEnergyCollectionDisabled()
             tc.countDebug("只收能量-跳过自己的能量收取（未开启）")
         }
     } else {
@@ -121,7 +125,10 @@ internal fun AntForest.runEnergyOnlyCollectionWorkflow(tc: TimeCounter): JSONObj
     return selfHomeObj
 }
 
-internal suspend fun AntForest.runForestHomeFollowUpWorkflow(selfHomeObj: JSONObject?, tc: TimeCounter) {
+internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
+    selfHomeObj: JSONObject?,
+    tc: TimeCounter,
+) {
     if (selfHomeObj == null) {
         return
     }
@@ -130,12 +137,14 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(selfHomeObj: JSONOb
     checkAndHandleWhackMole()
     tc.countDebug("拼手速")
 
-    val processObj = if (isTeam(selfHomeObj)) {
-        selfHomeObj.optJSONObject("teamHomeResult")
-            ?.optJSONObject("mainMember")
-    } else {
-        selfHomeObj
-    }
+    val processObj =
+        if (isTeam(selfHomeObj)) {
+            selfHomeObj
+                .optJSONObject("teamHomeResult")
+                ?.optJSONObject("mainMember")
+        } else {
+            selfHomeObj
+        }
 
     if (collectWateringBubble?.value == true) {
         wateringBubbles(processObj)
@@ -213,9 +222,10 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(selfHomeObj: JSONOb
                 tc.countDebug("使用能量雨卡")
             }
             if (EnergyRainCoroutine.execEnergyRain(
-                    gameTaskCloser = EnergyRainCoroutine.EnergyRainGameDriveCloser { request ->
-                        closeEnergyRainGameDriveTask(request)
-                    }
+                    gameTaskCloser =
+                        EnergyRainCoroutine.EnergyRainGameDriveCloser { request ->
+                            closeEnergyRainGameDriveTask(request)
+                        },
                 )
             ) {
                 shouldRefreshForestHomeAfterEnergyRain = true
@@ -260,11 +270,12 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(selfHomeObj: JSONOb
 
     updateSelfHomePage(
         collectRobMultiplierEnergy = true,
-        homePageSource = if (shouldRefreshForestHomeAfterEnergyRain) {
-            AntForestRpcCall.BACK_FROM_ENERGY_RAIN_SOURCE
-        } else {
-            null
-        }
+        homePageSource =
+            if (shouldRefreshForestHomeAfterEnergyRain) {
+                AntForestRpcCall.BACK_FROM_ENERGY_RAIN_SOURCE
+            } else {
+                null
+            },
     )
     tc.countDebug("领取N倍卡能量")
 

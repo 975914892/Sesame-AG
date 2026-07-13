@@ -1,8 +1,8 @@
 package io.github.aoguai.sesameag.hook.keepalive
 
+import android.app.ActivityOptions
 import android.app.AlarmManager
 import android.app.PendingIntent
-import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -20,7 +20,11 @@ object SystemWakeScheduler {
     internal const val EXTRA_SCHEDULE_ID = "schedule_id"
     internal const val EXTRA_PERSISTENT_ALARM_LAUNCH = "persistent_alarm_launch"
 
-    fun schedule(context: Context, schedule: PersistentSchedule, silent: Boolean = false): Boolean {
+    fun schedule(
+        context: Context,
+        schedule: PersistentSchedule,
+        silent: Boolean = false,
+    ): Boolean {
         val alarmContexts = resolveAlarmContexts(context)
         if (alarmContexts.isEmpty()) return false
         alarmContexts.forEachIndexed { index, alarmContext ->
@@ -34,7 +38,11 @@ object SystemWakeScheduler {
         return false
     }
 
-    private fun scheduleOnContext(alarmContext: Context, schedule: PersistentSchedule, silent: Boolean): Boolean {
+    private fun scheduleOnContext(
+        alarmContext: Context,
+        schedule: PersistentSchedule,
+        silent: Boolean,
+    ): Boolean {
         val alarmManager = alarmContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
         if (alarmManager == null) {
             Log.error(TAG, "无法获取 AlarmManager，持久调度失败: ${schedule.name}")
@@ -43,11 +51,12 @@ object SystemWakeScheduler {
 
         val triggerAt = schedule.triggerAtMs.coerceAtLeast(System.currentTimeMillis())
         return try {
-            val pendingIntent = buildPendingIntent(alarmContext, schedule, PendingIntent.FLAG_UPDATE_CURRENT)
-                ?: run {
-                    Log.error(TAG, "创建 PendingIntent 失败，持久调度失败: ${schedule.name}")
-                    return false
-                }
+            val pendingIntent =
+                buildPendingIntent(alarmContext, schedule, PendingIntent.FLAG_UPDATE_CURRENT)
+                    ?: run {
+                        Log.error(TAG, "创建 PendingIntent 失败，持久调度失败: ${schedule.name}")
+                        return false
+                    }
             if (PermissionUtil.checkAlarmPermissions(alarmContext)) {
                 scheduleExact(alarmManager, triggerAt, pendingIntent)
                 if (!silent) {
@@ -59,6 +68,9 @@ object SystemWakeScheduler {
                     Log.runtime(TAG, "精确闹钟权限缺失，已降级注册系统闹钟[${schedule.name}] ${TimeUtil.getCommonDate(triggerAt)}")
                 }
             }
+            if (shouldLaunchTarget(schedule)) {
+                scheduleLaunchConfirmationTimeout(alarmContext, schedule, triggerAt)
+            }
             true
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "注册系统闹钟失败[${schedule.name}]", t)
@@ -66,7 +78,11 @@ object SystemWakeScheduler {
         }
     }
 
-    fun cancel(context: Context, schedule: PersistentSchedule, silent: Boolean = false) {
+    fun cancel(
+        context: Context,
+        schedule: PersistentSchedule,
+        silent: Boolean = false,
+    ) {
         resolveAlarmContexts(context).forEach { alarmContext ->
             val alarmManager = alarmContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return@forEach
             var cancelled = false
@@ -76,8 +92,8 @@ object SystemWakeScheduler {
                     alarmContext,
                     schedule,
                     PendingIntent.FLAG_NO_CREATE,
-                    allowBackgroundAlways = true
-                )
+                    allowBackgroundAlways = true,
+                ),
             ).forEach { pendingIntent ->
                 try {
                     alarmManager.cancel(pendingIntent)
@@ -96,7 +112,7 @@ object SystemWakeScheduler {
     private fun scheduleExact(
         alarmManager: AlarmManager,
         triggerAt: Long,
-        pendingIntent: PendingIntent
+        pendingIntent: PendingIntent,
     ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
@@ -109,7 +125,7 @@ object SystemWakeScheduler {
         alarmManager: AlarmManager,
         triggerAt: Long,
         toleranceMs: Long,
-        pendingIntent: PendingIntent
+        pendingIntent: PendingIntent,
     ) {
         val safeTolerance = toleranceMs.coerceAtLeast(60_000L)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -122,40 +138,40 @@ object SystemWakeScheduler {
     private fun buildPendingIntent(
         context: Context,
         schedule: PersistentSchedule,
-        updateFlag: Int
-    ): PendingIntent? {
-        return if (context.packageName == General.MODULE_PACKAGE_NAME) {
+        updateFlag: Int,
+    ): PendingIntent? =
+        if (context.packageName == General.MODULE_PACKAGE_NAME) {
             buildReceiverPendingIntent(context, schedule, updateFlag)
         } else if (shouldLaunchTarget(schedule)) {
             buildTargetLaunchPendingIntent(
                 context,
                 schedule,
                 updateFlag,
-                allowBackgroundAlways = true
+                allowBackgroundAlways = true,
             )
         } else {
             buildReceiverPendingIntent(context, schedule, updateFlag)
         }
-    }
 
-    private fun shouldLaunchTarget(schedule: PersistentSchedule): Boolean {
-        return PersistentLaunchPolicy.shouldLaunchTarget(schedule)
-    }
+    private fun shouldLaunchTarget(schedule: PersistentSchedule): Boolean = PersistentLaunchPolicy.shouldLaunchTarget(schedule)
 
     private fun buildReceiverPendingIntent(
         context: Context,
         schedule: PersistentSchedule,
-        updateFlag: Int
+        updateFlag: Int,
     ): PendingIntent? {
-        val intent = Intent(context, ScheduledTriggerReceiver::class.java).apply {
-            action = ACTION_TRIGGER
-            data = Uri.Builder()
-                .scheme("sesameag")
-                .authority("persistent-schedule")
-                .appendPath(schedule.id)
-                .build()
-            putExtra(EXTRA_SCHEDULE_ID, schedule.id)
-        }
+        val intent =
+            Intent(context, ScheduledTriggerReceiver::class.java).apply {
+                action = ACTION_TRIGGER
+                data =
+                    Uri
+                        .Builder()
+                        .scheme("sesameag")
+                        .authority("persistent-schedule")
+                        .appendPath(schedule.id)
+                        .build()
+                putExtra(EXTRA_SCHEDULE_ID, schedule.id)
+            }
         val flags = updateFlag or PendingIntent.FLAG_IMMUTABLE
         return try {
             PendingIntent.getBroadcast(context, requestCodeFor(schedule.id), intent, flags)
@@ -169,7 +185,7 @@ object SystemWakeScheduler {
         context: Context,
         schedule: PersistentSchedule,
         updateFlag: Int,
-        allowBackgroundAlways: Boolean
+        allowBackgroundAlways: Boolean,
     ): PendingIntent? {
         val intent = buildTargetLaunchIntent(context, schedule)
         val flags = updateFlag or PendingIntent.FLAG_IMMUTABLE
@@ -179,7 +195,7 @@ object SystemWakeScheduler {
                 requestCodeFor(schedule.id),
                 intent,
                 flags,
-                creatorLaunchOptions(allowAlways = allowBackgroundAlways)
+                creatorLaunchOptions(allowAlways = allowBackgroundAlways),
             )
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "创建目标应用 PendingIntent 失败[${schedule.name}]", t)
@@ -187,13 +203,18 @@ object SystemWakeScheduler {
         }
     }
 
-    fun launchTargetNow(context: Context, schedule: PersistentSchedule, allowBackgroundAlways: Boolean = false): Boolean {
-        val pendingIntent = buildTargetLaunchPendingIntent(
-            context.applicationContext ?: context,
-            schedule,
-            PendingIntent.FLAG_UPDATE_CURRENT,
-            allowBackgroundAlways = allowBackgroundAlways
-        ) ?: return false
+    fun launchTargetNow(
+        context: Context,
+        schedule: PersistentSchedule,
+        allowBackgroundAlways: Boolean = false,
+    ): Boolean {
+        val pendingIntent =
+            buildTargetLaunchPendingIntent(
+                context.applicationContext ?: context,
+                schedule,
+                PendingIntent.FLAG_UPDATE_CURRENT,
+                allowBackgroundAlways = allowBackgroundAlways,
+            ) ?: return false
         return try {
             pendingIntent.send(
                 context,
@@ -202,9 +223,10 @@ object SystemWakeScheduler {
                 null,
                 null,
                 null,
-                senderLaunchOptions(allowAlways = allowBackgroundAlways)
+                senderLaunchOptions(allowAlways = allowBackgroundAlways),
             )
-            Log.record(TAG, "已通过 PendingIntent 拉起目标应用[${schedule.name}]")
+            scheduleLaunchConfirmationTimeout(context, schedule, System.currentTimeMillis())
+            Log.record(TAG, "已通过 PendingIntent 请求拉起目标应用[${schedule.name}]")
             true
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "PendingIntent 拉起目标应用失败[${schedule.name}]", t)
@@ -212,22 +234,46 @@ object SystemWakeScheduler {
         }
     }
 
-    private fun buildTargetLaunchIntent(context: Context, schedule: PersistentSchedule): Intent {
-        val launchIntent = if (context.packageName == General.PACKAGE_NAME) {
-            Intent(Intent.ACTION_VIEW).apply {
-                setClassName(General.PACKAGE_NAME, General.CURRENT_USING_ACTIVITY)
+    fun scheduleLaunchConfirmationTimeout(
+        context: Context,
+        schedule: PersistentSchedule,
+        triggerAtMs: Long = schedule.triggerAtMs,
+    ) {
+        val delayMs = (triggerAtMs - System.currentTimeMillis()).coerceAtLeast(0L) + 30_000L
+        UnifiedScheduler.scheduleLongDelay(delayMs, "persistent_launch_timeout:${schedule.id}") {
+            val current = PersistentScheduleRegistry.get(schedule.id) ?: return@scheduleLongDelay
+            if (current.state == PersistentScheduleState.SCHEDULED && current.triggerAtMs <= System.currentTimeMillis()) {
+                PersistentScheduleRegistry.rescheduleDeferred(
+                    context.applicationContext ?: context,
+                    current.id,
+                    "launch_unconfirmed",
+                )
             }
-        } else {
-            context.packageManager.getLaunchIntentForPackage(General.PACKAGE_NAME)
-                ?: Intent(Intent.ACTION_VIEW).apply { setPackage(General.PACKAGE_NAME) }
         }
+    }
+
+    private fun buildTargetLaunchIntent(
+        context: Context,
+        schedule: PersistentSchedule,
+    ): Intent {
+        val launchIntent =
+            if (context.packageName == General.PACKAGE_NAME) {
+                Intent(Intent.ACTION_VIEW).apply {
+                    setClassName(General.PACKAGE_NAME, General.CURRENT_USING_ACTIVITY)
+                }
+            } else {
+                context.packageManager.getLaunchIntentForPackage(General.PACKAGE_NAME)
+                    ?: Intent(Intent.ACTION_VIEW).apply { setPackage(General.PACKAGE_NAME) }
+            }
         return Intent(launchIntent).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            data = Uri.Builder()
-                .scheme("sesameag")
-                .authority("persistent-schedule-launch")
-                .appendPath(schedule.id)
-                .build()
+            data =
+                Uri
+                    .Builder()
+                    .scheme("sesameag")
+                    .authority("persistent-schedule-launch")
+                    .appendPath(schedule.id)
+                    .build()
             putExtra(EXTRA_SCHEDULE_ID, schedule.id)
             putExtra(EXTRA_PERSISTENT_ALARM_LAUNCH, true)
         }
@@ -235,30 +281,34 @@ object SystemWakeScheduler {
 
     private fun creatorLaunchOptions(allowAlways: Boolean): android.os.Bundle? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
-        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA && !allowAlways) {
-            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
-        } else {
-            @Suppress("DEPRECATION")
-            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-        }
-        return ActivityOptions.makeBasic()
+        val mode =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA && !allowAlways) {
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+            } else {
+                @Suppress("DEPRECATION")
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            }
+        return ActivityOptions
+            .makeBasic()
             .setPendingIntentCreatorBackgroundActivityStartMode(mode)
             .toBundle()
     }
 
     private fun senderLaunchOptions(allowAlways: Boolean): android.os.Bundle? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
-        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA && !allowAlways) {
-            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
-        } else {
-            @Suppress("DEPRECATION")
-            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-        }
-        return ActivityOptions.makeBasic()
+        val mode =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA && !allowAlways) {
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+            } else {
+                @Suppress("DEPRECATION")
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            }
+        return ActivityOptions
+            .makeBasic()
             .setPendingIntentBackgroundActivityStartMode(mode)
             .toBundle()
     }
@@ -287,13 +337,15 @@ object SystemWakeScheduler {
     }
 
     @Suppress("DEPRECATION")
-    private fun currentUidOwnsPackage(context: Context, packageName: String): Boolean {
-        return try {
+    private fun currentUidOwnsPackage(
+        context: Context,
+        packageName: String,
+    ): Boolean =
+        try {
             context.packageManager.getPackageUid(packageName, 0) == Process.myUid()
         } catch (_: Throwable) {
             false
         }
-    }
 
     private fun resolveModuleContext(context: Context): Context? {
         val appContext = context.applicationContext ?: context
@@ -307,5 +359,4 @@ object SystemWakeScheduler {
             null
         }
     }
-
 }

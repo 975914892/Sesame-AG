@@ -30,7 +30,7 @@ class AntFishPond : ModelTask() {
         val current: String,
         val target: String,
         val diff: String,
-        val rodCount: Int
+        val rodCount: Int,
     )
 
     private lateinit var fishPondTask: BooleanModelField
@@ -50,19 +50,22 @@ class AntFishPond : ModelTask() {
     override fun getFields(): ModelFields {
         val modelFields = ModelFields()
         modelFields.addField(
-            BooleanModelField("fishPondTask", "鱼池任务 | 领奖", true).withDesc(
-                "自动处理福气鱼池签到、宝箱、明日钓竿和已验证任务奖励。"
-            ).also { fishPondTask = it }
+            BooleanModelField("fishPondTask", "鱼池任务 | 领奖", false)
+                .withDesc(
+                    "开启后自动处理福气鱼池签到、宝箱、明日钓竿和已验证任务奖励。",
+                ).also { fishPondTask = it },
         )
         modelFields.addField(
-            BooleanModelField("autoFish", "自动钓鱼 | 开启", false).withDesc(
-                "开启后使用最近捕获的鱼池令牌自动钓鱼；没有令牌时提示原因并跳过。"
-            ).also { autoFish = it }
+            BooleanModelField("autoFish", "自动钓鱼 | 开启", false)
+                .withDesc(
+                    "开启后使用最近捕获的鱼池令牌自动钓鱼；没有令牌时提示原因并跳过。",
+                ).also { autoFish = it },
         )
         modelFields.addField(
-            IntegerModelField("fishDailyLimit", "自动钓鱼 | 每日次数", DEFAULT_FISH_LIMIT, 0, 200).withDesc(
-                "限制当天最多钓鱼的次数，0 表示不限制；默认限制为 30 次。需开启“自动钓鱼 | 开启”。"
-            ).also { fishDailyLimit = it }
+            IntegerModelField("fishDailyLimit", "自动钓鱼 | 每日次数", DEFAULT_FISH_LIMIT, 0, 200)
+                .withDesc(
+                    "限制当天最多钓鱼的次数，0 表示不限制；默认限制为 30 次。需开启“自动钓鱼 | 开启”。",
+                ).also { fishDailyLimit = it },
         )
         return modelFields
     }
@@ -87,11 +90,12 @@ class AntFishPond : ModelTask() {
                 initialTaskListDone = handleTaskList(allowMarkDone = !delayTaskDoneFlag)
             }
 
-            val autoFishChanged = if (autoFish.value == true) {
-                runAutoFish()
-            } else {
-                false
-            }
+            val autoFishChanged =
+                if (autoFish.value == true) {
+                    runAutoFish()
+                } else {
+                    false
+                }
             if (autoFishChanged == null) {
                 return
             }
@@ -177,8 +181,10 @@ class AntFishPond : ModelTask() {
             var progressed = false
             for (i in 0 until activityList.length()) {
                 val item = activityList.optJSONObject(i) ?: continue
-                val activityType = item.optString("activityType")
-                    .ifBlank { item.optString("activityId") }
+                val activityType =
+                    item
+                        .optString("activityType")
+                        .ifBlank { item.optString("activityId") }
                 val status = item.optString("status")
                 val extend = parseObject(item.optString("extend"))
                 val extendStatus = extend?.optString("status").orEmpty()
@@ -196,7 +202,10 @@ class AntFishPond : ModelTask() {
         return false
     }
 
-    private fun handleGiftBox(status: String, extendStatus: String): Boolean {
+    private fun handleGiftBox(
+        status: String,
+        extendStatus: String,
+    ): Boolean {
         if (status == STATUS_FINISHED || extendStatus == STATUS_FINISHED) {
             Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_GIFT_BOX_DONE)
             return false
@@ -242,12 +251,16 @@ class AntFishPond : ModelTask() {
         return false
     }
 
-    private fun handleFishActivity(status: String, extend: JSONObject?): Boolean {
+    private fun handleFishActivity(
+        status: String,
+        extend: JSONObject?,
+    ): Boolean {
         val extendStatus = extend?.optString("status").orEmpty()
         val leftFishTimes = extend?.optInt("leftFishTimes", Int.MAX_VALUE) ?: Int.MAX_VALUE
-        val claimable = status in CLAIMABLE_STATUS ||
-            extendStatus in CLAIMABLE_STATUS ||
-            leftFishTimes <= 0
+        val claimable =
+            status in CLAIMABLE_STATUS ||
+                extendStatus in CLAIMABLE_STATUS ||
+                leftFishTimes <= 0
         if (!claimable) {
             return false
         }
@@ -268,17 +281,18 @@ class AntFishPond : ModelTask() {
 
     private fun handleTaskList(
         skipIfHandledToday: Boolean = true,
-        allowMarkDone: Boolean = true
+        allowMarkDone: Boolean = true,
     ): Boolean {
         try {
             val listJson = queryTaskList() ?: return false
             handleSign(listJson)
 
             val taskFlowAdapter = FishPondTaskFlowAdapter(skipIfHandledToday)
-            val result = TaskFlowEngine(
-                taskFlowAdapter,
-                roundSleepMs = SHORT_INTERVAL_MS
-            ).run()
+            val result =
+                TaskFlowEngine(
+                    taskFlowAdapter,
+                    roundSleepMs = SHORT_INTERVAL_MS,
+                ).run()
             val canMarkDone = !result.stopped && taskFlowAdapter.canMarkTasksDone()
             if (allowMarkDone && canMarkDone) {
                 Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE)
@@ -305,10 +319,11 @@ class AntFishPond : ModelTask() {
     }
 
     private fun handleSign(listJson: JSONObject): Boolean {
-        val signList = payloadOf(listJson)
-            .optJSONObject("signInfo")
-            ?.optJSONArray("list")
-            ?: return false
+        val signList =
+            payloadOf(listJson)
+                .optJSONObject("signInfo")
+                ?.optJSONArray("list")
+                ?: return false
         for (i in 0 until signList.length()) {
             val signItem = signList.optJSONObject(i) ?: continue
             if (!signItem.optBoolean("today")) {
@@ -320,11 +335,12 @@ class AntFishPond : ModelTask() {
             }
 
             val signKey = signItem.optString("signKey")
-            val response = if (signKey.isBlank()) {
-                AntFishPondRpcCall.sign()
-            } else {
-                AntFishPondRpcCall.sign(signKey)
-            }
+            val response =
+                if (signKey.isBlank()) {
+                    AntFishPondRpcCall.sign()
+                } else {
+                    AntFishPondRpcCall.sign(signKey)
+                }
             val jo = JSONObject(response)
             if (isRpcSuccess(jo)) {
                 Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_SIGN_DONE)
@@ -341,7 +357,7 @@ class AntFishPond : ModelTask() {
     }
 
     private inner class FishPondTaskFlowAdapter(
-        private val skipIfHandledToday: Boolean
+        private val skipIfHandledToday: Boolean,
     ) : TaskFlowAdapter {
         private val loggedSkipKeys = LinkedHashSet<String>()
         private var latestItems: List<TaskFlowItem> = emptyList()
@@ -352,9 +368,7 @@ class AntFishPond : ModelTask() {
         override val moduleName: String = TASK_BLACKLIST_MODULE
         override val flowName: String = "福气鱼池任务"
 
-        override fun isFlowHandledToday(): Boolean {
-            return skipIfHandledToday && Status.hasFlagToday(StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE)
-        }
+        override fun isFlowHandledToday(): Boolean = skipIfHandledToday && Status.hasFlagToday(StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE)
 
         override fun query(): JSONObject {
             val response = AntFishPondRpcCall.listTask()
@@ -369,16 +383,15 @@ class AntFishPond : ModelTask() {
                 .put("raw", response)
         }
 
-        override fun isQuerySuccess(response: JSONObject): Boolean {
-            return isRpcSuccess(response)
-        }
+        override fun isQuerySuccess(response: JSONObject): Boolean = isRpcSuccess(response)
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
             querySucceeded = true
-            val taskList = payloadOf(response).optJSONArray("taskList") ?: run {
-                latestItems = emptyList()
-                return emptyList()
-            }
+            val taskList =
+                payloadOf(response).optJSONArray("taskList") ?: run {
+                    latestItems = emptyList()
+                    return emptyList()
+                }
             val items = mutableListOf<TaskFlowItem>()
             for (i in 0 until taskList.length()) {
                 val task = taskList.optJSONObject(i) ?: continue
@@ -388,16 +401,18 @@ class AntFishPond : ModelTask() {
                 val taskProgress = task.optInt("taskProgress", 0)
                 val rightsTimesLimit = task.optInt("rightsTimesLimit", 0)
                 val rightsTimes = task.optInt("rightsTimes", 0)
-                val current = when {
-                    taskRequire > 0 -> taskProgress
-                    rightsTimesLimit > 0 -> rightsTimes
-                    else -> null
-                }
-                val limit = when {
-                    taskRequire > 0 -> taskRequire
-                    rightsTimesLimit > 0 -> rightsTimesLimit
-                    else -> null
-                }
+                val current =
+                    when {
+                        taskRequire > 0 -> taskProgress
+                        rightsTimesLimit > 0 -> rightsTimes
+                        else -> null
+                    }
+                val limit =
+                    when {
+                        taskRequire > 0 -> taskRequire
+                        rightsTimesLimit > 0 -> rightsTimesLimit
+                        else -> null
+                    }
 
                 items.add(
                     TaskFlowItem(
@@ -411,8 +426,8 @@ class AntFishPond : ModelTask() {
                         raw = task,
                         progress = buildFishPondTaskProgress(task),
                         current = current,
-                        limit = limit
-                    )
+                        limit = limit,
+                    ),
                 )
             }
             latestItems = items
@@ -430,28 +445,46 @@ class AntFishPond : ModelTask() {
                 "DONE",
                 "COMPLETED",
                 "SUCCESS",
-                "COMPLETE" -> TaskFlowPhase.TERMINAL
+                "COMPLETE",
+                -> {
+                    TaskFlowPhase.TERMINAL
+                }
 
                 "FINISHED",
                 "RECEIVABLE",
                 "TODO_RECEIVE",
                 "WAIT_RECEIVE",
-                "TO_RECEIVE" -> if (item.actionType == ACTION_GO_FISH && item.type == TASK_GO_FISH) {
-                    TaskFlowPhase.REWARD_READY
-                } else {
-                    TaskFlowPhase.UNSUPPORTED
+                "TO_RECEIVE",
+                -> {
+                    if (item.actionType == ACTION_GO_FISH && item.type == TASK_GO_FISH) {
+                        TaskFlowPhase.REWARD_READY
+                    } else {
+                        TaskFlowPhase.UNSUPPORTED
+                    }
                 }
 
                 STATUS_TODO,
                 "WAIT_COMPLETE",
-                "NOT_DONE" -> when {
-                    item.actionType == ACTION_VISIT && taskHasDirectAdBizNo(task) ->
-                        TaskFlowPhase.READY_TO_COMPLETE
-                    item.actionType == ACTION_GO_FISH -> TaskFlowPhase.BUSINESS_ACTION
-                    else -> TaskFlowPhase.UNSUPPORTED
+                "NOT_DONE",
+                -> {
+                    when {
+                        item.actionType == ACTION_VISIT && taskHasDirectAdBizNo(task) -> {
+                            TaskFlowPhase.READY_TO_COMPLETE
+                        }
+
+                        item.actionType == ACTION_GO_FISH -> {
+                            TaskFlowPhase.BUSINESS_ACTION
+                        }
+
+                        else -> {
+                            TaskFlowPhase.UNSUPPORTED
+                        }
+                    }
                 }
 
-                else -> TaskFlowPhase.UNKNOWN
+                else -> {
+                    TaskFlowPhase.UNKNOWN
+                }
             }
         }
 
@@ -462,21 +495,26 @@ class AntFishPond : ModelTask() {
                     logTaskSkipOnce(item, "action=${item.actionType} 需通过钓鱼业务动作推进，跳过任务中心直完成")
                     return true
                 }
+
                 TaskFlowPhase.UNSUPPORTED -> {
                     logTaskSkipOnce(
                         item,
-                        "action=${item.actionType.ifBlank { "UNKNOWN" }} status=${item.status.ifBlank { "UNKNOWN" }} 暂未支持自动闭环"
+                        "action=${item.actionType.ifBlank { "UNKNOWN" }} status=${item.status.ifBlank { "UNKNOWN" }} 暂未支持自动闭环",
                     )
                     return true
                 }
-                else -> Unit
+
+                else -> {
+                    Unit
+                }
             }
 
-            val handled = when (phase) {
-                TaskFlowPhase.REWARD_READY -> handledTaskAwards.contains(buildFishPondAwardKey(item))
-                TaskFlowPhase.READY_TO_COMPLETE -> handledVisitFinishes.contains(buildFishPondVisitKey(item))
-                else -> false
-            }
+            val handled =
+                when (phase) {
+                    TaskFlowPhase.REWARD_READY -> handledTaskAwards.contains(buildFishPondAwardKey(item))
+                    TaskFlowPhase.READY_TO_COMPLETE -> handledVisitFinishes.contains(buildFishPondVisitKey(item))
+                    else -> false
+                }
             if (handled) {
                 logTaskSkipOnce(item, "本轮已推进，等待刷新后再处理")
             }
@@ -498,7 +536,7 @@ class AntFishPond : ModelTask() {
                     code = "UNSUPPORTED_ACTION",
                     message = "仅支持GOFISH任务领奖",
                     rpc = "FishPondTaskFlowAdapter.receive",
-                    detail = fishPondTaskActionDetail(item, "receive")
+                    detail = fishPondTaskActionDetail(item, "receive"),
                 )
             }
             return claimTaskAward(item)
@@ -511,7 +549,7 @@ class AntFishPond : ModelTask() {
                     code = "UNSUPPORTED_ACTION",
                     message = "仅支持鱼池IEP浏览任务",
                     rpc = "FishPondTaskFlowAdapter.complete",
-                    detail = fishPondTaskActionDetail(item, "complete")
+                    detail = fishPondTaskActionDetail(item, "complete"),
                 )
             }
             val task = item.raw ?: return missingRawResult(item, "complete")
@@ -521,7 +559,7 @@ class AntFishPond : ModelTask() {
                     failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
                     message = "浏览任务缺少直接adBizNo",
                     rpc = "FishPondTaskFlowAdapter.complete",
-                    detail = fishPondTaskActionDetail(item, "complete")
+                    detail = fishPondTaskActionDetail(item, "complete"),
                 )
             }
             return completeFishPondAdTask(
@@ -529,19 +567,25 @@ class AntFishPond : ModelTask() {
                 adBizNo = adBizNo,
                 syncTypeList = VISIT_TASK_SYNC_TYPES,
                 successMessage = "浏览任务🧾[${item.title}]完成",
-                terminalMessage = "浏览任务🧾[${item.title}]已完成，刷新状态"
+                terminalMessage = "浏览任务🧾[${item.title}]已完成，刷新状态",
             )
         }
 
-        override fun actionKey(item: TaskFlowItem, action: TaskFlowAction): String {
-            return when (action) {
+        override fun actionKey(
+            item: TaskFlowItem,
+            action: TaskFlowAction,
+        ): String =
+            when (action) {
                 TaskFlowAction.RECEIVE -> "receive:${buildFishPondAwardKey(item)}"
                 TaskFlowAction.COMPLETE -> "complete:${buildFishPondVisitKey(item)}"
                 else -> super<TaskFlowAdapter>.actionKey(item, action)
             }
-        }
 
-        override fun afterSuccess(item: TaskFlowItem, action: TaskFlowAction, result: TaskFlowActionResult) {
+        override fun afterSuccess(
+            item: TaskFlowItem,
+            action: TaskFlowAction,
+            result: TaskFlowActionResult,
+        ) {
             rememberHandledTask(item, action)
         }
 
@@ -549,7 +593,7 @@ class AntFishPond : ModelTask() {
             item: TaskFlowItem,
             action: TaskFlowAction,
             result: TaskFlowActionResult,
-            decision: TaskFlowDecision
+            decision: TaskFlowDecision,
         ) {
             if (result.failureType == TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW) {
                 unknownFailureSeen = true
@@ -570,12 +614,15 @@ class AntFishPond : ModelTask() {
             Log.fishpond("钓竿任务查询失败：${formatFailure(response)} raw=$response")
         }
 
-        override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
+        override fun onUnknownPhase(
+            item: TaskFlowItem,
+            phase: TaskFlowPhase,
+        ) {
             unknownPhaseSeen = true
             Log.error(
                 TAG,
                 "$flowName[未知状态：${item.title}] taskId=${item.id} status=${item.status.ifBlank { "UNKNOWN" }} " +
-                    "actionType=${item.actionType.ifBlank { "UNKNOWN" }} sceneCode=${item.sceneCode.ifBlank { "UNKNOWN" }}"
+                    "actionType=${item.actionType.ifBlank { "UNKNOWN" }} sceneCode=${item.sceneCode.ifBlank { "UNKNOWN" }}",
             )
         }
 
@@ -613,7 +660,10 @@ class AntFishPond : ModelTask() {
             return true
         }
 
-        private fun rememberHandledTask(item: TaskFlowItem, action: TaskFlowAction) {
+        private fun rememberHandledTask(
+            item: TaskFlowItem,
+            action: TaskFlowAction,
+        ) {
             when (action) {
                 TaskFlowAction.RECEIVE -> handledTaskAwards.add(buildFishPondAwardKey(item))
                 TaskFlowAction.COMPLETE -> handledVisitFinishes.add(buildFishPondVisitKey(item))
@@ -621,21 +671,26 @@ class AntFishPond : ModelTask() {
             }
         }
 
-        private fun missingRawResult(item: TaskFlowItem, action: String): TaskFlowActionResult {
-            return TaskFlowActionResult.failure(
+        private fun missingRawResult(
+            item: TaskFlowItem,
+            action: String,
+        ): TaskFlowActionResult =
+            TaskFlowActionResult.failure(
                 failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
                 message = "缺少任务原始数据",
                 rpc = "FishPondTaskFlowAdapter.$action",
-                detail = fishPondTaskActionDetail(item, action)
+                detail = fishPondTaskActionDetail(item, action),
             )
-        }
 
-        private fun logTaskSkipOnce(item: TaskFlowItem, reason: String) {
+        private fun logTaskSkipOnce(
+            item: TaskFlowItem,
+            reason: String,
+        ) {
             val key = "${item.id}:${item.actionType}:${item.status}:$reason"
             if (loggedSkipKeys.add(key)) {
                 Log.fishpond(
                     "鱼池任务跳过[${item.title}] $reason " +
-                        "taskId=${item.id} sceneCode=${item.sceneCode} progress=${item.progress.ifBlank { "UNKNOWN" }}"
+                        "taskId=${item.id} sceneCode=${item.sceneCode} progress=${item.progress.ifBlank { "UNKNOWN" }}",
                 )
             }
         }
@@ -658,12 +713,13 @@ class AntFishPond : ModelTask() {
 
     private fun claimTaskAward(item: TaskFlowItem): TaskFlowActionResult {
         val response = AntFishPondRpcCall.receiveTaskAward(item.type, item.sceneCode)
-        val jo = parseObject(response) ?: return emptyFishPondTaskResponse(
-            rpc = "AntFishPondRpcCall.receiveTaskAward",
-            item = item,
-            action = "receiveTaskAward",
-            raw = response
-        )
+        val jo =
+            parseObject(response) ?: return emptyFishPondTaskResponse(
+                rpc = "AntFishPondRpcCall.receiveTaskAward",
+                item = item,
+                action = "receiveTaskAward",
+                raw = response,
+            )
         if (isRpcSuccess(jo)) {
             Log.fishpond("任务奖励🎖️[${item.title}]领取成功")
             AntFishPondRpcCall.fishpondSyncIndex(listOf("TASK_DISPLAY"))
@@ -675,7 +731,7 @@ class AntFishPond : ModelTask() {
             response = jo,
             rpc = "AntFishPondRpcCall.receiveTaskAward",
             item = item,
-            action = "receiveTaskAward"
+            action = "receiveTaskAward",
         )
     }
 
@@ -686,46 +742,49 @@ class AntFishPond : ModelTask() {
         successMessage: String,
         terminalMessage: String = successMessage,
         syncVerifier: (JSONObject) -> Boolean = { true },
-        syncFailureMessage: String = "广告任务回查未见预期状态"
+        syncFailureMessage: String = "广告任务回查未见预期状态",
     ): TaskFlowActionResult {
         val noticeRaw = AntFishPondRpcCall.fishpondAdNotice(adBizNo)
-        val notice = parseObject(noticeRaw) ?: return emptyFishPondTaskResponse(
-            rpc = "AntFishPondRpcCall.fishpondAdNotice",
-            item = item,
-            action = "fishpondAdNotice",
-            raw = noticeRaw
-        )
+        val notice =
+            parseObject(noticeRaw) ?: return emptyFishPondTaskResponse(
+                rpc = "AntFishPondRpcCall.fishpondAdNotice",
+                item = item,
+                action = "fishpondAdNotice",
+                raw = noticeRaw,
+            )
         if (!isRpcSuccess(notice)) {
             return fishPondTaskActionFailureResult(
                 response = notice,
                 rpc = "AntFishPondRpcCall.fishpondAdNotice",
                 item = item,
-                action = "fishpondAdNotice"
+                action = "fishpondAdNotice",
             )
         }
 
         val finishRaw = AntFishPondRpcCall.finishTask(item.type, adBizNo, item.sceneCode)
-        val finish = parseObject(finishRaw) ?: return emptyFishPondTaskResponse(
-            rpc = "AntFishPondRpcCall.finishTask",
-            item = item,
-            action = "finishTask",
-            raw = finishRaw
-        )
+        val finish =
+            parseObject(finishRaw) ?: return emptyFishPondTaskResponse(
+                rpc = "AntFishPondRpcCall.finishTask",
+                item = item,
+                action = "finishTask",
+                raw = finishRaw,
+            )
         val finishFailureType = classifyFishPondTaskFailure(finish)
         if (isRpcSuccess(finish) || finishFailureType == TaskRpcFailureType.TERMINAL_DONE) {
             val syncRaw = AntFishPondRpcCall.fishpondSyncIndex(syncTypeList)
-            val sync = parseObject(syncRaw) ?: return emptyFishPondTaskResponse(
-                rpc = "AntFishPondRpcCall.fishpondSyncIndex",
-                item = item,
-                action = "fishpondSyncIndex",
-                raw = syncRaw
-            )
+            val sync =
+                parseObject(syncRaw) ?: return emptyFishPondTaskResponse(
+                    rpc = "AntFishPondRpcCall.fishpondSyncIndex",
+                    item = item,
+                    action = "fishpondSyncIndex",
+                    raw = syncRaw,
+                )
             if (!isRpcSuccess(sync)) {
                 return fishPondTaskActionFailureResult(
                     response = sync,
                     rpc = "AntFishPondRpcCall.fishpondSyncIndex",
                     item = item,
-                    action = "fishpondSyncIndex"
+                    action = "fishpondSyncIndex",
                 )
             }
             if (!syncVerifier(sync)) {
@@ -734,7 +793,7 @@ class AntFishPond : ModelTask() {
                     message = syncFailureMessage,
                     rpc = "AntFishPondRpcCall.fishpondSyncIndex",
                     raw = sync.toString(),
-                    detail = fishPondTaskActionDetail(item, "fishpondSyncIndex")
+                    detail = fishPondTaskActionDetail(item, "fishpondSyncIndex"),
                 )
             }
             Log.fishpond(if (finishFailureType == TaskRpcFailureType.TERMINAL_DONE) terminalMessage else successMessage)
@@ -747,7 +806,7 @@ class AntFishPond : ModelTask() {
             response = finish,
             rpc = "AntFishPondRpcCall.finishTask",
             item = item,
-            action = "finishTask"
+            action = "finishTask",
         )
     }
 
@@ -821,11 +880,12 @@ class AntFishPond : ModelTask() {
             }
 
             logAngleResult(angleJson)
-            val exchangeSource = when {
-                canExchange(angleJson) -> angleJson
-                canExchange(angleExchangeSource) -> angleExchangeSource
-                else -> null
-            }
+            val exchangeSource =
+                when {
+                    canExchange(angleJson) -> angleJson
+                    canExchange(angleExchangeSource) -> angleExchangeSource
+                    else -> null
+                }
             if (exchangeSource != null) {
                 indexJson = exchangeRewardAndReloadIndex(exchangeSource, "钓鱼结果") ?: return null
                 rodCount = extractRodCount(indexJson)
@@ -895,9 +955,11 @@ class AntFishPond : ModelTask() {
 
     private fun logFishProgress(jo: JSONObject) {
         val payload = payloadOf(jo)
-        val fishAsset = payload.optJSONObject("roundInfo")
-            ?.optJSONObject("fishAssetInfo")
-            ?: return
+        val fishAsset =
+            payload
+                .optJSONObject("roundInfo")
+                ?.optJSONObject("fishAssetInfo")
+                ?: return
         val current = fishAsset.optString("currentFishWeight")
         val target = fishAsset.optString("targetFishWeight")
         val diff = fishAsset.optString("diffFishWeight")
@@ -918,7 +980,10 @@ class AntFishPond : ModelTask() {
             payload.optJSONObject("fishResultInfo")?.optBoolean("canExchange", false) == true
     }
 
-    private fun exchangeRewardAndReloadIndex(jo: JSONObject, sourceLabel: String): JSONObject? {
+    private fun exchangeRewardAndReloadIndex(
+        jo: JSONObject,
+        sourceLabel: String,
+    ): JSONObject? {
         if (!canExchange(jo)) {
             return jo
         }
@@ -930,9 +995,13 @@ class AntFishPond : ModelTask() {
         }
         val failureType = classifyFishPondTaskFailure(exchange)
         when {
-            isRpcSuccess(exchange) -> logExchangeRewardSuccess(exchange)
-            failureType == TaskRpcFailureType.TERMINAL_DONE ->
+            isRpcSuccess(exchange) -> {
+                logExchangeRewardSuccess(exchange)
+            }
+
+            failureType == TaskRpcFailureType.TERMINAL_DONE -> {
                 Log.fishpond("鱼池红包兑换已处理，回查首页：${formatFailure(exchange)}")
+            }
 
             else -> {
                 Log.fishpond("鱼池红包兑换失败，停止当前链路：${formatFailure(exchange)} source=$sourceLabel")
@@ -960,17 +1029,18 @@ class AntFishPond : ModelTask() {
             refreshFishActivityState()
             return
         }
-        val result = completeFishPondAdTask(
-            item = item,
-            adBizNo = adBizNo,
-            syncTypeList = FISH_ACTIVITY_RESULT_AD_SYNC_TYPES,
-            successMessage = "钓鱼活动额外钓竿🎣领取成功",
-            terminalMessage = "钓鱼活动额外钓竿🎣已完成，刷新状态",
-            syncVerifier = { sync ->
-                payloadOf(sync).optJSONObject("lastAdInfo")?.optBoolean("complete", false) == true
-            },
-            syncFailureMessage = "钓鱼活动额外广告回查未见lastAdInfo.complete=true"
-        )
+        val result =
+            completeFishPondAdTask(
+                item = item,
+                adBizNo = adBizNo,
+                syncTypeList = FISH_ACTIVITY_RESULT_AD_SYNC_TYPES,
+                successMessage = "钓鱼活动额外钓竿🎣领取成功",
+                terminalMessage = "钓鱼活动额外钓竿🎣已完成，刷新状态",
+                syncVerifier = { sync ->
+                    payloadOf(sync).optJSONObject("lastAdInfo")?.optBoolean("complete", false) == true
+                },
+                syncFailureMessage = "钓鱼活动额外广告回查未见lastAdInfo.complete=true",
+            )
         if (!result.success) {
             val code = result.code.ifBlank { "UNKNOWN" }
             val message = result.message.ifBlank { result.raw.ifBlank { "未知失败" } }
@@ -985,9 +1055,10 @@ class AntFishPond : ModelTask() {
 
     private fun extractFishActivityResultAdInfo(triggerResponse: JSONObject): JSONObject? {
         val payload = payloadOf(triggerResponse)
-        val triggerPayload = payload.optJSONObject("triggerSubplotsActivity")
-            ?: parseObject(payload.optString("triggerSubplotsActivity"))
-            ?: payload
+        val triggerPayload =
+            payload.optJSONObject("triggerSubplotsActivity")
+                ?: parseObject(payload.optString("triggerSubplotsActivity"))
+                ?: payload
         val extend = triggerPayload.optJSONObject("extend") ?: parseObject(triggerPayload.optString("extend"))
         val adInfo = extend?.optJSONObject("adInfo") ?: parseObject(extend?.optString("adInfo").orEmpty())
         if (adInfo?.optString("taskId") != TASK_FISH_ACTIVITY_RESULT_AD) {
@@ -1009,7 +1080,7 @@ class AntFishPond : ModelTask() {
             type = taskType,
             sceneCode = sceneCode,
             actionType = ACTION_VISIT,
-            raw = adInfo
+            raw = adInfo,
         )
     }
 
@@ -1017,18 +1088,19 @@ class AntFishPond : ModelTask() {
         val reward = payloadOf(exchange).optJSONObject("exchangeRewardResult")
         val title = reward?.optString("title").orEmpty()
         val targetRewardCount = reward?.optString("targetRewardCount").orEmpty()
-        val suffix = buildString {
-            if (title.isNotBlank()) {
-                append(title)
-            }
-            if (targetRewardCount.isNotBlank()) {
-                if (isNotEmpty()) {
-                    append(' ')
+        val suffix =
+            buildString {
+                if (title.isNotBlank()) {
+                    append(title)
                 }
-                append("x")
-                append(targetRewardCount)
+                if (targetRewardCount.isNotBlank()) {
+                    if (isNotEmpty()) {
+                        append(' ')
+                    }
+                    append("x")
+                    append(targetRewardCount)
+                }
             }
-        }
         if (suffix.isNotBlank()) {
             Log.fishpond("鱼池红包兑换🧧成功[$suffix]")
         } else {
@@ -1040,9 +1112,10 @@ class AntFishPond : ModelTask() {
         val angleInfo = angleInfoOf(jo)
         val fishType = angleInfo.optString("fishType", "UNKNOWN")
         val fishName = angleInfo.optString("fishName").ifBlank { fishType }
-        val fishWeight = angleInfo.optString("fishWeight").ifBlank {
-            payloadOf(jo).optString("fishWeight")
-        }
+        val fishWeight =
+            angleInfo.optString("fishWeight").ifBlank {
+                payloadOf(jo).optString("fishWeight")
+            }
         val rodCount = extractRodCount(jo)
         val rodText = if (rodCount >= 0) "，剩余钓竿${rodCount}根" else ""
         Log.fishpond("钓鱼🎣[$fishName/$fishType]#${fishWeight}斤$rodText")
@@ -1068,9 +1141,7 @@ class AntFishPond : ModelTask() {
             ?: payload
     }
 
-    private fun payloadOf(jo: JSONObject): JSONObject {
-        return jo.optJSONObject("data") ?: jo
-    }
+    private fun payloadOf(jo: JSONObject): JSONObject = jo.optJSONObject("data") ?: jo
 
     private fun parseObject(raw: String): JSONObject? {
         if (raw.isBlank()) {
@@ -1083,26 +1154,22 @@ class AntFishPond : ModelTask() {
         }
     }
 
-    private fun taskTitle(task: JSONObject): String {
-        return task.optJSONObject("taskDisplayConfig")
+    private fun taskTitle(task: JSONObject): String =
+        task
+            .optJSONObject("taskDisplayConfig")
             ?.optString("title")
             ?.takeIf { it.isNotBlank() }
-            ?: task.optString("taskTitle")
+            ?: task
+                .optString("taskTitle")
                 .ifBlank { task.optString("title") }
                 .ifBlank { task.optString("taskId") }
-    }
 
-    private fun taskAdBizNo(task: JSONObject?): String {
-        return task?.optString("adBizNo")?.trim().orEmpty()
-    }
+    private fun taskAdBizNo(task: JSONObject?): String = task?.optString("adBizNo")?.trim().orEmpty()
 
-    private fun taskHasDirectAdBizNo(task: JSONObject?): Boolean {
-        return taskAdBizNo(task).isNotBlank()
-    }
+    private fun taskHasDirectAdBizNo(task: JSONObject?): Boolean = taskAdBizNo(task).isNotBlank()
 
-    private fun buildFishPondAwardKey(item: TaskFlowItem): String {
-        return "${item.sceneCode}|${item.type}|${item.progress.ifBlank { item.status.ifBlank { "NO_PROGRESS" } }}"
-    }
+    private fun buildFishPondAwardKey(item: TaskFlowItem): String =
+        "${item.sceneCode}|${item.type}|${item.progress.ifBlank { item.status.ifBlank { "NO_PROGRESS" } }}"
 
     private fun buildFishPondVisitKey(item: TaskFlowItem): String {
         val task = item.raw
@@ -1126,33 +1193,34 @@ class AntFishPond : ModelTask() {
         }
     }
 
-    private fun fishPondTaskActionDetail(item: TaskFlowItem, action: String): String {
-        return "taskType=${item.type.ifBlank { item.id }} sceneCode=${item.sceneCode} " +
+    private fun fishPondTaskActionDetail(
+        item: TaskFlowItem,
+        action: String,
+    ): String =
+        "taskType=${item.type.ifBlank { item.id }} sceneCode=${item.sceneCode} " +
             "actionType=${item.actionType.ifBlank { "UNKNOWN" }} status=${item.status.ifBlank { "UNKNOWN" }} " +
             "action=$action progress=${item.progress.ifBlank { "UNKNOWN" }}"
-    }
 
     private fun emptyFishPondTaskResponse(
         rpc: String,
         item: TaskFlowItem,
         action: String,
-        raw: String
-    ): TaskFlowActionResult {
-        return TaskFlowActionResult.failure(
+        raw: String,
+    ): TaskFlowActionResult =
+        TaskFlowActionResult.failure(
             failureType = TaskRpcFailureType.RETRYABLE_RPC,
             message = "${action}返回空或无法解析",
             rpc = rpc,
             raw = raw,
             detail = fishPondTaskActionDetail(item, action),
-            stopCurrentRound = true
+            stopCurrentRound = true,
         )
-    }
 
     private fun fishPondTaskActionFailureResult(
         response: JSONObject,
         rpc: String,
         item: TaskFlowItem,
-        action: String
+        action: String,
     ): TaskFlowActionResult {
         val failureType = classifyFishPondTaskFailure(response)
         return TaskFlowActionResult.failure(
@@ -1162,7 +1230,7 @@ class AntFishPond : ModelTask() {
             rpc = rpc,
             raw = response.toString(),
             detail = fishPondTaskActionDetail(item, action),
-            stopCurrentRound = failureType == TaskRpcFailureType.RETRYABLE_RPC
+            stopCurrentRound = failureType == TaskRpcFailureType.RETRYABLE_RPC,
         )
     }
 
@@ -1194,34 +1262,58 @@ class AntFishPond : ModelTask() {
         val message = extractFishPondTaskFailureMessage(response)
         return when {
             code in FISHPOND_TERMINAL_TASK_CODES ||
-                containsAny(message, "已领取", "已经领取", "重复领取", "重复领奖", "重复完成", "已完成", "任务已完结", "任务已结束") ->
+                containsAny(message, "已领取", "已经领取", "重复领取", "重复领奖", "重复完成", "已完成", "任务已完结", "任务已结束") -> {
                 TaskRpcFailureType.TERMINAL_DONE
+            }
 
             code in FISHPOND_BUSINESS_LIMIT_CODES ||
                 code.contains("LIMIT", ignoreCase = true) ||
-                containsAny(message, "上限", "限制", "受限", "不可领取", "资格不足", "次数超过限制", "超过上限", "兑完", "奖品已发完", "名额", "钓竿不足", "鱼竿不足", "风控", "风险") ->
+                containsAny(
+                    message,
+                    "上限",
+                    "限制",
+                    "受限",
+                    "不可领取",
+                    "资格不足",
+                    "次数超过限制",
+                    "超过上限",
+                    "兑完",
+                    "奖品已发完",
+                    "名额",
+                    "钓竿不足",
+                    "鱼竿不足",
+                    "风控",
+                    "风险",
+                ) -> {
                 TaskRpcFailureType.BUSINESS_LIMIT
+            }
 
             code == "400000040" ||
-                containsAny(message, "不支持rpc调用", "不支持RPC完成") ->
+                containsAny(message, "不支持rpc调用", "不支持RPC完成") -> {
                 TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
+            }
 
             code in FISHPOND_NON_RETRYABLE_INVALID_CODES ||
-                containsAny(message, "参数错误", "任务ID非法", "模板不存在", "生活记录模板不存在") ->
+                containsAny(message, "参数错误", "任务ID非法", "模板不存在", "生活记录模板不存在") -> {
                 TaskRpcFailureType.NON_RETRYABLE_INVALID
+            }
 
             code in FISHPOND_RETRYABLE_TASK_CODES ||
                 containsAny(message, "系统出错", "系统繁忙", "稍后", "繁忙", "频繁", "重试", "需要验证", "访问被拒绝") ||
-                isFishPondFailureMarkedRetryable(response) ->
+                isFishPondFailureMarkedRetryable(response) -> {
                 TaskRpcFailureType.RETRYABLE_RPC
+            }
 
-            else -> TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW
+            else -> {
+                TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW
+            }
         }
     }
 
     private fun extractFishPondTaskFailureCode(response: JSONObject): String {
         val payload = response.optJSONObject("data")
-        return response.optString("code")
+        return response
+            .optString("code")
             .ifBlank { response.optString("errorCode") }
             .ifBlank { response.optString("errCode") }
             .ifBlank { response.optString("resultCode") }
@@ -1232,7 +1324,8 @@ class AntFishPond : ModelTask() {
 
     private fun extractFishPondTaskFailureMessage(response: JSONObject): String {
         val payload = response.optJSONObject("data")
-        return response.optString("desc")
+        return response
+            .optString("desc")
             .ifBlank { response.optString("errorMsg") }
             .ifBlank { response.optString("errorMessage") }
             .ifBlank { response.optString("message") }
@@ -1245,15 +1338,15 @@ class AntFishPond : ModelTask() {
             .ifBlank { response.toString() }
     }
 
-    private fun isFishPondFailureMarkedRetryable(response: JSONObject): Boolean {
-        return listOf("retryable", "retriable", "canRetry").any { key ->
+    private fun isFishPondFailureMarkedRetryable(response: JSONObject): Boolean =
+        listOf("retryable", "retriable", "canRetry").any { key ->
             response.has(key) && response.optBoolean(key, false)
         }
-    }
 
-    private fun containsAny(text: String, vararg fragments: String): Boolean {
-        return fragments.any { text.contains(it, ignoreCase = true) }
-    }
+    private fun containsAny(
+        text: String,
+        vararg fragments: String,
+    ): Boolean = fragments.any { text.contains(it, ignoreCase = true) }
 
     private fun isRiskFailure(jo: JSONObject): Boolean {
         val text = formatFailure(jo)
@@ -1285,53 +1378,60 @@ class AntFishPond : ModelTask() {
         private const val AREA_SPECIAL_BIG = "SPECIAL_BIG_ZONE"
         private const val AREA_SUPER_BIG = "SUPER_BIG_ZONE"
 
-        private val FISH_ACTIVITY_SYNC_TYPES = listOf(
-            "FISH_ACTIVITY",
-            "TASK_DISPLAY",
-            "TOMORROW_ROD"
-        )
-        private val VISIT_TASK_SYNC_TYPES = listOf(
-            "FISH_ACTIVITY",
-            "TASK_DISPLAY",
-            "TOMORROW_ROD",
-            "LOTTERY_PLUS"
-        )
-        private val FISH_ACTIVITY_RESULT_AD_SYNC_TYPES = listOf(
-            "FISH_ACTIVITY",
-            "TASK_DISPLAY",
-            "TOMORROW_ROD",
-            "LOTTERY_PLUS",
-            "AD_INFO"
-        )
+        private val FISH_ACTIVITY_SYNC_TYPES =
+            listOf(
+                "FISH_ACTIVITY",
+                "TASK_DISPLAY",
+                "TOMORROW_ROD",
+            )
+        private val VISIT_TASK_SYNC_TYPES =
+            listOf(
+                "FISH_ACTIVITY",
+                "TASK_DISPLAY",
+                "TOMORROW_ROD",
+                "LOTTERY_PLUS",
+            )
+        private val FISH_ACTIVITY_RESULT_AD_SYNC_TYPES =
+            listOf(
+                "FISH_ACTIVITY",
+                "TASK_DISPLAY",
+                "TOMORROW_ROD",
+                "LOTTERY_PLUS",
+                "AD_INFO",
+            )
         private val CLAIMABLE_STATUS = setOf("FINISHED", "RECEIVABLE", "TODO_RECEIVE")
-        private val FISHPOND_TERMINAL_TASK_CODES = setOf(
-            "400000030",
-            "400000012",
-            "RECEIVE_REWARD_REPEATED",
-            "TASK_ALREADY_FINISHED",
-            "TASK_HAS_FINISHED",
-            "REPEAT_FINISH",
-            "REPEAT_REWARD"
-        )
-        private val FISHPOND_BUSINESS_LIMIT_CODES = setOf(
-            "CAMP_TRIGGER_ERROR",
-            "PROMISE_TODAY_FINISH_TIMES_LIMIT"
-        )
-        private val FISHPOND_NON_RETRYABLE_INVALID_CODES = setOf(
-            "20020012",
-            "TASK_ID_INVALID",
-            "ILLEGAL_ARGUMENT",
-            "PROMISE_TEMPLATE_NOT_EXIST"
-        )
-        private val FISHPOND_RETRYABLE_TASK_CODES = setOf(
-            "3000",
-            "400000004",
-            "REMOTE_INVOKE_EXCEPTION",
-            "OP_REPEAT_CHECK",
-            "SYSTEM_BUSY",
-            "NETWORK_ERROR",
-            "USER_FREQUENTLY_LOCK",
-            "I07"
-        )
+        private val FISHPOND_TERMINAL_TASK_CODES =
+            setOf(
+                "400000030",
+                "400000012",
+                "RECEIVE_REWARD_REPEATED",
+                "TASK_ALREADY_FINISHED",
+                "TASK_HAS_FINISHED",
+                "REPEAT_FINISH",
+                "REPEAT_REWARD",
+            )
+        private val FISHPOND_BUSINESS_LIMIT_CODES =
+            setOf(
+                "CAMP_TRIGGER_ERROR",
+                "PROMISE_TODAY_FINISH_TIMES_LIMIT",
+            )
+        private val FISHPOND_NON_RETRYABLE_INVALID_CODES =
+            setOf(
+                "20020012",
+                "TASK_ID_INVALID",
+                "ILLEGAL_ARGUMENT",
+                "PROMISE_TEMPLATE_NOT_EXIST",
+            )
+        private val FISHPOND_RETRYABLE_TASK_CODES =
+            setOf(
+                "3000",
+                "400000004",
+                "REMOTE_INVOKE_EXCEPTION",
+                "OP_REPEAT_CHECK",
+                "SYSTEM_BUSY",
+                "NETWORK_ERROR",
+                "USER_FREQUENTLY_LOCK",
+                "I07",
+            )
     }
 }
