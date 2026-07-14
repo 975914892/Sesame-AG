@@ -28,8 +28,8 @@ object Logback {
     private var appContext: Context? = null
     private var nextMidnightMillis: Long = 0
 
-    // capture.log is shared with the module UI process, so only the Host enables it after loading account config.
-    private var isCaptureFileAppenderEnabled = false
+    // 捕获 Hook 在账户配置加载前已可能写入日志，首轮文件初始化必须直接创建 capture Appender。
+    private var isCaptureFileAppenderEnabled = true
 
     /**
      * 初始化 Logcat (保证控制台一定有日志)
