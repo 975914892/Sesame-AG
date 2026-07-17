@@ -105,6 +105,14 @@ object ModelFieldTodayStateResolver {
                     else -> ModelFieldTodayState()
                 }
 
+            "AntMember.yebExpGold" ->
+                allFlags(
+                    StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_SIGN_DONE,
+                    StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_VOUCHER_CONVERT_DONE,
+                    StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_EXCHANGE_DONE,
+                    reason = "今日余额宝体验金签到、券处理及兑换检查已完成"
+                )
+
             "AntMember.memberPointExchangeBenefit" ->
                 flag(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE, "今日会员积分兑换权益已处理")
 

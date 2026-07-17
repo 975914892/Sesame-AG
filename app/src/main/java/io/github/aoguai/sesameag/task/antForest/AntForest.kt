@@ -214,6 +214,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private var stealthCardConstant: BooleanModelField? = null // 隐身卡永动机开关
     private var shieldCard: ChoiceModelField? = null // 保护罩
     private var shieldCardConstant: BooleanModelField? = null // 保护罩永动机开关
+    private var shieldRenewThresholdHours: IntegerModelField? = null // 保护罩续用阈值（小时）
     private var helpFriendCollectType: ChoiceModelField? = null
     private var helpFriendCollectList: FriendSelectionModelField? = null
     private var helpFriendCollectListLimit: IntegerModelField? = null
@@ -625,6 +626,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 false
             ).withDesc("背包没有保护罩时，允许按“活力值 | 兑换列表”中已勾选且名称命中的项自动补货。需同时开启“活力值 | 开启兑换”。").also {
                 shieldCardConstant = it
+            })
+        modelFields.addField(
+            IntegerModelField(
+                "shieldRenewThresholdHours",
+                "能量保护罩 | 续用阈值(小时)",
+                DEFAULT_SHIELD_RENEW_THRESHOLD_HOURS,
+                1,
+                168
+            ).withDesc("保护罩剩余有效期低于此小时数时尝试续用；仅影响已开启的保护罩消耗策略。").also {
+                shieldRenewThresholdHours = it
             })
 
         modelFields.addField(
@@ -1330,16 +1341,12 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val id = wateringBubble.getLong("id")
             val uid = selfId ?: return
             val response = AntForestRpcCall.collectEnergy("jiaoshui", uid, id)
-            runCatching {
-                val bubbles = JSONObject(response).optJSONArray("bubbles") ?: return@runCatching
-                val collected = bubbles.optJSONObject(0)?.optInt("collectedEnergy", 0) ?: 0
-                if (collected > 0 && friendId.isNotEmpty()) {
-                    Status.wateredFriendToday(friendId)
-                }
-            }
             val friendName = getAndCacheUserName(friendId)
             val msg = if (!friendName.isNullOrEmpty()) "收取[$friendName]的金球🍯浇水" else "收取金球🍯浇水"
-            processCollectResult(response, msg)
+            val collected = processCollectResult(response, msg)
+            if (collected != null && collected > 0 && friendId.isNotEmpty()) {
+                Status.wateredFriendToday(friendId)
+            }
         } catch (e: JSONException) {
             Log.forest("收取浇水JSON解析错误: " + e.message)
         }
@@ -1377,38 +1384,43 @@ class AntForest : ModelTask(), EnergyCollectCallback {
      * @param response       收取结果
      * @param successMessage 成功提示信息
      */
-    private fun processCollectResult(response: String, successMessage: String?) {
+    private fun processCollectResult(response: String, successMessage: String): Int? {
         try {
             val joEnergy = JSONObject(response)
-            if (ResChecker.checkRes(TAG, "收集能量失败:", joEnergy)) {
-                val bubbles = joEnergy.getJSONArray("bubbles")
-                if (bubbles.length() > 0) {
-                    val collected = bubbles.getJSONObject(0).getInt("collectedEnergy")
-                    if (collected > 0) {
-                        selfId?.takeIf { it.isNotBlank() }?.let { uid ->
-                            Statistics.addData(uid, Statistics.DataType.COLLECTED, collected)
-                            totalCollected = Statistics.getData(uid, Statistics.TimeType.DAY, Statistics.DataType.COLLECTED)
-                        } ?: run {
-                            totalCollected += collected
-                        }
-                        val msg = successMessage + "[" + collected + "g]"
-                        Log.forest(msg)
-                        Toast.show(msg)
-                    } else {
-                        Log.forest(successMessage + "失败")
-                    }
-                } else {
-                    Log.forest(successMessage + "失败: 未找到金球信息")
-                }
-            } else {
-                Log.forest(successMessage + "失败:" + joEnergy.getString("resultDesc"))
+            if (!ResChecker.checkRes(TAG, "收集能量失败:", joEnergy)) {
+                Log.forest(successMessage + "失败:" + joEnergy.optString("resultDesc"))
                 Log.forest(response)
+                return null
             }
+
+            val bubbles = joEnergy.optJSONArray("bubbles")
+            if (bubbles == null || bubbles.length() == 0) {
+                Log.forest(successMessage + "失败: 未找到金球信息")
+                return 0
+            }
+
+            val collected = bubbles.optJSONObject(0)?.optInt("collectedEnergy", 0) ?: 0
+            if (collected <= 0) {
+                Log.forest(successMessage + "失败")
+                return 0
+            }
+
+            selfId?.takeIf { it.isNotBlank() }?.let { uid ->
+                Statistics.addData(uid, Statistics.DataType.COLLECTED, collected)
+                totalCollected = Statistics.getData(uid, Statistics.TimeType.DAY, Statistics.DataType.COLLECTED)
+            } ?: run {
+                totalCollected += collected
+            }
+            val msg = successMessage + "[" + collected + "g]"
+            Log.forest(msg)
+            Toast.show(msg)
+            return collected
         } catch (e: JSONException) {
             Log.forest("JSON解析错误: " + e.message)
         } catch (e: Exception) {
             Log.forest("处理收能量结果错误: " + e.message)
         }
+        return null
     }
 
     /**
@@ -3988,28 +4000,38 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     AntForestRpcCall.transferEnergy(safeUserId, bizNo, energyId, notifyFriend)
 
                 if (rpcResponse.isEmpty()) {
-                    Log.forest("好友浇水返回空: " + UserMap.getMaskName(safeUserId))
+                    Log.error(
+                        TAG,
+                        "module=森林 action=friendWater rpc=AntForestRpcCall.transferEnergy " +
+                            "code=EMPTY_RESPONSE msg=好友浇水返回空 classification=RETRYABLE_RPC " +
+                            "decision=RETRY_LATER target=${UserMap.getMaskName(safeUserId)}"
+                    )
                     isContinue = false
                     break
                 }
 
                 val jo = JSONObject(rpcResponse)
-
-                // 先处理可能的错误码
                 val errorCode = jo.optString("error")
-                if ("1009" == errorCode) { // 访问被拒绝
-                    Log.forest("好友浇水🚿访问被拒绝: " + UserMap.getMaskName(userId))
+                if ("1009" == errorCode) {
+                    Log.error(
+                        TAG,
+                        "module=森林 action=friendWater rpc=AntForestRpcCall.transferEnergy " +
+                            "code=1009 msg=访问被拒绝 classification=BUSINESS_LIMIT " +
+                            "decision=STOP_CURRENT_CHAIN target=${UserMap.getMaskName(userId)}"
+                    )
                     isContinue = false
                     break
-                } else if ("3000" == errorCode) { // 系统错误
-                    Log.forest("好友浇水🚿系统错误，稍后重试: " + UserMap.getMaskName(userId))
-                    GlobalThreadPools.sleepCompat(500)
-                    waterCount-- // 重试当前次数
-                    waterCount++
-                    continue
+                } else if ("3000" == errorCode) {
+                    Log.error(
+                        TAG,
+                        "module=森林 action=friendWater rpc=AntForestRpcCall.transferEnergy " +
+                            "code=3000 msg=系统错误 classification=RETRYABLE_RPC " +
+                            "decision=RETRY_LATER target=${UserMap.getMaskName(userId)}"
+                    )
+                    isContinue = false
+                    break
                 }
 
-                // 处理正常返回
                 val resultCode = jo.optString("resultCode")
                 when (resultCode) {
                     "SUCCESS" -> {
@@ -4047,8 +4069,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     }
 
                     else -> {
-                        Log.forest("好友浇水🚿" + jo.optString("resultDesc"))
-                        Log.forest(jo.toString())
+                        Log.error(
+                            TAG,
+                            "module=森林 action=friendWater rpc=AntForestRpcCall.transferEnergy " +
+                                "code=${resultCode.ifBlank { "UNKNOWN" }} msg=${jo.optString("resultDesc")} " +
+                                "classification=UNKNOWN_NEEDS_REVIEW decision=LOG_ONLY " +
+                                "target=${UserMap.getMaskName(userId)} raw=$jo"
+                        )
+                        isContinue = false
+                        break@label
                     }
                 }
                 waterCount++
@@ -4402,6 +4431,38 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             is JSONObject -> rawTaskRights
             is String -> runCatching { JSONObject(rawTaskRights) }.getOrElse { JSONObject() }
             else -> JSONObject()
+        }
+    }
+
+    /**
+     * 领奖响应通常只有增量数字；只有快照或响应明确给出奖励类别时才显示单位，
+     * 避免把不同权益统一误记为活力值。
+     */
+    private fun logForestTaskAward(
+        taskTitle: String,
+        snapshotAwardCount: Int,
+        awardResponse: JSONObject,
+        taskRights: JSONObject? = null
+    ) {
+        val increment = awardResponse.optInt("incAwardCount", snapshotAwardCount)
+        val awardCount = if (increment > 0) increment else snapshotAwardCount
+        val responseAward = awardResponse.optJSONObject("award") ?: JSONObject()
+        val rightsAward = taskRights?.optJSONObject("award") ?: JSONObject()
+        val awardLabel = sequenceOf(
+            awardResponse.optString("awardName"),
+            awardResponse.optString("awardType"),
+            responseAward.optString("awardName"),
+            responseAward.optString("awardType"),
+            taskRights?.optString("awardName").orEmpty(),
+            taskRights?.optString("awardType").orEmpty(),
+            rightsAward.optString("awardName"),
+            rightsAward.optString("awardType")
+        ).firstOrNull { it.isNotBlank() }
+        val labelSuffix = awardLabel?.let { " $it" }.orEmpty()
+        if (awardCount > 0) {
+            Log.forest("森林奖励🎖️[$taskTitle]# $awardCount$labelSuffix")
+        } else {
+            Log.forest("森林奖励🎖️[$taskTitle]领取成功$labelSuffix")
         }
     }
 
@@ -4881,9 +4942,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
 
             ResChecker.checkRes(TAG, "领取森林任务奖励失败:", awardResponse) -> {
-                val incAwardCount = awardResponse.optInt("incAwardCount", awardCount)
-                val displayAwardCount = if (incAwardCount > 0) incAwardCount else awardCount
-                Log.forest("森林奖励🎖️[$taskTitle]# $displayAwardCount 活力值")
+                logForestTaskAward(taskTitle, awardCount, awardResponse, taskRights)
                 GlobalThreadPools.sleepCompat(500)
                 true
             }
@@ -5001,9 +5060,12 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             )
 
             ResChecker.checkRes(TAG, "领取森林任务奖励失败:", awardResponse) -> {
-                val incAwardCount = awardResponse.optInt("incAwardCount", awardText)
-                val displayAwardCount = if (incAwardCount > 0) incAwardCount else awardText
-                Log.forest("森林奖励🎖️[${item.title}]# $displayAwardCount 活力值")
+                logForestTaskAward(
+                    item.title,
+                    awardText,
+                    awardResponse,
+                    item.raw?.optJSONObject("taskRights")
+                )
                 GlobalThreadPools.sleepCompat(500)
                 TaskFlowActionResult.success()
             }
@@ -5030,7 +5092,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
         val finishTaskResponse = JSONObject(response)
         return if (ResChecker.checkRes(TAG, "完成游戏任务失败:", finishTaskResponse)) {
-            Log.forest("游戏任务完成 🎮️[${item.title}]# $awardCount 活力值")
+            val awardSuffix = if (awardCount > 0) "，奖励数量# $awardCount" else ""
+            Log.forest("游戏任务完成 🎮️[${item.title}]$awardSuffix")
             TaskFlowActionResult.success()
         } else {
             forestTaskActionFailureResult(
@@ -5391,7 +5454,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private inner class ForestTaskFlowAdapter(
         private val taskSources: List<Pair<String, () -> String>>,
         private val deferredForestRightsTasks: MutableMap<String, DeferredForestRightsTask>,
-        private val targetTaskTypes: Set<String> = emptySet()
+        private val targetTaskTypes: Set<String> = emptySet(),
+        private val fallbackTaskSources: List<Pair<String, () -> String>> = emptyList()
     ) : TaskFlowAdapter {
         override val moduleName: String = forestTaskBlacklistModule
         override val flowName: String = "森林任务"
@@ -5403,17 +5467,37 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         override fun query(): JSONObject {
             val responseArray = JSONArray()
             val uniqueSigns = linkedMapOf<String, JSONObject>()
-            for ((sourceName, request) in taskSourcesForCurrentQuery()) {
-                val taskResponse = queryForestTaskSource(sourceName, request) ?: continue
+            var queriedHomeTaskList = false
+            var homeTaskListHasItems = false
+
+            fun appendTaskResponse(sourceName: String, taskResponse: JSONObject): Boolean {
                 responseArray.put(
                     JSONObject()
                         .put("sourceName", sourceName)
                         .put("payload", taskResponse)
                 )
-                if ("popupTask" == sourceName) {
+                if (sourceName == "popupTask") {
                     appendSignInfo(taskResponse.optJSONObject("energySignVO"), uniqueSigns)
                 }
                 appendSignInfo(taskResponse.optJSONArray("forestSignVOList"), uniqueSigns)
+                return collectForestTaskNodes(taskResponse).isNotEmpty()
+            }
+
+            for ((sourceName, request) in taskSourcesForCurrentQuery()) {
+                val taskResponse = queryForestTaskSource(sourceName, request) ?: continue
+                if (sourceName == "home_task_list") {
+                    queriedHomeTaskList = true
+                    homeTaskListHasItems = appendTaskResponse(sourceName, taskResponse)
+                } else {
+                    appendTaskResponse(sourceName, taskResponse)
+                }
+            }
+
+            if (queriedHomeTaskList && !homeTaskListHasItems) {
+                for ((sourceName, request) in fallbackTaskSources) {
+                    val taskResponse = queryForestTaskSource(sourceName, request) ?: continue
+                    appendTaskResponse(sourceName, taskResponse)
+                }
             }
 
             val signArray = JSONArray()
@@ -5574,7 +5658,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 "home_leaves_task_list" -> 1
                 "take_look_end_task_list" -> 2
                 "home_task_list" -> 3
-                else -> 4
+                "open_green_home_task_list" -> 4
+                else -> 5
             }
         }
 
@@ -5808,8 +5893,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 "home_task_list" to { AntForestRpcCall.queryTaskList() }
             )
             val deferredForestRightsTasks = linkedMapOf<String, DeferredForestRightsTask>()
+            val fallbackTaskSources = listOf(
+                "open_green_home_task_list" to { AntForestRpcCall.queryOpenGreenHomeTaskList() }
+            )
             TaskFlowEngine(
-                ForestTaskFlowAdapter(taskSources, deferredForestRightsTasks),
+                ForestTaskFlowAdapter(
+                    taskSources = taskSources,
+                    deferredForestRightsTasks = deferredForestRightsTasks,
+                    fallbackTaskSources = fallbackTaskSources
+                ),
                 roundSleepMs = 1500L
             ).run()
             collectDeferredForestRights(deferredForestRightsTasks.values)
@@ -6415,8 +6507,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     /**
-     * 保护罩剩余时间判断
-     * 新规则允许保护罩剩余有效期低于7天时延长使用。
+     * 保护罩剩余时间判断。
+     * 阈值仅影响已启用保护罩后的续用时机，不会改变保护罩消耗策略。
      */
     @SuppressLint("DefaultLocale")
     private fun shouldRenewShield(shieldEnd: Long, nowMillis: Long): Boolean {
@@ -6439,10 +6531,13 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return true
         }
         val remain = shieldEnd - nowMillis
-        val needRenew = remain < SHIELD_RENEW_THRESHOLD_MS
+        val thresholdHours = (shieldRenewThresholdHours?.value ?: DEFAULT_SHIELD_RENEW_THRESHOLD_HOURS)
+            .coerceIn(1, 168)
+        val thresholdMillis = thresholdHours * TimeFormatter.ONE_HOUR_MS
+        val needRenew = remain < thresholdMillis
         // 格式化剩余时间和阈值时间为更直观的显示
         val remainTimeStr = TimeFormatter.formatRemainingTime(remain)
-        val thresholdTimeStr = TimeFormatter.formatRemainingTime(SHIELD_RENEW_THRESHOLD_MS)
+        val thresholdTimeStr = TimeFormatter.formatRemainingTime(thresholdMillis)
         if (needRenew) {
             Log.forest(String.format(
                     "[保护罩] 🔄 需要续写 - 剩余时间[%s] < 续写阈值[%s]",
@@ -9234,8 +9329,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
         private val offsetTimeMath = Average(5)
 
-        /** 保护罩剩余有效期低于7天时可延长使用。 */
-        private const val SHIELD_RENEW_THRESHOLD_MS = 7 * TimeFormatter.ONE_DAY_MS
+        /** 保护罩默认在剩余 24 小时时尝试续用。 */
+        private const val DEFAULT_SHIELD_RENEW_THRESHOLD_HOURS = 24
         var giveEnergyRainList: FriendSelectionModelField? = null //能量雨赠送列表
         var medicalHealthOption: SelectModelField? = null //医疗健康选项
         var ecoLifeOption: SelectModelField? = null

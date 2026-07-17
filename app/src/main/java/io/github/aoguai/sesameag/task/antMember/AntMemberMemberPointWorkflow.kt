@@ -39,11 +39,13 @@ internal fun AntMember.prepareMemberPointWorkflows(
             Log.member("⏭️ 今天会员任务已因风控/离线止损，停止执行")
         } else if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY)) {
             Log.member("⏭️ 今日会员任务已处理，跳过执行")
-            deferredTasks.add(scope.async(Dispatchers.IO) { handleYebExpGoldTasks() })
         } else {
             deferredTasks.add(scope.async(Dispatchers.IO) { doAllMemberAvailableTaskCompat() })
-            deferredTasks.add(scope.async(Dispatchers.IO) { handleYebExpGoldTasks() })
         }
+    }
+
+    if (yebExpGold?.value == true) {
+        deferredTasks.add(scope.async(Dispatchers.IO) { handleYebExpGoldTasks() })
     }
 
     if (memberPointExchangeBenefit?.value == true) {

@@ -1,24 +1,23 @@
 package io.github.aoguai.sesameag.task.reserve
 
-import org.json.JSONException
-import org.json.JSONObject
+import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.entity.ReserveEntity
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
-import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.model.modelFieldExt.SelectAndCountModelField
+import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.TaskCommon
 import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.ReserveaMap
-import io.github.aoguai.sesameag.util.ResChecker
-import io.github.aoguai.sesameag.data.Status
+import org.json.JSONException
+import org.json.JSONObject
 
 class Reserve : ModelTask() {
-    
     private var reserveList: SelectAndCountModelField? = null
 
     override fun getName(): String = "保护地"
@@ -34,27 +33,30 @@ class Reserve : ModelTask() {
                 "reserveList",
                 "保护地 | 申请列表",
                 LinkedHashMap(),
-                ReserveEntity::getListAsMapperEntity
+                ReserveEntity::getListAsMapperEntity,
             ).withDesc("选择要自动申请的保护地及每日申请次数；数量大于 0 才会执行，对应条目填 0 或不选则跳过。").also {
                 reserveList = it
-            }
+            },
         )
         return modelFields
     }
 
-    override fun check(): Boolean {
-        return when {
+    override fun check(): Boolean =
+        when {
             TaskCommon.IS_ENERGY_TIME -> {
                 Log.forest("⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，停止执行${getName()}任务！")
                 false
             }
+
             TaskCommon.IS_MODULE_SLEEP_TIME -> {
                 Log.forest("💤 模块休眠时间【${BaseModel.modelSleepTime.value}】停止执行${getName()}任务！")
                 false
             }
-            else -> true
+
+            else -> {
+                true
+            }
         }
-    }
 
     override fun runJava() {
         GlobalThreadPools.execute {
@@ -126,8 +128,9 @@ class Reserve : ModelTask() {
         }
         val enabledReserveMap = LinkedHashMap<String, Int>()
         configuredMap.forEach { (projectId, count) ->
-            if (!projectId.isNullOrBlank() && (count ?: 0) > 0) {
-                enabledReserveMap[projectId] = count ?: return@forEach
+            val enabledCount = count ?: return@forEach
+            if (!projectId.isNullOrBlank() && enabledCount > 0) {
+                enabledReserveMap[projectId] = enabledCount
             }
         }
         return enabledReserveMap
@@ -163,18 +166,24 @@ class Reserve : ModelTask() {
         return false
     }
 
-    private suspend fun exchangeTree(projectId: String, itemName: String, count: Int) {
+    private suspend fun exchangeTree(
+        projectId: String,
+        itemName: String,
+        count: Int,
+    ) {
         try {
             var canApply = queryTreeForExchange(projectId)
-            if (!canApply)
+            if (!canApply) {
                 return
+            }
             for (applyCount in 1..count) {
                 val s = ReserveRpcCall.exchangeTree(projectId)
                 val jo = JSONObject(s)
                 if (ResChecker.checkRes(TAG, jo)) {
                     val vitalityAmount = jo.optInt("vitalityAmount", 0)
                     val appliedTimes = Status.getReserveTimes(projectId) + 1
-                    val str = "领保护地🏕️[$itemName]#第${appliedTimes}次" +
+                    val str =
+                        "领保护地🏕️[$itemName]#第${appliedTimes}次" +
                             if (vitalityAmount > 0) "-活力值+$vitalityAmount" else ""
                     Log.forest(str)
                     Status.reserveToday(projectId, 1)
@@ -188,8 +197,9 @@ class Reserve : ModelTask() {
                 if (!canApply) {
                     break
                 }
-                if (!Status.canReserveToday(projectId, count))
+                if (!Status.canReserveToday(projectId, count)) {
                     break
+                }
             }
         } catch (t: Throwable) {
             Log.runtime(TAG, "exchangeTree err:")
@@ -202,40 +212,48 @@ class Reserve : ModelTask() {
 
         @JvmStatic
         fun initReserve() {
+            val reserveMap = IdMapManager.getInstance(ReserveaMap::class.java)
             try {
                 val response = ReserveRpcCall.queryTreeItemsForExchange()
                 val jsonResponse = JSONObject(response)
-                if (ResChecker.checkRes(TAG, jsonResponse)) {
-                    val treeItems = jsonResponse.optJSONArray("treeItems")
-                    if (treeItems != null) {
-                        for (i in 0 until treeItems.length()) {
-                            val item = treeItems.getJSONObject(i)
-                            if (!item.has("projectType")) {
-                                continue
-                            }
-                            if (item.getString("projectType") == "RESERVE" && item.getString("applyAction") == "AVAILABLE") {
-                                val itemId = item.getString("itemId")
-                                val itemName = item.getString("itemName")
-                                val energy = item.getInt("energy")
-                                IdMapManager.getInstance(ReserveaMap::class.java).add(itemId, "$itemName(${energy}g)")
-                            }
-                        }
-                        Log.runtime(TAG, "初始化保护地任务成功。")
-                    }
-                    IdMapManager.getInstance(ReserveaMap::class.java).save()
-                } else {
-                    Log.runtime(jsonResponse.optString("resultDesc", "未知错误"))
+                if (!ResChecker.checkRes(TAG, jsonResponse)) {
+                    Log.runtime(TAG, "刷新保护地候选失败: ${jsonResponse.optString("resultDesc", "未知错误")}")
+                    return
                 }
+                val treeItems =
+                    jsonResponse.optJSONArray("treeItems") ?: run {
+                        Log.runtime(TAG, "刷新保护地候选失败: 缺少treeItems")
+                        return
+                    }
+
+                reserveMap.clear()
+                var availableCount = 0
+                for (i in 0 until treeItems.length()) {
+                    val item = treeItems.optJSONObject(i) ?: continue
+                    if (item.optString("projectType") != "RESERVE" ||
+                        item.optString("applyAction") != "AVAILABLE"
+                    ) {
+                        continue
+                    }
+                    val itemId = item.optString("itemId").trim()
+                    if (itemId.isEmpty()) {
+                        Log.runtime(TAG, "跳过缺少itemId的保护地候选")
+                        continue
+                    }
+                    val itemName = item.optString("itemName", itemId)
+                    val energy = item.optInt("energy", 0)
+                    reserveMap.add(itemId, "$itemName(${energy}g)")
+                    availableCount++
+                }
+                reserveMap.save()
+                Log.runtime(TAG, "刷新保护地候选成功[$availableCount]")
             } catch (e: JSONException) {
-                Log.runtime(TAG, "JSON 解析错误：${e.message}")
+                Log.runtime(TAG, "刷新保护地候选JSON错误：${e.message}")
                 Log.printStackTrace(e)
-                IdMapManager.getInstance(ReserveaMap::class.java).load()
             } catch (e: Exception) {
-                Log.runtime(TAG, "初始化保护地任务时出错：${e.message}")
+                Log.runtime(TAG, "刷新保护地候选出错：${e.message}")
                 Log.printStackTrace(e)
-                IdMapManager.getInstance(ReserveaMap::class.java).load()
             }
         }
     }
 }
-

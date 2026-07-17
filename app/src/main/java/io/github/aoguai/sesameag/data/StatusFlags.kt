@@ -25,7 +25,6 @@ package io.github.aoguai.sesameag.data
  * - 新增 flag 时优先使用“模块名::业务名::状态”的值格式；是否保留历史 key 由对应重构策略决定。
  */
 object StatusFlags {
-
     // ============================================================
     // 通用 / 调度
     // ============================================================
@@ -387,6 +386,9 @@ object StatusFlags {
     /** 庄园：捐蛋排位赛奖励今日已领取 */
     const val FLAG_FARM_DONATION_COMPETITION_AWARD_RECEIVED = "antFarm::donationCompetitionAwardReceived"
 
+    /** 庄园：服务端明确报告排位赛活动不存在，今日停止该业务链 */
+    const val FLAG_FARM_DONATION_COMPETITION_UNAVAILABLE = "antFarm::donationCompetitionUnavailable"
+
     /** 庄园家庭：今日签到已处理 */
     const val FLAG_FARM_FAMILY_SIGNED = "antFarm::familyDailySign"
 
@@ -410,5 +412,4 @@ object StatusFlags {
 
     /** 森林：能量雨附加游戏任务标记 */
     const val FLAG_FOREST_RAIN_GAME_TASK = "AntForest::EnergyRainGameTask"
-
 }

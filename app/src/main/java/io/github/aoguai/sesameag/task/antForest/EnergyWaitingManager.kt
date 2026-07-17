@@ -20,6 +20,7 @@ import io.github.aoguai.sesameag.util.maps.UserMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -227,6 +228,7 @@ object EnergyWaitingManager {
     // 蹲点任务存储
     private val waitingTasks = ConcurrentHashMap<String, WaitingTask>()
     private val waitingJobs = ConcurrentHashMap<String, Job>()
+    private val waitingJobStartLock = Any()
     private val bubbleCooldownTombstones = ConcurrentHashMap<String, Long>()
     private val loggedFrontLaunchDisabledWaitingTasks = ConcurrentHashMap.newKeySet<String>()
 
@@ -779,9 +781,8 @@ object EnergyWaitingManager {
             logWaitingCollectionPaused("start", task)
             return
         }
-        waitingJobs.remove(task.taskId)?.cancel()
         val job =
-            managerScope.launch {
+            managerScope.launch(start = CoroutineStart.LAZY) {
                 try {
                     if (!isRunSessionCurrent(ownerUserId, sessionEpoch)) {
                         return@launch
@@ -883,6 +884,8 @@ object EnergyWaitingManager {
                                 } else {
                                     Log.forest("验证[${task.getUserTypeTag()}${task.userName}]：无法获取主页信息，继续执行")
                                 }
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (e: Exception) {
                                 Log.forest("验证[${task.getUserTypeTag()}${task.userName}]出错: ${e.message}，继续执行")
                             }
@@ -985,8 +988,7 @@ object EnergyWaitingManager {
                         // 重试延迟
                         val retryDelay = smartRetryStrategy.getRetryDelay(task.retryCount, e.message)
                         Log.forest("精确蹲点任务[${task.taskId}]将在${retryDelay / 1000}秒后重试")
-                        delay(retryDelay)
-                        startPreciseWaitingCoroutine(retryTask)
+                        scheduleWaitingRetry(retryTask, retryDelay)
                     } else {
                         Log.error(TAG, "精确蹲点任务[${task.taskId}]不满足重试条件，放弃")
                         removeWaitingTask(task.taskId)
@@ -1001,7 +1003,34 @@ object EnergyWaitingManager {
                     }
                 }
             }
-        waitingJobs[task.taskId] = job
+        val jobAccepted =
+            synchronized(waitingJobStartLock) {
+                val existingJob = waitingJobs[task.taskId]
+                if (existingJob != null && !existingJob.isCompleted) {
+                    Log.forest("精确蹲点任务[${task.taskId}]已在运行，复用现有协程")
+                    false
+                } else {
+                    waitingJobs[task.taskId] = job
+                    true
+                }
+            }
+        if (jobAccepted) {
+            job.start()
+        } else {
+            job.cancel()
+        }
+    }
+
+    private fun scheduleWaitingRetry(
+        task: WaitingTask,
+        retryDelay: Long,
+    ) {
+        managerScope.launch {
+            delay(retryDelay.coerceAtLeast(0L))
+            if (waitingTasks[task.taskId] == task) {
+                startPreciseWaitingCoroutine(task)
+            }
+        }
     }
 
     private suspend fun scheduleWaitingDelay(
@@ -1173,10 +1202,7 @@ object EnergyWaitingManager {
                             val retryDelay = 5000L // 5秒后重试
                             Log.forest("  → 5秒后重试(${retryTask.retryCount}/${task.maxRetries})")
 
-                            managerScope.launch {
-                                delay(retryDelay)
-                                startPreciseWaitingCoroutine(retryTask)
-                            }
+                            scheduleWaitingRetry(retryTask, retryDelay)
                         } else {
                             Log.forest("  → 已达最大重试次数")
                             removeWaitingTask(task.taskId)
@@ -1261,12 +1287,7 @@ object EnergyWaitingManager {
 
                                 Log.forest("  → ${retryDelay / 1000}秒后重试(${retryTask.retryCount}/${task.maxRetries})")
 
-                                managerScope.launch {
-                                    delay(retryDelay)
-                                    if (waitingTasks.containsKey(task.taskId)) {
-                                        startPreciseWaitingCoroutine(retryTask)
-                                    }
-                                }
+                                scheduleWaitingRetry(retryTask, retryDelay)
                             } else {
                                 Log.forest("  → 已达最大重试次数")
                                 removeWaitingTask(task.taskId)
@@ -1275,6 +1296,8 @@ object EnergyWaitingManager {
                         }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.printStackTrace(TAG, "执行精确蹲点任务异常", e)
                 throw e
@@ -1300,6 +1323,8 @@ object EnergyWaitingManager {
                     waitingOutcome = WaitingCollectOutcome.HARD_FAIL,
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "收取能量失败", e)
             CollectResult(

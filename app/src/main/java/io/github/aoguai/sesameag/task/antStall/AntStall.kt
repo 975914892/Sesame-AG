@@ -21,6 +21,7 @@ import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.TaskStatus
 import io.github.aoguai.sesameag.task.antOrchard.UrlUtil
+import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
@@ -94,7 +95,6 @@ class AntStall : ModelTask() {
     private data class StallXlightRoundResult(
         val finishedCount: Int,
         val failure: TaskFlowActionResult? = null,
-        val riskContext: String? = null,
     )
 
     // 配置字段
@@ -125,6 +125,8 @@ class AntStall : ModelTask() {
     private lateinit var stallAssistFriend: BooleanModelField
     private lateinit var assistFriendList: FriendSelectionModelField
     private val handledTaskFinishes = LinkedHashSet<String>()
+    private val stateConfirmationTaskFinishes = LinkedHashSet<String>()
+    private val businessLimitedTaskFinishes = LinkedHashSet<String>()
     private val handledTaskAwards = LinkedHashSet<String>()
     private val loggedTaskMessages = LinkedHashSet<String>()
     private var stallTasksDoneInvalidatedThisRun = false
@@ -530,6 +532,8 @@ class AntStall : ModelTask() {
             // 自动任务
             if (stallAutoTask.value == true) {
                 handledTaskFinishes.clear()
+                stateConfirmationTaskFinishes.clear()
+                businessLimitedTaskFinishes.clear()
                 handledTaskAwards.clear()
                 loggedTaskMessages.clear()
                 val taskHandledToday =
@@ -1441,6 +1445,10 @@ class AntStall : ModelTask() {
             if (handledTaskAwards.contains(taskKey) && phase == TaskFlowPhase.REWARD_READY) {
                 return true
             }
+            if (stateConfirmationTaskFinishes.contains(taskKey) && phase == TaskFlowPhase.READY_TO_COMPLETE) {
+                logStallTaskOnce("新村任务⛪[${item.title}]前置已触发，等待下次执行确认")
+                return true
+            }
             if (handledTaskFinishes.contains(taskKey) && phase == TaskFlowPhase.READY_TO_COMPLETE) {
                 return true
             }
@@ -1544,11 +1552,24 @@ class AntStall : ModelTask() {
             if (result.failureType == TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW) {
                 unknownFailureSeen = true
             }
+            if (action == TaskFlowAction.COMPLETE && result.failureType == TaskRpcFailureType.BUSINESS_LIMIT) {
+                businessLimitedTaskFinishes.add(buildStallTaskKey(item.type))
+            }
             if (decision == TaskFlowDecision.MARK_HANDLED ||
                 decision == TaskFlowDecision.STOP_TODAY_OR_CURRENT_CHAIN ||
                 decision == TaskFlowDecision.BLACKLIST
             ) {
                 rememberHandledTask(item, action)
+            }
+        }
+
+        override fun afterDeferred(
+            item: TaskFlowItem,
+            action: TaskFlowAction,
+            result: TaskFlowActionResult,
+        ) {
+            if (action == TaskFlowAction.COMPLETE && result.deferredReason == DeferredReason.STATE_CONFIRMATION) {
+                stateConfirmationTaskFinishes.add(buildStallTaskKey(item.type))
             }
         }
 
@@ -1604,6 +1625,14 @@ class AntStall : ModelTask() {
                 if (phase == TaskFlowPhase.TERMINAL || phase == TaskFlowPhase.UNSUPPORTED) {
                     continue
                 }
+                if (phase == TaskFlowPhase.READY_TO_COMPLETE &&
+                    (
+                        stateConfirmationTaskFinishes.contains(buildStallTaskKey(item.type)) ||
+                            businessLimitedTaskFinishes.contains(buildStallTaskKey(item.type))
+                    )
+                ) {
+                    return false
+                }
                 if (shouldSkip(item)) {
                     continue
                 }
@@ -1656,9 +1685,6 @@ class AntStall : ModelTask() {
         val finishedCount = roundResult.finishedCount
 
         return if (finishedCount > 0) {
-            roundResult.riskContext?.let { riskContext ->
-                Log.stall("新村浏览任务⚠️[${item.title}] 命中广告风控上下文但闭环成功[$riskContext]")
-            }
             Log.stall("蚂蚁新村💣任务[${item.title}]完成")
             TaskFlowActionResult.success(refreshAfterAction = true)
         } else {
@@ -1826,7 +1852,6 @@ class AntStall : ModelTask() {
         var playingPageInfo: String? = null
         var pageNo = 1
         var finishedCount = 0
-        var riskContext: String? = null
 
         while (pageNo <= 5 && finishedCount < config.rounds) {
             val response =
@@ -1851,7 +1876,16 @@ class AntStall : ModelTask() {
                         raw = response,
                     ),
                 )
-            val adTrafficRisk = RpcOfflineRisk.isAdTrafficRisk(json)
+            if (RpcOfflineRisk.isAdTrafficRisk(json)) {
+                return StallXlightRoundResult(
+                    finishedCount,
+                    stallTaskActionFailureResult(
+                        response = json,
+                        rpc = "AntStallRpcCall.xlightPlugin",
+                        detail = stallTaskActionDetail(item, "xlightPlugin"),
+                    ),
+                )
+            }
             val playingResult =
                 json.optJSONObject("playingResult") ?: return StallXlightRoundResult(
                     finishedCount,
@@ -1863,12 +1897,6 @@ class AntStall : ModelTask() {
                     finishedCount,
                     buildStallXlightPluginFailureResult(item, json, "XLight缺少playingBizId"),
                 )
-            }
-            if (adTrafficRisk) {
-                if (riskContext == null) {
-                    riskContext = buildStallXlightRiskContext(json, playingBizId)
-                }
-                Log.stall("新村浏览任务⏭️[${item.title}] 第${pageNo}页命中广告风控上下文，但已返回playingResult，继续尝试闭环")
             }
 
             val nextPlayingPageInfo = playingResult.optString("playingPageInfo").trim().ifBlank { null }
@@ -1970,7 +1998,7 @@ class AntStall : ModelTask() {
             pageNo++
         }
 
-        return StallXlightRoundResult(finishedCount, riskContext = riskContext)
+        return StallXlightRoundResult(finishedCount)
     }
 
     private fun buildStallXlightSearchInfo(pageNo: Int): JSONObject? {
@@ -1987,22 +2015,6 @@ class AntStall : ModelTask() {
         playBizId: String,
         eventInfo: JSONObject,
     ): String = "$playBizId#${eventInfo.optInt("order", -1)}#${eventInfo.optInt("rewardId", -1)}#${eventInfo.optInt("eventStep", 0)}"
-
-    private fun buildStallXlightRiskContext(
-        response: JSONObject,
-        playingBizId: String,
-    ): String {
-        val parts =
-            listOf(
-                response.optString("errorMsg").takeIf { it.isNotBlank() }?.let { "errorMsg=$it" },
-                response.optString("retCode").takeIf { it.isNotBlank() }?.let { "retCode=$it" },
-                response.optString("sspErrorCode").takeIf { it.isNotBlank() }?.let { "sspErrorCode=$it" },
-                response.optString("sspErrorMsg").takeIf { it.isNotBlank() }?.let { "sspErrorMsg=$it" },
-                response.optString("xlightRequestId").takeIf { it.isNotBlank() }?.let { "xlightRequestId=$it" },
-                playingBizId.takeIf { it.isNotBlank() }?.let { "playingBizId=$it" },
-            ).filterNotNull()
-        return parts.joinToString(", ")
-    }
 
     private fun buildStallXlightSession(): String = "u_${RandomUtil.getRandomString(5)}_${RandomUtil.getRandomString(5)}"
 
@@ -2116,9 +2128,9 @@ class AntStall : ModelTask() {
             StallTaskRefreshState.TODO,
             StallTaskRefreshState.UNKNOWN,
             -> {
-                TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
-                    message = "饿了么 token 已生成，但任务状态未确认推进",
+                TaskFlowActionResult.defer(
+                    deferredReason = DeferredReason.STATE_CONFIRMATION,
+                    message = "饿了么 token 已生成，等待服务端状态确认",
                     rpc = "AntStallRpcCall.taskList",
                     raw = refreshResult.raw,
                     detail = stallTaskActionDetail(item, "generateTokenRefresh"),
