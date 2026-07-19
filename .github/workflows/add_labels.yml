@@ -1,43 +1,117 @@
-name: Add Labels
+name: Issue Intake
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
 
 permissions:
   contents: read
   issues: write
 
 jobs:
-  add-labels:
+  triage-issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Check issue attachments and reply
+      - name: Classify issue and validate required information
         uses: actions/github-script@v7
         with:
           script: |
             const issue = context.payload.issue;
+            if (!issue || issue.pull_request) {
+              core.info('Skipping pull request or unsupported payload.');
+              return;
+            }
+
+            if (
+              context.eventName === 'issue_comment' &&
+              context.payload.comment?.user?.type === 'Bot'
+            ) {
+              core.info('Skipping bot comment.');
+              return;
+            }
+
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const labelName = 'need info';
-
-            const labels = (issue.labels || []).map((label) => label.name.toLowerCase());
-            const title = issue.title || '';
-            const body = issue.body || '';
+            const issueNumber = issue.number;
+            const issueBody = issue.body || '';
             const author = issue.user?.login || 'there';
+            const openedNow =
+              context.eventName === 'issues' && context.payload.action === 'opened';
 
-            const isBug = labels.includes('bug') || /^\s*\[bug\]\s*:/i.test(title);
-            const attachmentPatterns = [
-              /https:\/\/github\.com\/user-attachments\/(?:assets|files)\/[^\s)\]]+/i,
-              /https:\/\/user-images\.githubusercontent\.com\/[^\s)\]]+/i,
-              /https:\/\/github\.com\/[^/\s)]+\/[^/\s)]+\/files\/\d+\/[^\s)\]]+/i,
-              /\[[^\]]+\]\([^)]+\.(?:txt|log|zip|gz|json|png|jpe?g|webp|mp4)(?:\?[^)]*)?\)/i
-            ];
-            const hasAttachment = attachmentPatterns.some((pattern) => pattern.test(body));
+            const labels = (issue.labels || []).map((label) => label.name);
+            const lowerLabels = new Set(labels.map((label) => label.toLowerCase()));
+            const isBug = lowerLabels.has('bug');
+            const isFeature = lowerLabels.has('enhancement');
+            if (!isBug && !isFeature) {
+              core.info('Skipping issue without a supported Issue Form label.');
+              return;
+            }
 
-            async function ensureNeedInfoLabel() {
+            const labelConfig = {
+              'need info': {
+                color: 'd73a4a',
+                description: 'Needs more information from the issue author'
+              },
+              '模块本体': {
+                color: '1d76db',
+                description: 'Issue is about the Sesame-AG module itself'
+              },
+              '目标应用': {
+                color: '5319e7',
+                description: 'Issue is about a target application'
+              }
+            };
+            const scopeLabels = ['模块本体', '目标应用'];
+
+            function escapeRegExp(value) {
+              return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            }
+
+            function extractSection(markdown, heading) {
+              const pattern = new RegExp(
+                `(?:^|\\n)###\\s+${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n###\\s+|$)`,
+                'i'
+              );
+              return markdown.match(pattern)?.[1]?.trim() || '';
+            }
+
+            function parseScope(markdown) {
+              const scope = extractSection(markdown, '反馈对象');
+              if (scope.includes('模块本体')) {
+                return '模块本体';
+              }
+              if (scope.includes('目标应用')) {
+                return '目标应用';
+              }
+              return '';
+            }
+
+            function attachmentLinks(markdown) {
+              const urls = markdown.match(/https?:\/\/[^\s<>)\]]+/gi) || [];
+              return urls
+                .map((url) => url.replace(/[.,;:!?]+$/, ''))
+                .filter((url) => (
+                  /^https:\/\/github\.com\/user-attachments\/(?:assets|files)\//i.test(url) ||
+                  /^https:\/\/user-images\.githubusercontent\.com\//i.test(url) ||
+                  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/files\/\d+\//i.test(url) ||
+                  /\.(?:txt|log|zip|gz|json)(?:[?#].*)?$/i.test(url)
+                ));
+            }
+
+            function hasMeaningfulTargetAppInfo(value) {
+              const compact = value.replace(/\s+/g, '').toLowerCase();
+              if (!compact) {
+                return false;
+              }
+              return !/^(?:不涉及|不适用|无|none|n\/?a)(?:[，,。.;；:].*)?$/.test(compact);
+            }
+
+            async function ensureLabel(name) {
+              const config = labelConfig[name];
               try {
-                await github.rest.issues.getLabel({ owner, repo, name: labelName });
+                await github.rest.issues.getLabel({ owner, repo, name });
               } catch (error) {
                 if (error.status !== 404) {
                   throw error;
@@ -45,41 +119,144 @@ jobs:
                 await github.rest.issues.createLabel({
                   owner,
                   repo,
-                  name: labelName,
-                  color: 'd73a4a',
-                  description: 'Needs more information from the issue author'
+                  name,
+                  color: config.color,
+                  description: config.description
                 });
               }
             }
 
-            async function addNeedInfoLabel() {
-              const currentLabels = new Set((issue.labels || []).map((label) => label.name));
-              if (currentLabels.has(labelName)) {
+            async function addLabel(name) {
+              if (labels.includes(name)) {
                 return;
               }
+              await ensureLabel(name);
               await github.rest.issues.addLabels({
                 owner,
                 repo,
-                issue_number: issue.number,
-                labels: [labelName]
+                issue_number: issueNumber,
+                labels: [name]
               });
             }
 
-            if (isBug && !hasAttachment) {
-              await ensureNeedInfoLabel();
-              await addNeedInfoLabel();
+            async function removeLabel(name) {
+              if (!labels.includes(name)) {
+                return;
+              }
+              await github.rest.issues.removeLabel({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                name
+              });
+            }
+
+            const scope = parseScope(issueBody);
+            if (scope) {
+              await addLabel(scope);
+              for (const label of scopeLabels) {
+                if (label !== scope) {
+                  await removeLabel(label);
+                }
+              }
+            }
+
+            const missing = [];
+            if (!scope) {
+              missing.push('反馈对象（请选择“模块本体”或“目标应用”）');
+            }
+
+            if (isBug) {
+              let hasErrorLogs = attachmentLinks(
+                extractSection(issueBody, '错误日志附件')
+              ).length > 0;
+              let hasCompleteAndModuleLogs = attachmentLinks(
+                extractSection(issueBody, '完整日志及相关模块日志附件')
+              ).length > 0;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number: issueNumber,
+                per_page: 100
+              });
+              const commentAttachmentLinks = new Set(
+                comments.flatMap((comment) => attachmentLinks(comment.body || ''))
+              );
+              const missingLogGroups = Number(!hasErrorLogs) + Number(!hasCompleteAndModuleLogs);
+              if (missingLogGroups > 0 && commentAttachmentLinks.size >= missingLogGroups) {
+                hasErrorLogs = true;
+                hasCompleteAndModuleLogs = true;
+              }
+
+              if (!hasErrorLogs) {
+                missing.push('错误日志附件');
+              }
+              if (!hasCompleteAndModuleLogs) {
+                missing.push('完整日志及相关模块日志附件');
+              }
+
+              if (
+                scope === '目标应用' &&
+                !hasMeaningfulTargetAppInfo(
+                  extractSection(issueBody, '目标应用信息 / 受影响模块功能')
+                )
+              ) {
+                missing.push('目标应用信息（名称、包名和版本；不能填写“不涉及”）');
+              }
+            }
+
+            const hasNeedInfo = labels.includes('need info');
+            const kind = isBug ? 'Bug' : '功能建议';
+
+            function receivedMessage() {
+              if (isBug) {
+                return scope === '目标应用'
+                  ? `您好 @${author}，已收到「目标应用 Bug」。两组日志附件和诊断信息已齐全，我们会结合目标应用信息进行排查。`
+                  : `您好 @${author}，已收到「模块本体 Bug」。两组日志附件和诊断信息已齐全，我们会进一步排查。`;
+              }
+              return scope === '目标应用'
+                ? `您好 @${author}，已收到「目标应用功能建议」。感谢你补充使用场景和方案，合理建议我们将考虑完善。`
+                : `您好 @${author}，已收到「模块本体功能建议」。感谢你补充使用场景和方案，合理建议我们将考虑完善。`;
+            }
+
+            function missingMessage() {
+              const details = missing.map((item) => `- **${item}**`).join('\n');
+              const logGuide = isBug
+                ? '\n\n请在日志中心打开对应卡片，导出错误日志、全部日志和相关模块日志；脱敏后在 `/Download/sesame-AG/` 找到文件并上传。请优先编辑原 Issue 的两个指定附件字段；如改在评论补充，请一次提供与缺失组数相同的日志附件。'
+                : '';
+              return `您好 @${author}，感谢提交${scope ? `「${scope}${kind}」` : kind}。当前仍缺少以下必要信息：\n${details}${logGuide}\n\n补充后会自动重新检查；3 天内未补齐时 Issue 将被自动关闭。`;
+            }
+
+            if (missing.length > 0) {
+              await addLabel('need info');
+              if (!hasNeedInfo) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issueNumber,
+                  body: missingMessage()
+                });
+              }
+              return;
+            }
+
+            if (hasNeedInfo) {
+              await removeLabel('need info');
               await github.rest.issues.createComment({
                 owner,
                 repo,
-                issue_number: issue.number,
-                body: `您好 @${author}，感谢反馈。这个 Bug Issue 目前缺少必要的日志或附件。\n\n请将脱敏后的错误日志、全部日志和对应模块日志以附件形式上传到 Issue 正文或评论中，不要直接粘贴日志正文；如果 3 天内没有补充信息，Issue 将被自动关闭。`
+                issue_number: issueNumber,
+                body: `您好 @${author}，已检测到所需信息和附件链接，感谢补充。${isBug ? '后续将结合这些日志继续排查。' : '后续将结合这些信息评估建议。'}`
               });
               return;
             }
 
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: issue.number,
-              body: `您好 @${author}，已收到 Issue，感谢反馈。如果核实后确实存在问题我们会尽快修复，请耐心等待。`
-            });
+            if (openedNow) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body: receivedMessage()
+              });
+            }

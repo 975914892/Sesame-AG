@@ -854,6 +854,7 @@
       };
 
       const makeDefaultFriendSelectionSpec = () => ({
+        selectionScope: "EXPLICIT",
         includeUserIds: [],
         includeGroupIds: [],
         excludeUserIds: [],
@@ -873,6 +874,14 @@
         Array.isArray(value)
           ? value.map((item) => String(item || "").trim()).filter(Boolean)
           : [];
+
+      // Unknown imported values must retain the safe explicit-selection behavior.
+      const normalizeFriendSelectionScope = (value) =>
+        String(value || "")
+          .trim()
+          .toUpperCase() === "ALL_FRIENDS"
+          ? "ALL_FRIENDS"
+          : "EXPLICIT";
 
       const normalizeStringNumberMap = (value) => {
         const result = {};
@@ -897,6 +906,9 @@
             return makeDefaultFriendSelectionSpec();
           }
           return {
+            selectionScope: normalizeFriendSelectionScope(
+              parsed.selectionScope,
+            ),
             includeUserIds: normalizeStringArray(parsed.includeUserIds),
             includeGroupIds: normalizeStringArray(parsed.includeGroupIds),
             excludeUserIds: normalizeStringArray(parsed.excludeUserIds),
@@ -935,28 +947,18 @@
       };
 
       const makeFallbackFriendSelectionSummary = (type, configValue) => {
-        if (type === "FRIEND_SELECTION_COUNT") {
-          const spec = parseFriendSelectionCountSpec(configValue).selection;
-          const selectedCount =
-            spec.includeUserIds.length + spec.includeGroupIds.length;
-          const excludedCount =
-            spec.excludeUserIds.length + spec.excludeGroupIds.length;
-          return {
-            selectedCount,
-            directSelectedCount: spec.includeUserIds.length,
-            groupSelectedCount: spec.includeGroupIds.length,
-            excludedCount,
-            effectiveCount: selectedCount,
-            inactiveCount: 0,
-            hasAdvancedRules: spec.relationFilter !== "MUTUAL_ONLY",
-          };
-        }
-        const spec = parseFriendSelectionSpec(configValue);
-        const selectedCount =
-          spec.includeUserIds.length + spec.includeGroupIds.length;
+        const spec =
+          type === "FRIEND_SELECTION_COUNT"
+            ? parseFriendSelectionCountSpec(configValue).selection
+            : parseFriendSelectionSpec(configValue);
+        const allFriendsSelection = spec.selectionScope === "ALL_FRIENDS";
+        const selectedCount = allFriendsSelection
+          ? 0
+          : spec.includeUserIds.length + spec.includeGroupIds.length;
         const excludedCount =
           spec.excludeUserIds.length + spec.excludeGroupIds.length;
         return {
+          allFriendsSelection,
           selectedCount,
           directSelectedCount: spec.includeUserIds.length,
           groupSelectedCount: spec.includeGroupIds.length,
@@ -2119,6 +2121,9 @@
           const { type } = friendSheetConfig;
           const normalizedSpec = {
             ...friendSpec,
+            selectionScope: normalizeFriendSelectionScope(
+              friendSpec.selectionScope,
+            ),
             includeUserIds: normalizeStringArray(friendSpec.includeUserIds),
             includeGroupIds: normalizeStringArray(friendSpec.includeGroupIds),
             excludeUserIds: normalizeStringArray(friendSpec.excludeUserIds),
@@ -2914,6 +2919,8 @@
           const friends = friendSheetData.friends || [];
           const isCountField =
             friendSheetConfig.type === "FRIEND_SELECTION_COUNT";
+          const isAllFriendsSelection =
+            friendSpec.selectionScope === "ALL_FRIENDS";
           const includeUserIds = new Set(friendSpec.includeUserIds || []);
           const includeGroupIds = new Set(friendSpec.includeGroupIds || []);
           const excludeUserIds = new Set(friendSpec.excludeUserIds || []);
@@ -3077,8 +3084,11 @@
                   const excludedByGroupIds = excludedGroups.map(
                     (group) => group.id,
                   );
+                  const selectedByAllFriends = isAllFriendsSelection;
                   const selected =
-                    selectedDirectly || selectedByGroupIds.length > 0;
+                    selectedByAllFriends ||
+                    selectedDirectly ||
+                    selectedByGroupIds.length > 0;
                   const excluded =
                     excludedDirectly || excludedByGroupIds.length > 0;
                   const capability = capabilityResult(friend);
@@ -3103,6 +3113,7 @@
                     name: friend.name || friend.id,
                     relation: friend.removed ? "REMOVED" : friend.relation,
                     globalBlocked: Boolean(friend.globalBlocked),
+                    selectedByAllFriends,
                     selectedDirectly,
                     selectedByGroups: selectedGroups.map((group) => group.name),
                     selectedByGroupIds,
@@ -3132,6 +3143,7 @@
           );
           const inactiveItems = selectedItems.filter((item) => !item.effective);
           const localSummary = {
+            allFriendsSelection: isAllFriendsSelection,
             selectedCount: selectedItems.length,
             directSelectedCount: localPreviewItems.filter(
               (item) => item.selectedDirectly,
@@ -3163,8 +3175,13 @@
                   const excludedByGroupIds = normalizeStringArray(
                     item?.excludedByGroupIds,
                   );
+                  const selectedByAllFriends =
+                    Boolean(item?.selectedByAllFriends) ||
+                    isAllFriendsSelection;
                   const selected =
-                    selectedDirectly || selectedByGroupIds.length > 0;
+                    selectedByAllFriends ||
+                    selectedDirectly ||
+                    selectedByGroupIds.length > 0;
                   const excluded =
                     excludedDirectly || excludedByGroupIds.length > 0;
                   return {
@@ -3172,6 +3189,7 @@
                     name: String(item?.displayName || item?.name || id),
                     relation: item?.relation || "UNKNOWN",
                     globalBlocked: Boolean(item?.globalBlocked),
+                    selectedByAllFriends,
                     selectedDirectly,
                     selectedByGroups: normalizeStringArray(
                       item?.selectedByGroups,
@@ -3210,6 +3228,7 @@
               : null;
           const backendSummaryFallback = shouldUseBackendPreview
             ? {
+                allFriendsSelection: isAllFriendsSelection,
                 selectedCount: backendPreviewItems.filter(
                   (item) => item.selected,
                 ).length,
@@ -3321,7 +3340,12 @@
           const renderGroupRow = (group) => {
             const included = includeGroupIds.has(group.id);
             const excluded = excludeGroupIds.has(group.id);
-            const value = excluded ? "exclude" : included ? "include" : "none";
+            const canUseIncludedGroup = !isAllFriendsSelection || isCountField;
+            const value = excluded
+              ? "exclude"
+              : included && canUseIncludedGroup
+                ? "include"
+                : "none";
             return (
               <div className="list-item" key={group.id}>
                 <div className="list-item-left">
@@ -3341,9 +3365,15 @@
                     )
                   }
                 >
-                  <Radio value="include">选中</Radio>
+                  {canUseIncludedGroup ? (
+                    <Radio value="include">
+                      {isAllFriendsSelection ? "分组次数" : "选中"}
+                    </Radio>
+                  ) : null}
                   <Radio value="exclude">排除</Radio>
-                  <Radio value="none">未选</Radio>
+                  <Radio value="none">
+                    {isAllFriendsSelection ? "不排除" : "未选"}
+                  </Radio>
                 </RadioGroup>
                 {isCountField && included ? (
                   <InputNumber
@@ -3368,12 +3398,15 @@
           const renderFriendRow = (item) => {
             const value = item.excludedDirectly
               ? "exclude"
-              : item.selectedDirectly
+              : !isAllFriendsSelection && item.selectedDirectly
                 ? "include"
                 : "none";
             const isBatchSelected = friendBatchSelectedIds.has(item.id);
             const sourceText = [
-              item.selectedDirectly ? "已单独选中" : "",
+              item.selectedByAllFriends ? "动态全部好友" : "",
+              !isAllFriendsSelection && item.selectedDirectly
+                ? "已单独选中"
+                : "",
               item.selectedByGroups.length
                 ? `来自分组：${item.selectedByGroups.join("、")}`
                 : "",
@@ -3485,9 +3518,13 @@
                       )
                     }
                   >
-                    <Radio value="include">选中</Radio>
+                    {!isAllFriendsSelection ? (
+                      <Radio value="include">选中</Radio>
+                    ) : null}
                     <Radio value="exclude">排除</Radio>
-                    <Radio value="none">未选</Radio>
+                    <Radio value="none">
+                      {isAllFriendsSelection ? "不排除" : "未选"}
+                    </Radio>
                   </RadioGroup>
                   {isCountField && item.selected && !item.excluded ? (
                     <InputNumber
@@ -3511,6 +3548,31 @@
               {friendSheetConfig.desc ? (
                 <Text>{friendSheetConfig.desc}</Text>
               ) : null}
+              <div style={{ marginTop: "0.75rem" }}>
+                <Text strong>候选范围</Text>
+                <RadioGroup
+                  type="button"
+                  value={friendSpec.selectionScope || "EXPLICIT"}
+                  onChange={(e) => {
+                    setFriendSpecDirty(true);
+                    setFriendSpec((prev) => ({
+                      ...prev,
+                      selectionScope: normalizeFriendSelectionScope(
+                        e.target.value,
+                      ),
+                    }));
+                  }}
+                  style={{ marginLeft: "0.75rem" }}
+                >
+                  <Radio value="EXPLICIT">指定好友/分组</Radio>
+                  <Radio value="ALL_FRIENDS">全部好友（动态）</Radio>
+                </RadioGroup>
+                {isAllFriendsSelection ? (
+                  <div className="friend-summary-note">
+                    好友中心刷新后，新好友会自动纳入；排除、黑名单、关系、能力和任务限额仍优先执行。
+                  </div>
+                ) : null}
+              </div>
               {friendAudit ? (
                 <div
                   style={{
@@ -3556,7 +3618,10 @@
                     summary.effectiveCount,
                     "var(--semi-color-success)",
                   )}
-                  {renderSummaryItem("已选来源", summary.selectedCount)}
+                  {renderSummaryItem(
+                    summary.allFriendsSelection ? "动态候选" : "已选来源",
+                    summary.selectedCount,
+                  )}
                   {renderSummaryItem(
                     "排除",
                     summary.excludedCount,
@@ -3570,9 +3635,17 @@
                       : undefined,
                   )}
                 </div>
+                {summary.allFriendsSelection ? (
+                  <div className="friend-summary-note">
+                    候选范围：动态全部好友（当前好友中心已同步档案）
+                  </div>
+                ) : null}
                 {selectedGroupNames.length > 0 ? (
                   <div className="friend-summary-note">
-                    已选分组：{selectedGroupNames.join("、")}
+                    {isAllFriendsSelection && isCountField
+                      ? "分组次数覆盖："
+                      : "已选分组："}
+                    {selectedGroupNames.join("、")}
                   </div>
                 ) : null}
                 {summary.hasAdvancedRules ? (
@@ -3967,9 +4040,9 @@
                     type="secondary"
                     onClick={() => openFriendSheet(modelCode, item)}
                   >
-                    生效 {summary.effectiveCount || 0} / 已选{" "}
-                    {summary.selectedCount || 0} / 排除{" "}
-                    {summary.excludedCount || 0}
+                    {summary.allFriendsSelection
+                      ? `动态全员 · 生效 ${summary.effectiveCount || 0} / 排除 ${summary.excludedCount || 0}`
+                      : `生效 ${summary.effectiveCount || 0} / 已选 ${summary.selectedCount || 0} / 排除 ${summary.excludedCount || 0}`}
                   </Button>
                   {(summary.inactiveCount || 0) > 0 ? (
                     <div className="field-status">

@@ -18,7 +18,6 @@ import java.nio.file.ClosedWatchServiceException
 import java.nio.file.Path
 import java.nio.file.StandardWatchEventKinds
 import java.nio.file.WatchService
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantReadWriteLock
@@ -347,8 +346,9 @@ object DataStore {
             try {
                 while (isActive) {
                     val key = try {
-                        // 使用 poll + timeout，让取消能及时生效（而不是永久阻塞在 take()）
-                        watch.poll(1, TimeUnit.SECONDS) ?: continue
+                        // 等待真实文件事件，避免空闲时每秒唤醒 CPU。shutdownWatcher() 会关闭 WatchService
+                        // 解除 take() 阻塞，因此不会牺牲账号切换和进程销毁时的可取消性。
+                        watch.take()
                     } catch (_: ClosedWatchServiceException) {
                         return@execute
                     } catch (_: InterruptedException) {

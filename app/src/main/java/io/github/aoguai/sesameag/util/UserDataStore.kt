@@ -18,7 +18,6 @@ import java.io.File
 import java.nio.file.Path
 import java.nio.file.StandardWatchEventKinds
 import java.nio.file.WatchService
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantReadWriteLock
@@ -267,7 +266,8 @@ class UserDataStore(val uid: String, private val storageFile: File) {
             try {
                 while (isActive) {
                     val key = try {
-                        watch.poll(1, TimeUnit.SECONDS) ?: continue
+                        // 由真实文件变更唤醒；shutdown() 会关闭 WatchService，因此 take() 不会阻塞销毁。
+                        watch.take()
                     } catch (_: Exception) { return@execute }
 
                     var shouldReload = false

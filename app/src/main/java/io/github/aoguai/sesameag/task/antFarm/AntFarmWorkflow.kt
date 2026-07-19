@@ -32,7 +32,10 @@ internal suspend fun AntFarm.runFarmLifecycleWorkflow(tc: TimeCounter): Boolean 
     return true
 }
 
-internal suspend fun AntFarm.runFarmTaskWorkflow(tc: TimeCounter, userId: String?): Boolean {
+internal suspend fun AntFarm.runFarmTaskWorkflow(
+    tc: TimeCounter,
+    userId: String?,
+): Boolean {
     var pendingFarmTaskFinalization = false
 
     if (doFarmTask?.value == true && !Status.hasFlagToday(StatusFlags.FLAG_FARM_TASK_FINISHED)) {
@@ -93,8 +96,9 @@ internal suspend fun AntFarm.runFarmTaskWorkflow(tc: TimeCounter, userId: String
     if (donation?.value == true && shouldDonateEggNow(userId)) {
         val publicDonationMade = handleDonation()
         tc.countDebug("每日捐蛋")
-        val dailyDonationMarkedDone = !userId.isNullOrBlank() &&
-            Status.hasFlagToday(StatusFlags.FLAG_FARM_DAILY_DONATION_DONE_PREFIX + userId)
+        val dailyDonationMarkedDone =
+            !userId.isNullOrBlank() &&
+                Status.hasFlagToday(StatusFlags.FLAG_FARM_DAILY_DONATION_DONE_PREFIX + userId)
         if (publicDonationMade) {
             if (dailyDonationMarkedDone) {
                 Log.farm("今日捐蛋完成")
@@ -139,7 +143,7 @@ internal suspend fun AntFarm.runFarmTaskWorkflow(tc: TimeCounter, userId: String
 
 internal suspend fun AntFarm.runFarmSocialWorkflow(
     tc: TimeCounter,
-    pendingFarmTaskFinalization: Boolean
+    pendingFarmTaskFinalization: Boolean,
 ): Boolean {
     var pendingFinalization = pendingFarmTaskFinalization
 
@@ -154,7 +158,7 @@ internal suspend fun AntFarm.runFarmSocialWorkflow(
         AntFarmFamily.run(
             familyOptions!!,
             notInviteList!!,
-            familyAssignStrategy?.value ?: AntFarm.FamilyAssignStrategy.RANDOM
+            familyAssignStrategy?.value ?: AntFarm.FamilyAssignStrategy.RANDOM,
         )
         tc.countDebug("家庭任务")
     }
@@ -197,7 +201,7 @@ internal suspend fun AntFarm.runFarmSocialWorkflow(
 
 internal suspend fun AntFarm.runFarmFinalizeWorkflow(
     tc: TimeCounter,
-    pendingFarmTaskFinalization: Boolean
+    pendingFarmTaskFinalization: Boolean,
 ) {
     animalSleepAndWake()
     tc.countDebug("小鸡睡觉&起床")
@@ -205,6 +209,9 @@ internal suspend fun AntFarm.runFarmFinalizeWorkflow(
     if (pendingFarmTaskFinalization) {
         finalizeFarmTaskAfterMultiStage("抽抽乐/开宝箱/睡觉流程尾刷")
     }
+
+    // 厨房与乐园动作可能刚推进大表鸽任务，收尾统一补收并回查 NPC 产出。
+    runZhimaPigeonTaskFlow()
 
     syncAnimalStatus(ownerFarmId)
     if (isOwnerAnimalSleeping()) {

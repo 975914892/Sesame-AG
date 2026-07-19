@@ -12,12 +12,11 @@ object TaskBlacklist {
     private const val MYBANK_MODULE_NAME = "网商银行"
     private const val LEGACY_MYBANK_WELFARE_MODULE_NAME = "网商福利金"
 
-    private fun canonicalModuleName(moduleName: String): String {
-        return when (moduleName) {
+    private fun canonicalModuleName(moduleName: String): String =
+        when (moduleName) {
             LEGACY_MYBANK_WELFARE_MODULE_NAME -> MYBANK_MODULE_NAME
             else -> moduleName
         }
-    }
 
     private fun relatedModuleNames(moduleName: String): LinkedHashSet<String> {
         val canonicalName = canonicalModuleName(moduleName)
@@ -30,7 +29,7 @@ object TaskBlacklist {
 
     private fun collectModuleBlacklist(
         allBlacklists: Map<String, Set<String>>,
-        moduleName: String
+        moduleName: String,
     ): LinkedHashSet<String> {
         val merged = LinkedHashSet<String>()
         relatedModuleNames(moduleName).forEach { name ->
@@ -39,14 +38,13 @@ object TaskBlacklist {
         return merged
     }
 
-    private fun getAllBlacklists(): Map<String, Set<String>> {
-        return try {
+    private fun getAllBlacklists(): Map<String, Set<String>> =
+        try {
             DataStore.getOrCreate(BLACKLIST_KEY, object : TypeReference<Map<String, Set<String>>>() {})
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "获取黑名单列表失败", e)
             emptyMap()
         }
-    }
 
     /**
      * 保存完整的黑名单映射
@@ -62,9 +60,7 @@ object TaskBlacklist {
     /**
      * 获取所有有黑名单的模块名称
      */
-    fun getBlacklistModuleNames(): List<String> {
-        return getAllBlacklists().keys.map(::canonicalModuleName).distinct()
-    }
+    fun getBlacklistModuleNames(): List<String> = getAllBlacklists().keys.map(::canonicalModuleName).distinct()
 
     /**
      * 获取指定模块的黑名单
@@ -78,7 +74,10 @@ object TaskBlacklist {
      * 检查任务是否在黑名单中
      * 采用包含匹配逻辑，确保 ID 或 标题 任意一项命中即可
      */
-    fun isTaskInBlacklist(moduleName: String?, taskInfo: String?): Boolean {
+    fun isTaskInBlacklist(
+        moduleName: String?,
+        taskInfo: String?,
+    ): Boolean {
         if (moduleName.isNullOrBlank() || taskInfo.isNullOrBlank()) return false
 
         // 1. 检查内置黑名单
@@ -98,7 +97,10 @@ object TaskBlacklist {
      * @param input 传入的待检查字符串 (通常是 taskId)
      * @param blacklistItem 黑名单中的项 (通常是 taskId + taskTitle)
      */
-    private fun isMatch(input: String, blacklistItem: String): Boolean {
+    private fun isMatch(
+        input: String,
+        blacklistItem: String,
+    ): Boolean {
         if (blacklistItem.isBlank()) return false
 
         // 1. 完全匹配
@@ -142,7 +144,11 @@ object TaskBlacklist {
     /**
      * 添加任务到指定模块的黑名单
      */
-    fun addToBlacklist(moduleName: String?, taskId: String, taskTitle: String = "") {
+    fun addToBlacklist(
+        moduleName: String?,
+        taskId: String,
+        taskTitle: String = "",
+    ) {
         if (moduleName.isNullOrBlank() || taskId.isBlank()) return
 
         // 使用分隔符 | 拼接 ID 和 标题，便于后续精确匹配
@@ -165,7 +171,11 @@ object TaskBlacklist {
     /**
      * 从指定模块的黑名单中移除任务
      */
-    fun removeFromBlacklist(moduleName: String?, taskId: String, taskTitle: String = "") {
+    fun removeFromBlacklist(
+        moduleName: String?,
+        taskId: String,
+        taskTitle: String = "",
+    ) {
         if (moduleName.isNullOrBlank() || taskId.isBlank()) return
 
         val blacklistItem = if (taskTitle.isNotBlank() && taskId != taskTitle) "$taskId|$taskTitle" else taskId
@@ -191,9 +201,10 @@ object TaskBlacklist {
         if (moduleName.isNullOrBlank()) return
         val canonicalName = canonicalModuleName(moduleName)
         val allBlacklists = getAllBlacklists().toMutableMap()
-        val removed = relatedModuleNames(canonicalName).fold(false) { acc, name ->
-            allBlacklists.remove(name) != null || acc
-        }
+        val removed =
+            relatedModuleNames(canonicalName).fold(false) { acc, name ->
+                allBlacklists.remove(name) != null || acc
+            }
         if (removed) {
             saveAllBlacklists(allBlacklists)
             Log.record(TAG, "模块[$canonicalName]的黑名单已清空")
@@ -214,26 +225,32 @@ object TaskBlacklist {
      * 调用方必须已经把失败分类为“无稳定完成闭环”或“稳定非重试参数错误”。
      * 业务受限、重复领取、系统繁忙、稍后再试、操作频繁等临时/业务终态不要传入这里。
      */
-    fun autoAddToBlacklist(moduleName: String?, taskId: String, taskTitle: String = "", errorCode: String) {
+    fun autoAddToBlacklist(
+        moduleName: String?,
+        taskId: String,
+        taskTitle: String = "",
+        errorCode: String,
+    ) {
         if (moduleName.isNullOrBlank() || taskId.isBlank()) return
 
-        val reason = when (errorCode) {
-            "400000040" -> "不支持rpc调用"
-            "20020012" -> "任务ID为空或无效"
-            "ILLEGAL_ARGUMENT" -> "参数错误"
-            "TASK_ID_INVALID" -> "任务ID非法"
-            "PROMISE_TEMPLATE_NOT_EXIST", "生活记录模板不存在" -> "模板不存在"
-            "FAKE_SUCCESS" -> "检测到伪成功"
-            "AD_TRAFFIC_RISK", "217", "61002" -> "广告流量风控"
-            "UNSUPPORTED_GAMEPLAY_TASK" -> "无稳定自动完成RPC闭环"
-            else -> return
-        }
+        val reason =
+            when (errorCode) {
+                "400000040" -> "不支持rpc调用"
+                "20020012" -> "任务ID为空或无效"
+                "ILLEGAL_ARGUMENT" -> "参数错误"
+                "TASK_ID_INVALID" -> "任务ID非法"
+                "PROMISE_TEMPLATE_NOT_EXIST", "生活记录模板不存在" -> "模板不存在"
+                "FAKE_SUCCESS" -> "检测到伪成功"
+                "AD_TRAFFIC_RISK", "217", "61002" -> "广告流量风控"
+                "UNSUPPORTED_GAMEPLAY_TASK" -> "无稳定自动完成RPC闭环"
+                else -> return
+            }
 
         addToBlacklist(moduleName, taskId, taskTitle)
         val taskInfo = if (taskTitle.isNotBlank()) "$taskId - $taskTitle" else taskId
         Log.record(
             TAG,
-            "模块[$moduleName]任务[$taskInfo]因$reason 已加入自动任务跳过列表（用于避免重复尝试，不代表账号异常）"
+            "模块[$moduleName]任务[$taskInfo]因$reason 已加入自动任务跳过列表（用于避免重复尝试，不代表账号异常）",
         )
     }
 }

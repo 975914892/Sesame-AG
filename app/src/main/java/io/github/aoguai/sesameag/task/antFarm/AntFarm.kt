@@ -4503,7 +4503,7 @@ class AntFarm : ModelTask() {
                 val jo = jaFarmSignList.getJSONObject(i)
                 val signKey = jo.getString("signKey")
                 val signed = jo.getBoolean("signed")
-                val awardCount = jo.getString("awardCount")
+                val awardCount = jo.optString("awardCount", "180")
                 val currentContinuousCount = jo.getInt("currentContinuousCount")
                 if (currentSignKey == signKey) {
                     if (!signed) {
@@ -6992,163 +6992,319 @@ class AntFarm : ModelTask() {
         return false
     }
 
+    private data class NpcAnimalSnapshot(
+        val animal: Animal,
+        val raw: JSONObject,
+    )
+
+    private data class NpcAnimalSyncResult(
+        val npc: NpcAnimalSnapshot?,
+    )
+
+    internal fun isZhimaPigeonConfigured(): Boolean =
+        selectedNpcConfig() == NpcConfig.ZHIMA_PIGEON
+
     /**
-     * 统一处理NPC小鸡的雇佣、切换、领奖与任务
+     * 芝麻炼金已确认领取并反馈雇佣任务后，才允许庄园侧雇佣或切换到大表鸽。
      */
-    internal suspend fun handleNpcAnimalLogic() {
+    internal suspend fun activateZhimaPigeonFromAlchemyTask(): Boolean {
+        if (!isZhimaPigeonConfigured()) return false
+        if (Status.hasFlagToday(StatusFlags.FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED)) {
+            Log.farm("芝麻大表鸽🤖[今日满产奖励已领取，明日再雇佣]")
+            return true
+        }
+        if (ownerFarmId.isNullOrBlank() && enterFarm() == null) {
+            Log.farm("芝麻大表鸽🤖[庄园状态未就绪，保留后续重试]")
+            return false
+        }
+        handleNpcAnimalLogic(allowZhimaPigeonHire = true)
+        return true
+    }
+
+    /**
+     * 常规庄园流程只维护已经存在的大表鸽；首次雇佣必须由炼金任务的成功闭环触发。
+     */
+    internal suspend fun handleNpcAnimalLogic(allowZhimaPigeonHire: Boolean = false) {
         try {
-            val selectedIndex = npcAnimalType?.value ?: 0
-            val targetConfig = NpcConfig.getByIndex(selectedIndex)
+            val targetConfig = selectedNpcConfig()
             if (targetConfig == NpcConfig.NONE) return
 
-            // 1. 查找当前已雇佣的NPC动物
-            var currentNpcAnimal: Animal? = null
-            var currentNpcJson: JSONObject? = null // 用于获取 Animal 类未映射的字段
+            val source = if (targetConfig == NpcConfig.ZHIMA_PIGEON) targetConfig.source else "H5"
+            val syncResult = syncNpcAnimalStatus(source, "SYNC_NPC") ?: return
+            val currentNpc = syncResult.npc
 
-            // 为了获取准确的 npcBizReward 等字段，建议解析 syncAnimalStatus 的原始响应
-            // 这里我们先从 enterFarm 缓存的 animals 中找，如果找不到或需要精确状态，可能需要重新 sync
-            if (animals != null) {
-                for (animal in animals!!) {
-                    if ("NPC" == animal.subAnimalType) {
-                        currentNpcAnimal = animal
-                        break
-                    }
+            if (currentNpc == null) {
+                if (targetConfig == NpcConfig.ZHIMA_PIGEON && !allowZhimaPigeonHire) {
+                    Log.farm("芝麻大表鸽🤖[等待芝麻炼金任务触发雇佣]")
+                    return
                 }
-            }
-
-            // 如果内存中状态可能不准，或者需要详细字段，重新同步一次
-            val syncRes = AntFarmRpcCall.syncAnimalStatus(ownerFarmId, "SYNC_NPC", "QUERY_FARM_INFO")
-            val joSync = JSONObject(syncRes)
-            if (!ResChecker.checkRes(TAG, joSync)) return
-
-            val animalsJa = joSync.optJSONObject("subFarmVO")?.optJSONArray("animals")
-            if (animalsJa != null) {
-                for (i in 0 until animalsJa.length()) {
-                    val a = animalsJa.getJSONObject(i)
-                    if ("NPC" == a.optString("subAnimalType")) {
-                        currentNpcJson = a
-                        // 更新内存对象
-                        currentNpcAnimal = objectMapper.readValue(a.toString(), Animal::class.java)
-                        break
-                    }
+                if (targetConfig == NpcConfig.ZHIMA_PIGEON &&
+                    Status.hasFlagToday(StatusFlags.FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED)
+                ) {
+                    Log.farm("芝麻大表鸽🤖[今日满产奖励已领取，明日再雇佣]")
+                    return
                 }
-            }
-
-            // 2. 决策逻辑
-            if (currentNpcAnimal == null) {
-                // 场景A: 当前没有NPC -> 直接雇佣目标NPC
                 Log.farm("NPC小鸡🤖[当前未雇佣，准备雇佣${targetConfig.nickName}]")
                 hireNpc(targetConfig)
-            } else {
-                // 场景B: 当前有NPC
-                val currentId = currentNpcAnimal.animalId
-
-                if (currentId == targetConfig.animalId) {
-                    // B1: 正是选中的这只 -> 检查奖励是否已满
-                    checkRewardAndTask(currentNpcAnimal, currentNpcJson, targetConfig)
-                } else {
-                    // B2: 是其他类型的NPC -> 遣返旧的，雇佣新的
-                    val currentName = currentNpcAnimal.masterUserInfoVO?.get("nickName") as? String ?: "未知NPC"
-                    Log.farm("NPC小鸡🤖[检测到${currentName}，目标是${targetConfig.nickName}，执行切换]")
-
-                    // 遣返当前 (领取奖励)
-                    val sendBackRes = AntFarmRpcCall.sendBackNpcAnimal(
-                        currentNpcAnimal.animalId,
-                        currentNpcAnimal.currentFarmId,
-                        currentNpcAnimal.masterFarmId
-                    )
-                    if (ResChecker.checkRes(TAG, JSONObject(sendBackRes))) {
-                        Log.farm("NPC小鸡🤖[已遣返${currentName}]")
-                        // 雇佣新的
-                        hireNpc(targetConfig)
-                    } else {
-                        Log.farm("NPC小鸡🤖[遣返失败，暂停切换]")
-                    }
-                }
+                return
             }
 
+            if (currentNpc.animal.animalId == targetConfig.animalId) {
+                checkNpcReward(currentNpc, targetConfig)
+                return
+            }
+
+            if (targetConfig == NpcConfig.ZHIMA_PIGEON && !allowZhimaPigeonHire) {
+                Log.farm("芝麻大表鸽🤖[当前已有其他NPC，等待芝麻炼金任务触发切换]")
+                return
+            }
+
+            val currentName = currentNpc.animal.masterUserInfoVO?.get("nickName") as? String ?: "未知NPC"
+            Log.farm("NPC小鸡🤖[检测到${currentName}，目标是${targetConfig.nickName}，执行切换]")
+            val sendBackRes =
+                if (targetConfig == NpcConfig.ZHIMA_PIGEON) {
+                    AntFarmRpcCall.sendBackNpcAnimal(
+                        currentNpc.animal.animalId,
+                        currentNpc.animal.currentFarmId,
+                        currentNpc.animal.masterFarmId,
+                        receiveNpcReward = false,
+                        source = targetConfig.source,
+                    )
+                } else {
+                    AntFarmRpcCall.sendBackNpcAnimal(
+                        currentNpc.animal.animalId,
+                        currentNpc.animal.currentFarmId,
+                        currentNpc.animal.masterFarmId,
+                    )
+                }
+            val sendBackJo = JSONObject(sendBackRes)
+            if (ResChecker.checkRes(TAG, sendBackJo)) {
+                Log.farm("NPC小鸡🤖[已遣返${currentName}]")
+                hireNpc(targetConfig)
+            } else {
+                val classification = classifyFarmRpcFailure(sendBackJo)
+                Log.error(
+                    TAG,
+                    "NPC小鸡遣返失败: ${formatFarmHighRiskFailure("sendBackNpc", sendBackJo, classification)}",
+                )
+            }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "handleNpcAnimalLogic err:", t)
         }
     }
 
+    /**
+     * 厨房和乐园动作完成后，统一补收大表鸽已完成任务并回查产出是否达到 88 粒。
+     */
+    internal fun runZhimaPigeonTaskFlow() {
+        if (!isZhimaPigeonConfigured() ||
+            Status.hasFlagToday(StatusFlags.FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED)
+        ) {
+            return
+        }
+
+        val config = NpcConfig.ZHIMA_PIGEON
+        val initialSync = syncNpcAnimalStatus(config.source, "SYNC__NPC_TASKLIST_INIT") ?: return
+        if (initialSync.npc?.animal?.animalId != config.animalId) return
+
+        TaskFlowEngine(ZhimaPigeonTaskFlowAdapter(), roundSleepMs = 300L).run()
+
+        val latestSync = syncNpcAnimalStatus(config.source, "SYNC__NPC_TASKLIST") ?: return
+        latestSync.npc?.takeIf { it.animal.animalId == config.animalId }?.let {
+            checkNpcReward(it, config)
+        }
+    }
+
+    private fun selectedNpcConfig(): NpcConfig =
+        NpcConfig.getByIndex(npcAnimalType?.value ?: NpcConfig.NONE.ordinal)
+
+    private fun syncNpcAnimalStatus(source: String, operTag: String): NpcAnimalSyncResult? {
+        val farmId = ownerFarmId
+        if (farmId.isNullOrBlank()) {
+            Log.farm("NPC小鸡🤖[庄园farmId为空，无法同步NPC状态]")
+            return null
+        }
+
+        return try {
+            val response = AntFarmRpcCall.syncAnimalStatus(
+                farmId,
+                operTag,
+                "QUERY_FARM_INFO",
+                source,
+            )
+            val responseJo = JSONObject(response)
+            if (!ResChecker.checkRes(TAG, responseJo)) {
+                val classification = classifyFarmRpcFailure(responseJo)
+                Log.error(
+                    TAG,
+                    "NPC小鸡状态同步失败: ${formatFarmHighRiskFailure("syncNpc", responseJo, classification)}",
+                )
+                return null
+            }
+            val npc = responseJo.optJSONObject("subFarmVO")
+                ?.optJSONArray("animals")
+                ?.let { animalsArray ->
+                    (0 until animalsArray.length())
+                        .asSequence()
+                        .mapNotNull { index -> animalsArray.optJSONObject(index) }
+                        .firstOrNull { it.optString("subAnimalType") == "NPC" }
+                        ?.let { raw ->
+                            NpcAnimalSnapshot(objectMapper.readValue(raw.toString(), Animal::class.java), raw)
+                        }
+                }
+            NpcAnimalSyncResult(npc)
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "syncNpcAnimalStatus err", t)
+            null
+        }
+    }
+
     private fun hireNpc(config: NpcConfig): Boolean {
         try {
-            val s = AntFarmRpcCall.hireNpcAnimal(config.animalId, config.source)
-            val jo = JSONObject(s)
-            if (ResChecker.checkRes(TAG, jo)) {
+            val response = AntFarmRpcCall.hireNpcAnimal(config.animalId, config.source)
+            val responseJo = JSONObject(response)
+            if (ResChecker.checkRes(TAG, responseJo)) {
                 Log.farm("NPC小鸡🤖[成功雇佣${config.nickName}]")
-                syncAnimalStatus(ownerFarmId) // 刷新状态
+                if (config == NpcConfig.ZHIMA_PIGEON) {
+                    syncNpcAnimalStatus(config.source, "SYNC__NPC_TASKLIST_INIT")
+                } else {
+                    syncAnimalStatus(ownerFarmId)
+                }
                 return true
-            } else {
-                Log.farm("NPC小鸡🤖[雇佣${config.nickName}失败: ${jo.optString("memo")}]")
             }
+            val classification = classifyFarmRpcFailure(responseJo)
+            Log.error(
+                TAG,
+                "NPC小鸡雇佣失败: ${formatFarmHighRiskFailure("hireNpc", responseJo, classification)}",
+            )
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "hireNpc err", e)
         }
         return false
     }
 
-    private suspend fun checkRewardAndTask(animal: Animal, animalJson: JSONObject?, config: NpcConfig) {
-        // 1. 检查奖励是否达标
-        val currentReward = animalJson?.optDouble("npcBizReward", 0.0) ?: 0.0
-        // 部分NPC可能用 reachNpcBizRewardLimit 标识满额，部分可能用阈值
-        // 芝麻粒通常是 88，其他可能是 100%
-        val isLimit = animalJson?.optBoolean("reachNpcBizRewardLimit", false) ?: false
+    private fun checkNpcReward(snapshot: NpcAnimalSnapshot, config: NpcConfig) {
+        val currentReward = snapshot.raw.optDouble("npcBizReward", 0.0)
+        val reachedLimit = snapshot.raw.optBoolean("reachNpcBizRewardLimit", false)
+        val isFull = reachedLimit || (config == NpcConfig.ZHIMA_PIGEON && currentReward >= 88.0)
 
-        // 判定满额逻辑：如果是芝麻鸽且>=88，或者是通用Limit标记
-        val isFull = isLimit || (config == NpcConfig.ZHIMA_PIGEON && currentReward >= 88.0)
-
-        if (isFull) {
-            Log.farm("NPC小鸡🤖[${config.nickName}产出已满($currentReward)，领取并重雇]")
-            val sendBackRes = AntFarmRpcCall.sendBackNpcAnimal(
-                animal.animalId,
-                animal.currentFarmId,
-                animal.masterFarmId
-            )
-            if (ResChecker.checkRes(TAG, JSONObject(sendBackRes))) {
-                Log.farm("NPC小鸡🤖[奖励领取成功]")
-                hireNpc(config)
-            }
-        } else {
+        if (!isFull) {
             Log.farm("NPC小鸡🤖[${config.nickName}工作中... 当前产出:$currentReward]")
+            return
+        }
 
-            // 2. 仅芝麻大表鸽支持做任务加速 (目前已知)
-            if (config == NpcConfig.ZHIMA_PIGEON) {
-                handleZhimaPigeonTasks()
-            }
+        val fullRewardMessage = if (config == NpcConfig.ZHIMA_PIGEON) {
+            "领取88芝麻粒，明日再雇佣"
+        } else {
+            "领取并重雇"
+        }
+        Log.farm("NPC小鸡🤖[${config.nickName}产出已满($currentReward)，$fullRewardMessage]")
+        val response = AntFarmRpcCall.sendBackNpcAnimal(
+            snapshot.animal.animalId,
+            snapshot.animal.currentFarmId,
+            snapshot.animal.masterFarmId,
+        )
+        val responseJo = JSONObject(response)
+        if (!ResChecker.checkRes(TAG, responseJo)) {
+            val classification = classifyFarmRpcFailure(responseJo)
+            Log.error(
+                TAG,
+                "NPC小鸡满产领奖失败: ${formatFarmHighRiskFailure("sendBackNpc", responseJo, classification)}",
+            )
+            return
+        }
+
+        if (config != NpcConfig.ZHIMA_PIGEON) {
+            Log.farm("NPC小鸡🤖[奖励领取成功]")
+            hireNpc(config)
+            return
+        }
+
+        val afterSendBack = syncNpcAnimalStatus("H5", "SYNC_AFTER_SEND_BACK_NPC")
+        if (afterSendBack != null && afterSendBack.npc == null) {
+            Status.setFlagToday(StatusFlags.FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED)
+            Log.farm("芝麻大表鸽🤖[已领取88芝麻粒，明日再雇佣]")
+        } else {
+            Log.error(TAG, "芝麻大表鸽🤖[遣返成功但回查未确认离场，保留后续复核]")
         }
     }
 
-    /**
-     * 处理芝麻大表鸽的加速任务
-     */
-    private fun handleZhimaPigeonTasks() {
-        try {
-            val s = AntFarmRpcCall.listZhimaNpcFarmTask()
-            val jo = JSONObject(s)
-            if (ResChecker.checkRes(TAG, jo)) {
-                val taskList = jo.optJSONArray("farmTaskList") ?: return
-                for (i in 0 until taskList.length()) {
-                    val task = taskList.getJSONObject(i)
-                    val taskId = task.optString("taskId")
-                    val title = task.optString("title")
-                    val taskStatus = task.optString("taskStatus")
+    private inner class ZhimaPigeonTaskFlowAdapter : TaskFlowAdapter {
+        override val moduleName: String = farmTaskBlacklistModule
+        override val flowName: String = "芝麻大表鸽任务"
 
-                    // 如果任务已完成但未领取
-                    if (TaskStatus.FINISHED.name == taskStatus) {
-                        val awardRes = AntFarmRpcCall.receiveZhimaNpcFarmTaskAward(taskId)
-                        val awardJo = JSONObject(awardRes)
-                        if (ResChecker.checkRes(TAG, awardJo)) {
-                            val awardCount = task.optInt("awardCount", 0)
-                            Log.farm("NPC任务🤖[完成: $title, 奖励: $awardCount 芝麻粒]")
-                        }
-                    }
+        override fun query(): JSONObject = JSONObject(AntFarmRpcCall.listZhimaNpcFarmTask())
+
+        override fun isQuerySuccess(response: JSONObject): Boolean = ResChecker.checkRes(TAG, response)
+
+        override fun onQueryFailed(response: JSONObject) {
+            val classification = classifyFarmRpcFailure(response)
+            Log.error(
+                TAG,
+                "芝麻大表鸽任务查询失败: ${formatFarmHighRiskFailure("listZhimaNpcFarmTask", response, classification)}",
+            )
+        }
+
+        override fun extractItems(response: JSONObject): List<TaskFlowItem> {
+            val taskList = response.optJSONArray("farmTaskList") ?: return emptyList()
+            return buildList {
+                for (index in 0 until taskList.length()) {
+                    val task = taskList.optJSONObject(index) ?: continue
+                    add(
+                        TaskFlowItem(
+                            id = task.optString("taskId"),
+                            title = task.optString("title"),
+                            status = task.optString("taskStatus"),
+                            type = task.optString("awardType"),
+                            sceneCode = "ANTFARM_ZHIMA_NPC_TASK",
+                            raw = task,
+                        ),
+                    )
                 }
             }
-        } catch (e: Exception) {
-            Log.printStackTrace(TAG, "handleZhimaPigeonTasks err", e)
         }
+
+        override fun mapPhase(item: TaskFlowItem): TaskFlowPhase = when (item.status) {
+            TaskStatus.FINISHED.name -> TaskFlowPhase.REWARD_READY
+            "RECEIVED" -> TaskFlowPhase.TERMINAL
+            else -> TaskFlowPhase.BUSINESS_ACTION
+        }
+
+        override fun receive(item: TaskFlowItem): TaskFlowActionResult {
+            val task = item.raw ?: return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                message = "大表鸽任务缺少原始数据",
+                rpc = "AntFarmRpcCall.receiveZhimaNpcFarmTaskAward",
+                detail = "taskId=${item.id} taskName=${item.title}",
+            )
+            val awardType = task.optString("awardType")
+            if (item.id.isBlank() || awardType.isBlank()) {
+                return TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                    message = "大表鸽待领奖任务缺少taskId或awardType",
+                    rpc = "AntFarmRpcCall.receiveZhimaNpcFarmTaskAward",
+                    detail = "taskId=${item.id} taskName=${item.title} awardType=$awardType",
+                )
+            }
+
+            val response = AntFarmRpcCall.receiveZhimaNpcFarmTaskAward(item.id, awardType)
+            val responseJo = JSONObject(response)
+            if (ResChecker.checkRes(TAG, responseJo)) {
+                Log.farm("芝麻大表鸽任务🤖[领取: ${item.title}，奖励: ${task.optInt("awardCount", 0)}芝麻粒]")
+                return TaskFlowActionResult.success(refreshAfterAction = true)
+            }
+            return buildFarmTaskFailureResult(
+                responseJo,
+                item.id,
+                item.title,
+                "receiveZhimaNpcFarmTaskAward",
+                "AntFarmRpcCall.receiveZhimaNpcFarmTaskAward",
+            )
+        }
+
+        override fun logInfo(message: String) = Log.farm(message)
+
+        override fun logError(message: String) = Log.error(TAG, message)
     }
     // 小鸡换装
     private fun listOrnaments() {
@@ -8046,6 +8202,7 @@ class AntFarm : ModelTask() {
         private const val SPECIAL_FOOD_BATCH_LIMIT = 10
         private const val SPECIAL_FOOD_PRODUCE_SCALE = 10000.0
         private const val SPECIAL_FOOD_PRODUCE_EPS = 0.000001
+        const val ZHIMA_PIGEON_ALCHEMY_TEMPLATE_ID = "hjwf_myzy_gyxj_erfang"
         const val PERSISTENT_CHILD_KIND = "farm_child_task"
 
         @JvmField

@@ -16,6 +16,7 @@ import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.TaskCommon
 import io.github.aoguai.sesameag.task.TaskStatus
+import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
@@ -1297,6 +1298,7 @@ class AntOcean : ModelTask() {
             ?: homePage.optJSONArray("bubbleVOList")
 
     private fun collectEnergy(bubbleVOList: JSONArray) {
+        val antForest = getModel(AntForest::class.java)
         // 逐条处理：单个能量球字段缺失/结构变化只跳过该条并记录，不再因一个异常中断整段收取（根因A）
         for (i in 0 until bubbleVOList.length()) {
             try {
@@ -1307,6 +1309,14 @@ class AntOcean : ModelTask() {
                 val bubbleId = bubble.optLong("id")
                 val userId = bubble.optString("userId")
                 if (bubbleId <= 0L || userId.isBlank()) {
+                    continue
+                }
+                val energy = bubble.optInt("fullEnergy", bubble.optInt("energy", -1))
+                if (energy < 0) {
+                    Log.runtime(TAG, "神奇海洋🌊能量球[$bubbleId]缺少有效能量值，跳过收取")
+                    continue
+                }
+                if (antForest != null && !antForest.shouldCollectSelfBubble(energy)) {
                     continue
                 }
                 val s = AntOceanRpcCall.collectEnergy(bubbleId.toString(), userId)

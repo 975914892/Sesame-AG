@@ -51,7 +51,7 @@ jobs:
                 owner,
                 repo,
                 issue_number: issue.number,
-                body: `由于该 Issue 3 天内未收到足够信息，现已被自动关闭。若仍需处理，请补充必要附件或信息后重新打开。`
+                body: `由于该 Issue 在 3 天内仍未补齐必要信息，现已被自动关闭。若仍需处理，请补充所需信息后重新打开。`
               });
 
               await github.rest.issues.update({

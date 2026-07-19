@@ -7,6 +7,7 @@ import io.github.aoguai.sesameag.entity.friend.FriendProfile
 import io.github.aoguai.sesameag.entity.friend.FriendRelation
 import io.github.aoguai.sesameag.entity.friend.FriendRelationFilter
 import io.github.aoguai.sesameag.entity.friend.FriendSelectionCountSpec
+import io.github.aoguai.sesameag.entity.friend.FriendSelectionScope
 import io.github.aoguai.sesameag.entity.friend.FriendSelectionSpec
 import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionCountModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionModelField
@@ -14,12 +15,13 @@ import io.github.aoguai.sesameag.util.maps.UserMap
 
 data class FriendSelectionPreview(
     val items: List<FriendSelectionPreviewItem> = emptyList(),
-    val summary: FriendSelectionPreviewSummary = FriendSelectionPreviewSummary()
+    val summary: FriendSelectionPreviewSummary = FriendSelectionPreviewSummary(),
 )
 
 data class FriendSelectionPreviewItem(
     val userId: String = "",
     val displayName: String = "",
+    val selectedByAllFriends: Boolean = false,
     val selectedDirectly: Boolean = false,
     val selectedByGroups: List<String> = emptyList(),
     val selectedByGroupIds: List<String> = emptyList(),
@@ -32,10 +34,11 @@ data class FriendSelectionPreviewItem(
     val effective: Boolean = false,
     val inactiveReason: String = "",
     val count: Int? = null,
-    val countSource: String = ""
+    val countSource: String = "",
 )
 
 data class FriendSelectionPreviewSummary(
+    val allFriendsSelection: Boolean = false,
     val selectedCount: Int = 0,
     val directSelectedCount: Int = 0,
     val groupSelectedCount: Int = 0,
@@ -46,21 +49,22 @@ data class FriendSelectionPreviewSummary(
     val relationInactiveCount: Int = 0,
     val capabilityInactiveCount: Int = 0,
     val countInactiveCount: Int = 0,
-    val hasAdvancedRules: Boolean = false
+    val hasAdvancedRules: Boolean = false,
 )
 
 object FriendSelectionResolver {
+    @JvmStatic
+    fun resolveIds(field: FriendSelectionModelField?): Set<String> = resolveIds(field?.value)
 
     @JvmStatic
-    fun resolveIds(field: FriendSelectionModelField?): Set<String> {
-        return resolveIds(field?.value)
-    }
+    fun resolveIds(spec: FriendSelectionSpec?): Set<String> = resolveIds(spec, FriendRepository.current())
 
-    @JvmStatic
-    fun resolveIds(spec: FriendSelectionSpec?): Set<String> {
+    internal fun resolveIds(
+        spec: FriendSelectionSpec?,
+        config: FriendCenterConfig,
+    ): Set<String> {
         val selection = spec ?: return emptySet()
-        val config = FriendRepository.current()
-        val included = expandUsers(selection.includeUserIds, selection.includeGroupIds, config)
+        val included = selectedUserIds(selection, config)
         if (included.isEmpty()) return emptySet()
 
         val excluded = expandUsers(selection.excludeUserIds, selection.excludeGroupIds, config)
@@ -77,19 +81,23 @@ object FriendSelectionResolver {
     }
 
     @JvmStatic
-    fun contains(field: FriendSelectionModelField?, userId: String?): Boolean {
-        return contains(field?.value, userId)
-    }
+    fun contains(
+        field: FriendSelectionModelField?,
+        userId: String?,
+    ): Boolean = contains(field?.value, userId)
 
     @JvmStatic
-    fun contains(spec: FriendSelectionSpec?, userId: String?): Boolean {
+    fun contains(
+        spec: FriendSelectionSpec?,
+        userId: String?,
+    ): Boolean {
         val normalized = userId?.trim().orEmpty()
         if (normalized.isEmpty()) return false
         val selection = spec ?: return false
         val config = FriendRepository.current()
         val profile = config.profiles[normalized] ?: return false
         val groupMembersById = config.groups.associate { it.id to it.memberIds }
-        if (!isSelected(selection, normalized, groupMembersById)) return false
+        if (!isSelected(selection, normalized, groupMembersById, config.profiles.keys)) return false
         if (isExcluded(selection, normalized, groupMembersById)) return false
         if (!passesRelation(profile, selection.relationFilter)) return false
         if (!passesCapability(profile, selection)) return false
@@ -98,30 +106,36 @@ object FriendSelectionResolver {
     }
 
     @JvmStatic
-    fun containsConfigured(spec: FriendSelectionSpec?, userId: String?): Boolean {
+    fun containsConfigured(
+        spec: FriendSelectionSpec?,
+        userId: String?,
+    ): Boolean {
         val normalized = userId?.trim().orEmpty()
         if (normalized.isEmpty()) return false
         val selection = spec ?: return false
         val config = FriendRepository.current()
         val groupMembersById = config.groups.associate { it.id to it.memberIds }
-        return isSelected(selection, normalized, groupMembersById) &&
+        return isSelected(selection, normalized, groupMembersById, config.profiles.keys) &&
             !isExcluded(selection, normalized, groupMembersById)
     }
 
     @JvmStatic
-    fun resolveCountMap(field: FriendSelectionCountModelField?): Map<String, Int> {
-        return resolveCountMap(field?.value)
-    }
+    fun resolveCountMap(field: FriendSelectionCountModelField?): Map<String, Int> = resolveCountMap(field?.value)
 
     @JvmStatic
-    fun resolveCountMap(spec: FriendSelectionCountSpec?): Map<String, Int> {
+    fun resolveCountMap(spec: FriendSelectionCountSpec?): Map<String, Int> = resolveCountMap(spec, FriendRepository.current())
+
+    internal fun resolveCountMap(
+        spec: FriendSelectionCountSpec?,
+        config: FriendCenterConfig,
+    ): Map<String, Int> {
         val countSpec = spec ?: return emptyMap()
-        val config = FriendRepository.current()
-        val ids = resolveIds(countSpec.selection)
+        val ids = resolveIds(countSpec.selection, config)
         if (ids.isEmpty()) return emptyMap()
-        val groupMembers = countSpec.selection.includeGroupIds.associateWith { groupId ->
-            config.groups.firstOrNull { it.id == groupId }?.memberIds ?: emptySet()
-        }
+        val groupMembers =
+            countSpec.selection.includeGroupIds.associateWith { groupId ->
+                config.groups.firstOrNull { it.id == groupId }?.memberIds ?: emptySet()
+            }
         val result = linkedMapOf<String, Int>()
         for (userId in ids) {
             var groupCount: Int? = null
@@ -132,9 +146,10 @@ object FriendSelectionResolver {
                 groupCount = overrideCount
                 break
             }
-            val count = countSpec.userCountOverrides[userId]
-                ?: groupCount
-                ?: countSpec.defaultCount
+            val count =
+                countSpec.userCountOverrides[userId]
+                    ?: groupCount
+                    ?: countSpec.defaultCount
             if (count > 0) {
                 result[userId] = count
             }
@@ -143,25 +158,31 @@ object FriendSelectionResolver {
     }
 
     @JvmStatic
-    fun preview(spec: FriendSelectionSpec?, userId: String? = UserMap.currentUid): FriendSelectionPreview {
+    fun preview(
+        spec: FriendSelectionSpec?,
+        userId: String? = UserMap.currentUid,
+    ): FriendSelectionPreview {
         val selection = spec ?: FriendSelectionSpec()
         val config = FriendRepository.current(userId)
         return buildPreview(selection, null, config)
     }
 
     @JvmStatic
-    fun previewCount(spec: FriendSelectionCountSpec?, userId: String? = UserMap.currentUid): FriendSelectionPreview {
+    fun previewCount(
+        spec: FriendSelectionCountSpec?,
+        userId: String? = UserMap.currentUid,
+    ): FriendSelectionPreview {
         val countSpec = spec ?: FriendSelectionCountSpec()
         val config = FriendRepository.current(userId)
         return buildPreview(countSpec.selection, countSpec, config)
     }
 
     @JvmStatic
-    fun availableFriendOptions(): List<AlipayUser> {
-        return FriendRepository.listProfiles()
+    fun availableFriendOptions(): List<AlipayUser> =
+        FriendRepository
+            .listProfiles()
             .filter { passesRelation(it, FriendRelationFilter.MUTUAL_ONLY) && !it.globalBlocked }
             .map { AlipayUser(it.userId, it.displayName.ifBlank { it.userId }) }
-    }
 
     @JvmStatic
     fun shouldSkipFriend(userId: String?): Boolean {
@@ -172,10 +193,20 @@ object FriendSelectionResolver {
         return !passesRelation(profile, FriendRelationFilter.MUTUAL_ONLY) || profile.globalBlocked
     }
 
+    private fun selectedUserIds(
+        selection: FriendSelectionSpec,
+        config: FriendCenterConfig,
+    ): LinkedHashSet<String> {
+        if (selection.selectionScope == FriendSelectionScope.ALL_FRIENDS) {
+            return config.profiles.keys.mapNotNullTo(linkedSetOf()) { it.trim().takeIf(String::isNotEmpty) }
+        }
+        return expandUsers(selection.includeUserIds, selection.includeGroupIds, config)
+    }
+
     private fun expandUsers(
         userIds: Set<String>,
         groupIds: Set<String>,
-        config: FriendCenterConfig
+        config: FriendCenterConfig,
     ): LinkedHashSet<String> {
         val result = linkedSetOf<String>()
         userIds.mapNotNullTo(result) { it.trim().takeIf(String::isNotEmpty) }
@@ -190,29 +221,30 @@ object FriendSelectionResolver {
     private fun isSelected(
         selection: FriendSelectionSpec,
         userId: String,
-        groupMembersById: Map<String, Set<String>>
-    ): Boolean {
-        return containsUserId(selection.includeUserIds, userId) ||
+        groupMembersById: Map<String, Set<String>>,
+        profileIds: Set<String>,
+    ): Boolean =
+        (selection.selectionScope == FriendSelectionScope.ALL_FRIENDS && profileIds.contains(userId)) ||
+            containsUserId(selection.includeUserIds, userId) ||
             groupsContainUser(selection.includeGroupIds, userId, groupMembersById)
-    }
 
     private fun isExcluded(
         selection: FriendSelectionSpec,
         userId: String,
-        groupMembersById: Map<String, Set<String>>
-    ): Boolean {
-        return containsUserId(selection.excludeUserIds, userId) ||
+        groupMembersById: Map<String, Set<String>>,
+    ): Boolean =
+        containsUserId(selection.excludeUserIds, userId) ||
             groupsContainUser(selection.excludeGroupIds, userId, groupMembersById)
-    }
 
-    private fun containsUserId(userIds: Set<String>, userId: String): Boolean {
-        return userIds.any { it.trim() == userId }
-    }
+    private fun containsUserId(
+        userIds: Set<String>,
+        userId: String,
+    ): Boolean = userIds.any { it.trim() == userId }
 
     private fun groupsContainUser(
         groupIds: Set<String>,
         userId: String,
-        groupMembersById: Map<String, Set<String>>
+        groupMembersById: Map<String, Set<String>>,
     ): Boolean {
         for (rawGroupId in groupIds) {
             val groupId = rawGroupId.trim()
@@ -228,93 +260,105 @@ object FriendSelectionResolver {
     private fun buildPreview(
         selection: FriendSelectionSpec,
         countSpec: FriendSelectionCountSpec?,
-        config: FriendCenterConfig
+        config: FriendCenterConfig,
     ): FriendSelectionPreview {
         val includeUserIds = selection.includeUserIds.mapNotNullTo(linkedSetOf<String>()) { it.trim().takeIf(String::isNotEmpty) }
         val includeGroupIds = selection.includeGroupIds.mapNotNullTo(linkedSetOf<String>()) { it.trim().takeIf(String::isNotEmpty) }
         val excludeUserIds = selection.excludeUserIds.mapNotNullTo(linkedSetOf<String>()) { it.trim().takeIf(String::isNotEmpty) }
         val excludeGroupIds = selection.excludeGroupIds.mapNotNullTo(linkedSetOf<String>()) { it.trim().takeIf(String::isNotEmpty) }
-        val includeGroupMap = config.groups
-            .filter { includeGroupIds.contains(it.id) }
-            .associateBy { it.id }
-        val excludeGroupMap = config.groups
-            .filter { excludeGroupIds.contains(it.id) }
-            .associateBy { it.id }
-        val itemList = config.profiles.values
-            .filter { it.relation != FriendRelation.SELF }
-            .map { profile ->
-                val selectedByGroupIds = includeGroupMap.values
-                    .filter { it.memberIds.contains(profile.userId) }
-                    .map { it.id }
-                val selectedByGroups = selectedByGroupIds.mapNotNull { includeGroupMap[it]?.name }
-                val excludedByGroupIds = excludeGroupMap.values
-                    .filter { it.memberIds.contains(profile.userId) }
-                    .map { it.id }
-                val excludedByGroups = excludedByGroupIds.mapNotNull { excludeGroupMap[it]?.name }
-                val selectedDirectly = includeUserIds.contains(profile.userId)
-                val excludedDirectly = excludeUserIds.contains(profile.userId)
-                val selected = selectedDirectly || selectedByGroupIds.isNotEmpty()
-                val excluded = excludedDirectly || excludedByGroupIds.isNotEmpty()
-                val relationReason = relationInactiveReason(profile, selection.relationFilter)
-                val capabilityReason = capabilityInactiveReason(profile, selection)
-                val countResult = countSpec?.let { resolveCountForPreview(profile.userId, selectedByGroupIds, it, includeGroupMap) }
-                val countReason = when {
-                    countSpec == null -> ""
-                    !selected || excluded || relationReason != null || capabilityReason != null || profile.globalBlocked -> ""
-                    (countResult?.count ?: 0) <= 0 -> "次数为 0"
-                    else -> ""
-                }
-                val inactiveReason = when {
-                    !selected -> ""
-                    excluded -> "已排除"
-                    profile.globalBlocked -> "全局黑名单"
-                    relationReason != null -> relationReason
-                    capabilityReason != null -> capabilityReason
-                    countReason.isNotBlank() -> countReason
-                    else -> ""
-                }
-                val effective = selected && inactiveReason.isBlank()
-                FriendSelectionPreviewItem(
-                    userId = profile.userId,
-                    displayName = profile.displayName.ifBlank { profile.userId },
-                    selectedDirectly = selectedDirectly,
-                    selectedByGroups = selectedByGroups,
-                    selectedByGroupIds = selectedByGroupIds,
-                    excludedDirectly = excludedDirectly,
-                    excludedByGroups = excludedByGroups,
-                    excludedByGroupIds = excludedByGroupIds,
-                    globalBlocked = profile.globalBlocked,
-                    relation = if (profile.removed) FriendRelation.REMOVED else profile.relation,
-                    capabilityState = capabilityStateText(profile, selection),
-                    effective = effective,
-                    inactiveReason = inactiveReason,
-                    count = countResult?.count,
-                    countSource = countResult?.source.orEmpty()
+        val includeGroupMap =
+            config.groups
+                .filter { includeGroupIds.contains(it.id) }
+                .associateBy { it.id }
+        val excludeGroupMap =
+            config.groups
+                .filter { excludeGroupIds.contains(it.id) }
+                .associateBy { it.id }
+        val selectsAllFriends = selection.selectionScope == FriendSelectionScope.ALL_FRIENDS
+        val itemList =
+            config.profiles.values
+                .filter {
+                    it.relation != FriendRelation.SELF ||
+                        selection.relationFilter == FriendRelationFilter.INCLUDE_SELF
+                }.map { profile ->
+                    val selectedByGroupIds =
+                        includeGroupMap.values
+                            .filter { it.memberIds.contains(profile.userId) }
+                            .map { it.id }
+                    val selectedByGroups = selectedByGroupIds.mapNotNull { includeGroupMap[it]?.name }
+                    val excludedByGroupIds =
+                        excludeGroupMap.values
+                            .filter { it.memberIds.contains(profile.userId) }
+                            .map { it.id }
+                    val excludedByGroups = excludedByGroupIds.mapNotNull { excludeGroupMap[it]?.name }
+                    val selectedByAllFriends = selectsAllFriends
+                    val selectedDirectly = includeUserIds.contains(profile.userId)
+                    val excludedDirectly = excludeUserIds.contains(profile.userId)
+                    val selected = selectedByAllFriends || selectedDirectly || selectedByGroupIds.isNotEmpty()
+                    val excluded = excludedDirectly || excludedByGroupIds.isNotEmpty()
+                    val relationReason = relationInactiveReason(profile, selection.relationFilter)
+                    val capabilityReason = capabilityInactiveReason(profile, selection)
+                    val countResult = countSpec?.let { resolveCountForPreview(profile.userId, selectedByGroupIds, it, includeGroupMap) }
+                    val countReason =
+                        when {
+                            countSpec == null -> ""
+                            !selected || excluded || relationReason != null || capabilityReason != null || profile.globalBlocked -> ""
+                            (countResult?.count ?: 0) <= 0 -> "次数为 0"
+                            else -> ""
+                        }
+                    val inactiveReason =
+                        when {
+                            !selected -> ""
+                            excluded -> "已排除"
+                            profile.globalBlocked -> "全局黑名单"
+                            relationReason != null -> relationReason
+                            capabilityReason != null -> capabilityReason
+                            countReason.isNotBlank() -> countReason
+                            else -> ""
+                        }
+                    val effective = selected && inactiveReason.isBlank()
+                    FriendSelectionPreviewItem(
+                        userId = profile.userId,
+                        displayName = profile.displayName.ifBlank { profile.userId },
+                        selectedByAllFriends = selectedByAllFriends,
+                        selectedDirectly = selectedDirectly,
+                        selectedByGroups = selectedByGroups,
+                        selectedByGroupIds = selectedByGroupIds,
+                        excludedDirectly = excludedDirectly,
+                        excludedByGroups = excludedByGroups,
+                        excludedByGroupIds = excludedByGroupIds,
+                        globalBlocked = profile.globalBlocked,
+                        relation = if (profile.removed) FriendRelation.REMOVED else profile.relation,
+                        capabilityState = capabilityStateText(profile, selection),
+                        effective = effective,
+                        inactiveReason = inactiveReason,
+                        count = countResult?.count,
+                        countSource = countResult?.source.orEmpty(),
+                    )
+                }.sortedWith(
+                    compareByDescending<FriendSelectionPreviewItem> { it.effective }
+                        .thenByDescending {
+                            it.selectedByAllFriends || it.selectedDirectly || it.selectedByGroupIds.isNotEmpty()
+                        }.thenByDescending { it.excludedDirectly || it.excludedByGroupIds.isNotEmpty() }
+                        .thenBy { it.displayName }
+                        .thenBy { it.userId },
                 )
-            }
-            .sortedWith(
-                compareByDescending<FriendSelectionPreviewItem> { it.effective }
-                    .thenByDescending { it.selectedDirectly || it.selectedByGroupIds.isNotEmpty() }
-                    .thenByDescending { it.excludedDirectly || it.excludedByGroupIds.isNotEmpty() }
-                    .thenBy { it.displayName }
-                    .thenBy { it.userId }
-            )
         return FriendSelectionPreview(
             items = itemList,
-            summary = buildSummary(selection, itemList)
+            summary = buildSummary(selection, itemList),
         )
     }
 
     private data class PreviewCountResult(
         val count: Int,
-        val source: String
+        val source: String,
     )
 
     private fun resolveCountForPreview(
         userId: String,
         selectedByGroupIds: List<String>,
         countSpec: FriendSelectionCountSpec,
-        includeGroupMap: Map<String, io.github.aoguai.sesameag.entity.friend.FriendGroup>
+        includeGroupMap: Map<String, io.github.aoguai.sesameag.entity.friend.FriendGroup>,
     ): PreviewCountResult {
         countSpec.userCountOverrides[userId]?.let { return PreviewCountResult(it, "个人次数") }
         for (groupId in countSpec.selection.includeGroupIds) {
@@ -328,11 +372,15 @@ object FriendSelectionResolver {
 
     private fun buildSummary(
         selection: FriendSelectionSpec,
-        items: List<FriendSelectionPreviewItem>
+        items: List<FriendSelectionPreviewItem>,
     ): FriendSelectionPreviewSummary {
-        val selectedItems = items.filter { it.selectedDirectly || it.selectedByGroupIds.isNotEmpty() }
+        val selectedItems =
+            items.filter {
+                it.selectedByAllFriends || it.selectedDirectly || it.selectedByGroupIds.isNotEmpty()
+            }
         val inactiveItems = selectedItems.filter { !it.effective }
         return FriendSelectionPreviewSummary(
+            allFriendsSelection = selection.selectionScope == FriendSelectionScope.ALL_FRIENDS,
             selectedCount = selectedItems.size,
             directSelectedCount = items.count { it.selectedDirectly },
             groupSelectedCount = items.count { it.selectedByGroupIds.isNotEmpty() },
@@ -343,23 +391,37 @@ object FriendSelectionResolver {
             relationInactiveCount = inactiveItems.count { it.inactiveReason == "单向/失效好友" || it.inactiveReason == "关系不匹配" },
             capabilityInactiveCount = inactiveItems.count { it.inactiveReason == "未确认开通该玩法" || it.inactiveReason == "未开通或不可用" },
             countInactiveCount = inactiveItems.count { it.inactiveReason == "次数为 0" },
-            hasAdvancedRules = selection.relationFilter != FriendRelationFilter.MUTUAL_ONLY
+            hasAdvancedRules = selection.relationFilter != FriendRelationFilter.MUTUAL_ONLY,
         )
     }
 
-    private fun passesRelation(profile: FriendProfile, filter: FriendRelationFilter): Boolean {
+    private fun passesRelation(
+        profile: FriendProfile,
+        filter: FriendRelationFilter,
+    ): Boolean {
         val removed = profile.removed || profile.relation == FriendRelation.REMOVED
         return when (filter) {
-            FriendRelationFilter.MUTUAL_ONLY -> profile.relation == FriendRelation.MUTUAL && !removed
-            FriendRelationFilter.ALL_KNOWN -> profile.relation != FriendRelation.UNKNOWN &&
-                profile.relation != FriendRelation.SELF &&
-                !removed
-            FriendRelationFilter.INCLUDE_SELF -> profile.relation == FriendRelation.SELF ||
-                (profile.relation == FriendRelation.MUTUAL && !removed)
+            FriendRelationFilter.MUTUAL_ONLY -> {
+                profile.relation == FriendRelation.MUTUAL && !removed
+            }
+
+            FriendRelationFilter.ALL_KNOWN -> {
+                profile.relation != FriendRelation.UNKNOWN &&
+                    profile.relation != FriendRelation.SELF &&
+                    !removed
+            }
+
+            FriendRelationFilter.INCLUDE_SELF -> {
+                profile.relation == FriendRelation.SELF ||
+                    (profile.relation == FriendRelation.MUTUAL && !removed)
+            }
         }
     }
 
-    private fun relationInactiveReason(profile: FriendProfile, filter: FriendRelationFilter): String? {
+    private fun relationInactiveReason(
+        profile: FriendProfile,
+        filter: FriendRelationFilter,
+    ): String? {
         if (passesRelation(profile, filter)) return null
         val removed = profile.removed || profile.relation == FriendRelation.REMOVED
         return if (removed || profile.relation == FriendRelation.ONE_WAY || profile.relation == FriendRelation.UNKNOWN) {
@@ -369,7 +431,10 @@ object FriendSelectionResolver {
         }
     }
 
-    private fun passesCapability(profile: FriendProfile, selection: FriendSelectionSpec): Boolean {
+    private fun passesCapability(
+        profile: FriendProfile,
+        selection: FriendSelectionSpec,
+    ): Boolean {
         val filter = selection.capabilityFilter ?: return true
         if (filter.moduleKeys.isEmpty()) return true
         val requiredStates = filter.requiredStates.ifEmpty { linkedSetOf(FriendCapabilityState.OPEN) }
@@ -382,7 +447,10 @@ object FriendSelectionResolver {
         }
     }
 
-    private fun capabilityInactiveReason(profile: FriendProfile, selection: FriendSelectionSpec): String? {
+    private fun capabilityInactiveReason(
+        profile: FriendProfile,
+        selection: FriendSelectionSpec,
+    ): String? {
         val filter = selection.capabilityFilter ?: return null
         if (filter.moduleKeys.isEmpty()) return null
         val requiredStates = filter.requiredStates.ifEmpty { linkedSetOf(FriendCapabilityState.OPEN) }
@@ -398,7 +466,10 @@ object FriendSelectionResolver {
         return null
     }
 
-    private fun capabilityStateText(profile: FriendProfile, selection: FriendSelectionSpec): String {
+    private fun capabilityStateText(
+        profile: FriendProfile,
+        selection: FriendSelectionSpec,
+    ): String {
         val moduleKeys = selection.capabilityFilter?.moduleKeys.orEmpty()
         if (moduleKeys.isEmpty()) {
             return ""

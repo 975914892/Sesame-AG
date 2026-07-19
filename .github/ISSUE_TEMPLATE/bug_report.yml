@@ -16,15 +16,17 @@ body:
         - [LEGAL](https://github.com/Sesame-AG/Sesame-AG/blob/dev/LEGAL.md)
         - [CONTRIBUTING](https://github.com/Sesame-AG/Sesame-AG/blob/dev/CONTRIBUTING.md)
 
-        请尽量让每个回答都基于你实际观察到的现象来填写。没有复现步骤、环境信息和日志的 Issue，通常没有足够上下文被处理。
+        请尽量让每个回答都基于你实际观察到的现象来填写。没有复现步骤、环境信息和两组日志附件的 Bug Issue，通常没有足够上下文被处理。
 
-        日志文件获取只需要在日志中心进入对应卡片然后导出即可在 /Download/sesame-AG/ 目录下找到。
+        ## 先导出日志，再提交 Bug
 
-        日志要求：
-        - 错误日志、全部日志和对应模块日志均为必填，不附日志附件的 Bug Issue 通常会被直接关闭
-        - 日志只能以附件形式上传，请将脱敏后的 .txt / .log / .zip 等文件拖拽到日志附件字段
-        - 不要直接粘贴日志正文，也不要只用截图代替日志附件
-        - 如涉及隐私信息，请先脱敏后再提交
+        1. 进入模块的**日志中心**。
+        2. 打开与问题发生时间、功能最匹配的日志卡片。
+        3. 分别导出**错误日志**、**全部日志**和**相关模块日志**。
+        4. 在 `/Download/sesame-AG/` 找到导出的文件，脱敏后将文件拖拽到下方两个指定附件框。
+        5. 截图、直接粘贴日志正文，或只勾选确认框，都不能代替日志附件。
+
+        日志只能以附件形式上传，请将脱敏后的 `.txt`、`.log`、`.zip` 等文件拖拽到对应字段；如涉及隐私信息，请先脱敏后再提交。
 
   - type: checkboxes
     id: preflight
@@ -38,10 +40,41 @@ body:
           required: true
         - label: 我已经在当前可获取的最新版本或最新提交环境中复现过这个问题
           required: true
-        - label: 我已经将错误日志、全部日志和对应模块日志作为附件上传，并确认没有直接粘贴日志正文
+        - label: 我已将两组脱敏日志附件拖拽到下方指定字段；我理解勾选本项不能代替实际附件
           required: true
         - label: 我愿意在后续继续补充日志、截图、复现信息并配合排查
           required: true
+
+  - type: dropdown
+    id: report_scope
+    attributes:
+      label: 反馈对象
+      description: 选择问题直接发生的位置。
+      options:
+        - 模块本体
+        - 目标应用
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_logs
+    attributes:
+      label: 错误日志附件
+      description: 请从日志中心导出错误日志并脱敏后拖拽 `.txt`、`.log`、`.zip` 等文件到此处生成附件链接；不要粘贴日志正文或只上传截图。
+      placeholder: |
+        请仅将脱敏后的错误日志文件拖拽到此处。
+    validations:
+      required: true
+
+  - type: textarea
+    id: complete_and_module_logs
+    attributes:
+      label: 完整日志及相关模块日志附件
+      description: 请将全部日志和与问题相关的模块日志一并导出、脱敏并作为附件拖拽到此处；不要粘贴日志正文或只上传截图。
+      placeholder: |
+        请仅将脱敏后的全部日志和相关模块日志文件拖拽到此处。
+    validations:
+      required: true
 
   - type: dropdown
     id: bug_type
@@ -121,11 +154,11 @@ body:
       required: true
 
   - type: input
-    id: target_app_version
+    id: target_app_info
     attributes:
-      label: 目标应用版本
-      description: 当前默认作用域对应的目标应用版本
-      placeholder: 10.x.x.xxxx
+      label: 目标应用信息 / 受影响模块功能
+      description: 反馈对象为“目标应用”时，填写版本；反馈对象为“模块本体”时，填写“不涉及”，并注明受影响的模块功能或页面。
+      placeholder: 10.x.x.xxxx；或：不涉及，日志中心导出页面
     validations:
       required: true
 
@@ -149,26 +182,6 @@ body:
         - 使用 Shizuku
         - 两者都使用
         - 不确定
-    validations:
-      required: true
-
-  - type: textarea
-    id: error_logs
-    attributes:
-      label: 错误日志附件（必填）
-      description: 必须将脱敏后的错误日志 / 异常堆栈 / 报错上下文作为附件上传；请拖拽 .txt / .log / .zip 等文件到此处生成附件链接，不要粘贴日志正文
-      placeholder: |
-        请将错误日志文件拖拽到此处。
-    validations:
-      required: true
-
-  - type: textarea
-    id: extra_logs
-    attributes:
-      label: 全部日志 / 对应模块日志附件（必填）
-      description: 必须将全部日志，以及与问题相关的模块日志作为附件上传（如森林日志、农场日志、其他日志、抓包日志等）；不要粘贴日志正文
-      placeholder: |
-        请将全部日志和对应模块日志文件拖拽到此处。
     validations:
       required: true
 

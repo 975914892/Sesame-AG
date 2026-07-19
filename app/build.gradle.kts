@@ -172,6 +172,7 @@ dependencies {
     implementation(composeBom)
 
     testImplementation(composeBom)
+    testImplementation(libs.junit)
     androidTestImplementation(composeBom)
     implementation(libs.androidx.material3) // Material 3 设计组件
     implementation(libs.androidx.ui.tooling.preview) // UI 工具预览

@@ -17,7 +17,7 @@ class ScheduledTriggerReceiver : BroadcastReceiver() {
     companion object {
         private const val TAG = "ScheduledTriggerReceiver"
         private const val RECEIVER_TIMEOUT_MS = 8_000L
-        private const val RECEIVER_WAKELOCK_MS = 20_000L
+        private const val RECEIVER_WAKELOCK_MS = 10_000L
         private val receiverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 
@@ -27,6 +27,7 @@ class ScheduledTriggerReceiver : BroadcastReceiver() {
     ) {
         val ctx = context?.applicationContext ?: context ?: return
         val scheduleId = intent?.getStringExtra(SystemWakeScheduler.EXTRA_SCHEDULE_ID).orEmpty()
+        val plannedBatch = intent?.getBooleanExtra(SystemWakeScheduler.EXTRA_PLANNED_BATCH, false) == true
         if (scheduleId.isBlank()) {
             Log.record(TAG, "收到空的持久调度广播，忽略")
             return
@@ -44,6 +45,11 @@ class ScheduledTriggerReceiver : BroadcastReceiver() {
         receiverScope.launch {
             try {
                 withTimeout(RECEIVER_TIMEOUT_MS) {
+                    if (plannedBatch) {
+                        val dueCount = PersistentScheduleRegistry.fireDueSchedules(ctx, "alarm_batch")
+                        Log.record(TAG, "物理系统闹钟到达，已路由到期计划数=$dueCount")
+                        return@withTimeout
+                    }
                     val schedule = PersistentScheduleRegistry.get(scheduleId)
                     if (schedule == null) {
                         Log.record(TAG, "找不到持久调度[$scheduleId]，忽略系统广播")

@@ -2474,9 +2474,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     /**
-     * 统一判断是否满足收自己能量的阈值条件。
+     * 自家森林能量球的唯一策略判定入口；海洋返回的森林能量球也必须复用此规则。
      */
-    private fun shouldCollectSelfBubble(bubbleCount: Int): Boolean {
+    internal fun shouldCollectSelfBubble(bubbleCount: Int): Boolean {
         val type = collectSelfEnergyType?.value ?: CollectSelfType.ALL
         val threshold = collectSelfEnergyThreshold?.value ?: 0
 

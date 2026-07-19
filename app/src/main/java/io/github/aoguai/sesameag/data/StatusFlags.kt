@@ -181,6 +181,10 @@ object StatusFlags {
     /** 芝麻信用：芝麻粒炼金次日奖励是否已领取 */
     const val FLAG_SESAME_ALCHEMY_NEXT_DAY_AWARD: String = "AntSesameCredit::alchemy::nextDayAward"
 
+    /** 庄园芝麻大表鸽：今日已确认领取满产奖励 */
+    const val FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED: String =
+        "AntFarm::zhimaPigeonRewardReceived"
+
     /** 芝麻信用：芝麻粒兑换今日是否已处理 */
     const val FLAG_SESAME_GRAIN_EXCHANGE_DONE: String = "AntSesameCredit::sesameGrainExchangeDone"
 

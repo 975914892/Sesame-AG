@@ -16,19 +16,37 @@ import kotlin.math.absoluteValue
 
 object SystemWakeScheduler {
     private const val TAG = "SystemWakeScheduler"
+    private const val MIN_FLEXIBLE_WINDOW_MS = 10 * 60 * 1000L
     internal const val ACTION_TRIGGER = "io.github.aoguai.sesameag.action.PERSISTENT_SCHEDULE_TRIGGER"
     internal const val EXTRA_SCHEDULE_ID = "schedule_id"
     internal const val EXTRA_PERSISTENT_ALARM_LAUNCH = "persistent_alarm_launch"
+    internal const val EXTRA_PLANNED_BATCH = "persistent_planned_batch"
+    private const val PLANNER_REQUEST_CODE = 0x53534147
 
+    private data class AlarmPlan(
+        val primary: PersistentSchedule,
+        val triggerAtMs: Long,
+        val precisionPolicy: String,
+    )
+
+    /**
+     * The registry is the durable source of truth.  AlarmManager receives only its next physical
+     * wake-up, so concurrent child schedules share one receiver/launch instead of one alarm each.
+     */
     fun schedule(
         context: Context,
         schedule: PersistentSchedule,
         silent: Boolean = false,
     ): Boolean {
+        val plan =
+            selectPlan(PersistentScheduleRegistry.list()) ?: run {
+                cancelPlanner(context, silent = true)
+                return true
+            }
         val alarmContexts = resolveAlarmContexts(context)
         if (alarmContexts.isEmpty()) return false
         alarmContexts.forEachIndexed { index, alarmContext ->
-            if (scheduleOnContext(alarmContext, schedule, silent)) {
+            if (schedulePlanOnContext(alarmContext, plan, silent)) {
                 return true
             }
             if (index == 0 && alarmContexts.size > 1) {
@@ -36,6 +54,58 @@ object SystemWakeScheduler {
             }
         }
         return false
+    }
+
+    private fun selectPlan(schedules: List<PersistentSchedule>): AlarmPlan? {
+        val scheduled = schedules.filter { it.state == PersistentScheduleState.SCHEDULED }
+        if (scheduled.isEmpty()) return null
+        val strict =
+            scheduled
+                .filter { PersistentSchedulePrecisionPolicy.isStrict(it.effectivePrecisionPolicy(), it.kind) }
+                .minByOrNull { it.triggerAtMs }
+        val primary = strict ?: scheduled.minByOrNull { it.triggerAtMs } ?: return null
+        return AlarmPlan(
+            primary = primary,
+            triggerAtMs = primary.triggerAtMs.coerceAtLeast(System.currentTimeMillis()),
+            precisionPolicy = primary.effectivePrecisionPolicy(),
+        )
+    }
+
+    private fun schedulePlanOnContext(
+        alarmContext: Context,
+        plan: AlarmPlan,
+        silent: Boolean,
+    ): Boolean {
+        val alarmManager =
+            alarmContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+                ?: return false
+        return try {
+            val pendingIntent =
+                buildPlannerPendingIntent(alarmContext, plan.primary, PendingIntent.FLAG_UPDATE_CURRENT)
+                    ?: return false
+            if (PersistentSchedulePrecisionPolicy.isStrict(plan.precisionPolicy, plan.primary.kind)) {
+                if (PermissionUtil.checkAlarmPermissions(alarmContext)) {
+                    scheduleExact(alarmManager, plan.triggerAtMs, pendingIntent)
+                } else {
+                    scheduleStrictFallback(alarmManager, plan.triggerAtMs, pendingIntent)
+                }
+            } else {
+                scheduleFlexible(alarmManager, plan.triggerAtMs, plan.primary.toleranceMs, pendingIntent)
+            }
+            if (shouldLaunchTarget(plan.primary)) {
+                scheduleLaunchConfirmationTimeout(alarmContext, plan.primary, plan.triggerAtMs)
+            }
+            if (!silent) {
+                Log.runtime(
+                    TAG,
+                    "已重排物理系统闹钟[${plan.primary.name}] ${TimeUtil.getCommonDate(plan.triggerAtMs)} policy=${plan.precisionPolicy}",
+                )
+            }
+            true
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "重排物理系统闹钟失败[${plan.primary.name}]", t)
+            false
+        }
     }
 
     private fun scheduleOnContext(
@@ -57,15 +127,33 @@ object SystemWakeScheduler {
                         Log.error(TAG, "创建 PendingIntent 失败，持久调度失败: ${schedule.name}")
                         return false
                     }
-            if (PermissionUtil.checkAlarmPermissions(alarmContext)) {
+            val precisionPolicy = schedule.effectivePrecisionPolicy()
+            if (!PersistentSchedulePrecisionPolicy.isStrict(precisionPolicy, schedule.kind)) {
+                scheduleFlexible(alarmManager, triggerAt, schedule.toleranceMs, pendingIntent)
+                if (!silent) {
+                    Log.runtime(
+                        TAG,
+                        "已注册弹性系统闹钟[${schedule.name}] ${TimeUtil.getCommonDate(triggerAt)} policy=$precisionPolicy",
+                    )
+                }
+            } else if (PermissionUtil.checkAlarmPermissions(alarmContext)) {
                 scheduleExact(alarmManager, triggerAt, pendingIntent)
                 if (!silent) {
-                    Log.runtime(TAG, "已注册精确系统闹钟[${schedule.name}] ${TimeUtil.getCommonDate(triggerAt)}")
+                    Log.runtime(
+                        TAG,
+                        "已注册精确系统闹钟[${schedule.name}] ${TimeUtil.getCommonDate(triggerAt)} policy=$precisionPolicy",
+                    )
                 }
             } else {
-                scheduleFallback(alarmManager, triggerAt, schedule.toleranceMs, pendingIntent)
+                // 严格 deadline 仍保留原有的 Doze 兼容降级；普通轮询绝不能走该路径。
+                scheduleStrictFallback(alarmManager, triggerAt, pendingIntent)
                 if (!silent) {
-                    Log.runtime(TAG, "精确闹钟权限缺失，已降级注册系统闹钟[${schedule.name}] ${TimeUtil.getCommonDate(triggerAt)}")
+                    Log.runtime(
+                        TAG,
+                        "精确闹钟权限缺失，严格任务降级注册[${schedule.name}] ${TimeUtil.getCommonDate(
+                            triggerAt,
+                        )} policy=$precisionPolicy precision_degraded",
+                    )
                 }
             }
             if (shouldLaunchTarget(schedule)) {
@@ -78,35 +166,17 @@ object SystemWakeScheduler {
         }
     }
 
+    /**
+     * A schedule removal changes the registry snapshot; re-plan the singleton physical alarm from
+     * that snapshot instead of cancelling an id-specific PendingIntent and accidentally losing a
+     * neighbouring schedule in the same window.
+     */
     fun cancel(
         context: Context,
         schedule: PersistentSchedule,
         silent: Boolean = false,
     ) {
-        resolveAlarmContexts(context).forEach { alarmContext ->
-            val alarmManager = alarmContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return@forEach
-            var cancelled = false
-            listOfNotNull(
-                buildReceiverPendingIntent(alarmContext, schedule, PendingIntent.FLAG_NO_CREATE),
-                buildTargetLaunchPendingIntent(
-                    alarmContext,
-                    schedule,
-                    PendingIntent.FLAG_NO_CREATE,
-                    allowBackgroundAlways = true,
-                ),
-            ).forEach { pendingIntent ->
-                try {
-                    alarmManager.cancel(pendingIntent)
-                    pendingIntent.cancel()
-                    cancelled = true
-                } catch (t: Throwable) {
-                    Log.printStackTrace(TAG, "取消系统闹钟失败[${schedule.name}]", t)
-                }
-            }
-            if (cancelled && !silent) {
-                Log.runtime(TAG, "已取消系统闹钟[${schedule.name}] package=${alarmContext.packageName}")
-            }
-        }
+        schedule(context, schedule, silent)
     }
 
     private fun scheduleExact(
@@ -121,18 +191,119 @@ object SystemWakeScheduler {
         alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
     }
 
-    private fun scheduleFallback(
+    private fun scheduleFlexible(
         alarmManager: AlarmManager,
         triggerAt: Long,
         toleranceMs: Long,
         pendingIntent: PendingIntent,
     ) {
-        val safeTolerance = toleranceMs.coerceAtLeast(60_000L)
+        // targetSdk 36 设备上窗口过小会被系统延长；主动给出 10 分钟容差，避免普通轮询穿透 Doze。
+        val safeTolerance = toleranceMs.coerceAtLeast(MIN_FLEXIBLE_WINDOW_MS)
+        alarmManager.setWindow(AlarmManager.RTC_WAKEUP, triggerAt, safeTolerance, pendingIntent)
+    }
+
+    private fun scheduleStrictFallback(
+        alarmManager: AlarmManager,
+        triggerAt: Long,
+        pendingIntent: PendingIntent,
+    ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-            return
+        } else {
+            alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
         }
-        alarmManager.setWindow(AlarmManager.RTC_WAKEUP, triggerAt, safeTolerance, pendingIntent)
+    }
+
+    private fun cancelPlanner(
+        context: Context,
+        silent: Boolean,
+    ) {
+        val marker = PersistentSchedule(id = "persistent-alarm-plan")
+        resolveAlarmContexts(context).forEach { alarmContext ->
+            val alarmManager = alarmContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return@forEach
+            val flags = PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+            val receiverIntent =
+                Intent(alarmContext, ScheduledTriggerReceiver::class.java).apply {
+                    action = ACTION_TRIGGER
+                    data =
+                        Uri
+                            .Builder()
+                            .scheme("sesameag")
+                            .authority("persistent-schedule-plan")
+                            .build()
+                }
+            val launchIntent =
+                buildTargetLaunchIntent(alarmContext, marker).apply {
+                    data =
+                        Uri
+                            .Builder()
+                            .scheme("sesameag")
+                            .authority("persistent-schedule-plan-launch")
+                            .build()
+                }
+            listOfNotNull(
+                PendingIntent.getBroadcast(alarmContext, PLANNER_REQUEST_CODE, receiverIntent, flags),
+                PendingIntent.getActivity(alarmContext, PLANNER_REQUEST_CODE, launchIntent, flags),
+            ).forEach { pendingIntent ->
+                runCatching {
+                    alarmManager.cancel(pendingIntent)
+                    pendingIntent.cancel()
+                }.onFailure { error ->
+                    Log.printStackTrace(TAG, "取消物理系统闹钟失败", error)
+                }
+            }
+            if (!silent) {
+                Log.runtime(TAG, "已取消物理系统闹钟 package=${alarmContext.packageName}")
+            }
+        }
+    }
+
+    private fun buildPlannerPendingIntent(
+        context: Context,
+        primary: PersistentSchedule,
+        updateFlag: Int,
+    ): PendingIntent? {
+        val intent =
+            if (context.packageName == General.MODULE_PACKAGE_NAME || !shouldLaunchTarget(primary)) {
+                Intent(context, ScheduledTriggerReceiver::class.java).apply {
+                    action = ACTION_TRIGGER
+                    data =
+                        Uri
+                            .Builder()
+                            .scheme("sesameag")
+                            .authority("persistent-schedule-plan")
+                            .build()
+                    putExtra(EXTRA_SCHEDULE_ID, primary.id)
+                    putExtra(EXTRA_PLANNED_BATCH, true)
+                }
+            } else {
+                buildTargetLaunchIntent(context, primary).apply {
+                    data =
+                        Uri
+                            .Builder()
+                            .scheme("sesameag")
+                            .authority("persistent-schedule-plan-launch")
+                            .build()
+                    putExtra(EXTRA_PLANNED_BATCH, true)
+                }
+            }
+        val flags = updateFlag or PendingIntent.FLAG_IMMUTABLE
+        return try {
+            if (context.packageName == General.MODULE_PACKAGE_NAME || !shouldLaunchTarget(primary)) {
+                PendingIntent.getBroadcast(context, PLANNER_REQUEST_CODE, intent, flags)
+            } else {
+                PendingIntent.getActivity(
+                    context,
+                    PLANNER_REQUEST_CODE,
+                    intent,
+                    flags,
+                    creatorLaunchOptions(allowAlways = true),
+                )
+            }
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "创建物理系统闹钟 PendingIntent 失败", t)
+            null
+        }
     }
 
     private fun buildPendingIntent(

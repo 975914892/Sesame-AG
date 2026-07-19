@@ -72,10 +72,11 @@ object PersistentScheduleRegistry {
                     (effectiveSchedule.dedupeKey.isNotBlank() && it.dedupeKey == effectiveSchedule.dedupeKey)
             }
         if (prepared.blockedReason != null) {
-            removed.forEach { cancelSystemAlarm(context, it, silent = true) }
             if (removed.isNotEmpty()) {
                 schedules.removeAll(removed.toSet())
                 save(schedules)
+                // 注册表已更新后再重排，避免取消一个计划时误清空同会话的其它物理闹钟。
+                SystemWakeScheduler.schedule(context, effectiveSchedule, silent = true)
             }
             Log.record(TAG, "持久调度已因禁止系统调度前台拉起目标应用而未注册[${effectiveSchedule.name}]")
             return effectiveSchedule.withFailure(prepared.blockedReason, now)
@@ -83,25 +84,22 @@ object PersistentScheduleRegistry {
         removed.firstOrNull { isSameScheduledTask(it, effectiveSchedule) }?.let { existing ->
             return existing
         }
-        val action = if (removed.isEmpty()) "新增持久调度" else "替换持久调度"
-        if (ensureSystemAlarm(context, effectiveSchedule, action, skipIfAlreadyEnsured = false) != AlarmScheduleResult.FAILED) {
-            removed
-                .filter { it.id != effectiveSchedule.id }
-                .forEach { cancelSystemAlarm(context, it, silent = true) }
-            schedules.removeAll(removed.toSet())
-            schedules.add(effectiveSchedule)
-            save(schedules)
+
+        // 先把候选计划同步写入注册表，再让 AlarmManager 根据整个快照规划唯一的下一次物理唤醒。
+        // 这样同窗计划不会各自注册闹钟，同时失败时仍可原子恢复旧快照。
+        val previousSchedules = schedules.toList()
+        schedules.removeAll(removed.toSet())
+        schedules.add(effectiveSchedule)
+        save(schedules)
+        if (SystemWakeScheduler.schedule(context, effectiveSchedule, silent = true)) {
+            Log.runtime(TAG, "${if (removed.isEmpty()) "新增" else "替换"}持久调度[${effectiveSchedule.name}] 已重排物理闹钟")
             return effectiveSchedule
         }
 
-        val failed = effectiveSchedule.withFailure("system_alarm_schedule_failed", now)
-        if (removed.isEmpty()) {
-            schedules.add(failed)
-            save(schedules)
-        } else {
-            Log.record(TAG, "持久调度注册失败，保留旧调度[${effectiveSchedule.name}]")
-        }
-        return failed
+        save(previousSchedules)
+        SystemWakeScheduler.schedule(context, effectiveSchedule, silent = true)
+        Log.record(TAG, "持久调度注册失败，已恢复旧调度[${effectiveSchedule.name}]")
+        return effectiveSchedule.withFailure("system_alarm_schedule_failed", now)
     }
 
     fun removeById(
@@ -199,6 +197,35 @@ object PersistentScheduleRegistry {
         return loadMutable().toList()
     }
 
+    /**
+     * One physical Alarm may represent several due schedules.  Each schedule still passes through
+     * its existing Router state machine, preserving per-id queueing, session validation and retry.
+     */
+    fun fireDueSchedules(
+        context: Context,
+        source: String,
+        now: Long = System.currentTimeMillis(),
+    ): Int {
+        val due =
+            list()
+                .asSequence()
+                .filter { schedule ->
+                    schedule.state == PersistentScheduleState.SCHEDULED &&
+                        schedule.triggerAtMs <= now &&
+                        now - schedule.triggerAtMs <= schedule.toleranceMs.coerceAtLeast(0L)
+                }.sortedWith(
+                    compareBy<PersistentSchedule> {
+                        when (it.effectivePrecisionPolicy()) {
+                            PersistentSchedulePrecisionPolicy.HARD_DEADLINE_CHILD -> 0
+                            PersistentSchedulePrecisionPolicy.USER_EXACT -> 1
+                            else -> 2
+                        }
+                    }.thenBy { it.triggerAtMs },
+                ).toList()
+        due.forEach { schedule -> ScheduledTaskRouter.fire(context, schedule, source) }
+        return due.size
+    }
+
     fun clearAll(context: Context?) = withRegistryLock { clearAllUnlocked(context) }
 
     private fun clearAllUnlocked(context: Context?) {
@@ -256,6 +283,7 @@ object PersistentScheduleRegistry {
             }
         }
         save(retained)
+        SystemWakeScheduler.schedule(context, retained.firstOrNull() ?: PersistentSchedule(), silent = true)
     }
 
     fun markFired(
@@ -490,6 +518,7 @@ object PersistentScheduleRegistry {
         }
 
         save(retained)
+        SystemWakeScheduler.schedule(context, retained.firstOrNull() ?: PersistentSchedule(), silent = true)
         return ReconcileResult(
             dueSchedules = due,
             rescheduledCount = rescheduled,

@@ -18,7 +18,7 @@ object AntFarmRpcCall {
     private const val KITCHEN_TASK_SOURCE = "antfarmzuofanrw"
 
     /**
-     * 进入农场
+     * 进入庄园
      *
      * @param userId       自己的用户id
      * @param targetUserId 所在农场的用户id
@@ -27,7 +27,10 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     @Throws(JSONException::class)
-    fun enterFarm(userId: String?, targetUserId: String?): String {
+    fun enterFarm(
+        userId: String?,
+        targetUserId: String?,
+    ): String {
         val args = JSONObject()
         args.put("animalId", "")
         args.put("bizCode", "")
@@ -54,12 +57,14 @@ object AntFarmRpcCall {
         return requestString("com.alipay.antfarm.enterFarm", paras)
     }
 
-
     // 一起拿小鸡饲料
     @JvmStatic
     fun letsGetChickenFeedTogether(): String {
         val args1 =
-            "[{\"needHasInviteUserByCycle\":\"true\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM_P2P\",\"source\":\"ANTFARM\",\"startIndex\":0," + "\"version\":\"" + VERSION + "\"}]"
+            "[{\"needHasInviteUserByCycle\":\"true\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM_P2P\",\"source\":\"ANTFARM\",\"startIndex\":0," +
+                "\"version\":\"" +
+                VERSION +
+                "\"}]"
         val args =
             "[{\"needHasInviteUserByCycle\":true,\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM_FAMILY_SHARE\",\"source\":\"ANTFARM\",\"startIndex\":0}]"
         return requestString("com.alipay.antiep.canInvitePersonListP2P", args1)
@@ -67,8 +72,12 @@ object AntFarmRpcCall {
 
     // 赠送饲料
     @JvmStatic
-    fun giftOfFeed(bizTraceId: String?, userId: String?): String {
-        val args1 = "[{\"beInvitedUserId\":\"" + userId +
+    fun giftOfFeed(
+        bizTraceId: String?,
+        userId: String?,
+    ): String {
+        val args1 =
+            "[{\"beInvitedUserId\":\"" + userId +
                 "\",\"bizTraceId\":\"" + bizTraceId +
                 "\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM_P2P\"," +
                 "\"source\":\"ANTFARM\",\"version\":\"" + VERSION + "\"}]"
@@ -77,19 +86,23 @@ object AntFarmRpcCall {
 
     @JvmStatic
     @Throws(JSONException::class)
-    fun syncAnimalStatus(farmId: String?, operTag: String?, operType: String?): String {
+    fun syncAnimalStatus(
+        farmId: String?,
+        operTag: String?,
+        operType: String?,
+        source: String = "H5",
+    ): String {
         val args = JSONObject()
         args.put("farmId", farmId)
         args.put("operTag", operTag)
         args.put("operType", operType)
         args.put("requestType", "NORMAL")
         args.put("sceneCode", "ANTFARM")
-        args.put("source", "H5")
+        args.put("source", source)
         args.put("version", VERSION)
         val params = "[" + args + "]"
         return requestString("com.alipay.antfarm.syncAnimalStatus", params)
     }
-
 
     @JvmStatic
     fun sleep(): String {
@@ -131,27 +144,39 @@ object AntFarmRpcCall {
         consistencyKey: String?,
         friendId: String?,
         productNum: String?,
-        time: String?
+        time: String?,
     ): String {
-        val args1 = ("[{\"canMock\":true,\"consistencyKey\":\"" + consistencyKey
-                + "\",\"friendId\":\"" + friendId + "\",\"operType\":\"1\",\"productNum\":" + productNum +
-                ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"time\":"
-                + time + ",\"version\":\"" + VERSION + "\"}]")
+        val args1 = (
+            "[{\"canMock\":true,\"consistencyKey\":\"" + consistencyKey +
+                "\",\"friendId\":\"" + friendId + "\",\"operType\":\"1\",\"productNum\":" + productNum +
+                ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"time\":" +
+                time + ",\"version\":\"" + VERSION + "\"}]"
+        )
         return requestString("com.alipay.antfarm.rewardFriend", args1)
     }
 
     @JvmStatic
-    fun recallAnimal(animalId: String?, currentFarmId: String?, masterFarmId: String?): String {
-        val args1 = ("[{\"animalId\":\"" + animalId + "\",\"currentFarmId\":\""
-                + currentFarmId + "\",\"masterFarmId\":\"" + masterFarmId +
-                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                + VERSION + "\"}]")
+    fun recallAnimal(
+        animalId: String?,
+        currentFarmId: String?,
+        masterFarmId: String?,
+    ): String {
+        val args1 = (
+            "[{\"animalId\":\"" + animalId + "\",\"currentFarmId\":\"" +
+                currentFarmId + "\",\"masterFarmId\":\"" + masterFarmId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                VERSION + "\"}]"
+        )
         return requestString("com.alipay.antfarm.recallAnimal", args1)
     }
 
     @JvmStatic
-    fun orchardRecallAnimal(animalId: String?, userId: String?): String {
-        val args1 = "[{\"animalId\":\"" + animalId + "\",\"orchardUserId\":\"" + userId +
+    fun orchardRecallAnimal(
+        animalId: String?,
+        userId: String?,
+    ): String {
+        val args1 =
+            "[{\"animalId\":\"" + animalId + "\",\"orchardUserId\":\"" + userId +
                 "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ORCHARD\",\"source\":\"zhuangyuan_zhaohuixiaoji\",\"version\":\"0.1.2403061630.6\"}]"
         return requestString("com.alipay.antorchard.recallAnimal", args1)
     }
@@ -161,46 +186,59 @@ object AntFarmRpcCall {
         sendType: String?,
         animalId: String?,
         currentFarmId: String?,
-        masterFarmId: String?
+        masterFarmId: String?,
     ): String {
-        val args1 = ("[{\"animalId\":\"" + animalId + "\",\"currentFarmId\":\""
-                + currentFarmId + "\",\"masterFarmId\":\"" + masterFarmId +
-                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"sendType\":\""
-                + sendType + "\",\"source\":\"H5\",\"version\":\""
-                + VERSION + "\"}]")
+        val args1 = (
+            "[{\"animalId\":\"" + animalId + "\",\"currentFarmId\":\"" +
+                currentFarmId + "\",\"masterFarmId\":\"" + masterFarmId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"sendType\":\"" +
+                sendType + "\",\"source\":\"H5\",\"version\":\"" +
+                VERSION + "\"}]"
+        )
         return requestString("com.alipay.antfarm.sendBackAnimal", args1)
     }
 
     @JvmStatic
     fun harvestProduce(farmId: String?): String {
-        val args1 = ("[{\"canMock\":true,\"farmId\":\"" + farmId +
-                "\",\"giftType\":\"\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                + VERSION + "\"}]")
+        val args1 = (
+            "[{\"canMock\":true,\"farmId\":\"" + farmId +
+                "\",\"giftType\":\"\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                VERSION + "\"}]"
+        )
         return requestString("com.alipay.antfarm.harvestProduce", args1)
     }
 
     @JvmStatic
     fun listActivityInfo(): String {
         val args1 =
-            ("[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.listActivityInfo", args1)
     }
 
     @JvmStatic
-    fun donation(activityId: String?, donationAmount: Int): String {
+    fun donation(
+        activityId: String?,
+        donationAmount: Int,
+    ): String {
         val args1 =
-            ("[{\"activityId\":\"" + activityId + "\",\"donationAmount\":" + donationAmount +
-                    ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"activityId\":\"" + activityId + "\",\"donationAmount\":" + donationAmount +
+                    ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.donation", args1)
     }
 
     @JvmStatic
     fun listFarmTask(): String {
         val args1 =
-            ("[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.listFarmTask", args1)
     }
 
@@ -215,7 +253,11 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     @Throws(JSONException::class)
-    fun finishTask(taskType: String, sceneCode: String, outBizNo: String): String {
+    fun finishTask(
+        taskType: String,
+        sceneCode: String,
+        outBizNo: String,
+    ): String {
         val args = JSONObject()
         args.put("outBizNo", outBizNo)
         args.put("requestType", "RPC")
@@ -229,7 +271,8 @@ object AntFarmRpcCall {
 
     @JvmStatic
     fun FlyGameListFarmTask(): String {
-        val args = "[{" +
+        val args =
+            "[{" +
                 "\"bizKey\":\"SHANGYEHUA_GAME_TIMES\"," +
                 "\"gameType\":\"flyGame\"," +
                 "\"requestType\":\"RPC\"," +
@@ -244,7 +287,8 @@ object AntFarmRpcCall {
 
     @JvmStatic
     fun HitGameListFarmTask(): String {
-        val args = "[{" +
+        val args =
+            "[{" +
                 "\"bizKey\":\"SHANGYEHUA_HIT_ANIMAL\"," +
                 "\"gameType\":\"hitGame\"," +
                 "\"requestType\":\"RPC\"," +
@@ -259,23 +303,33 @@ object AntFarmRpcCall {
 
     @JvmStatic
     fun getAnswerInfo(): String {
-            val args1 =
-                ("[{\"answerSource\":\"foodTask\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                        + VERSION + "\"}]")
+        val args1 =
+            (
+                "[{\"answerSource\":\"foodTask\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.getAnswerInfo", args1)
     }
 
     @JvmStatic
-    fun answerQuestion(quesId: String, answer: Int): String {
+    fun answerQuestion(
+        quesId: String,
+        answer: Int,
+    ): String {
         val args1 =
-            ("[{\"answers\":\"[{\\\"questionId\\\":\\\"" + quesId + "\\\",\\\"answers\\\":[" + answer +
-                    "]}]\",\"bizkey\":\"ANSWER\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"answers\":\"[{\\\"questionId\\\":\\\"" + quesId + "\\\",\\\"answers\\\":[" + answer +
+                    "]}]\",\"bizkey\":\"ANSWER\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.doFarmTask", args1)
     }
 
     @JvmStatic
-    fun receiveFarmTaskAward(taskId: String, awardType: String? = null): String {
+    fun receiveFarmTaskAward(
+        taskId: String,
+        awardType: String? = null,
+    ): String {
         val args = JSONObject()
         args.put("requestType", "NORMAL")
         args.put("sceneCode", "ANTFARM")
@@ -291,17 +345,25 @@ object AntFarmRpcCall {
     @JvmStatic
     fun listToolTaskDetails(): String {
         val args1 =
-            ("[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.listToolTaskDetails", args1)
     }
 
     @JvmStatic
-    fun receiveToolTaskReward(rewardType: String?, rewardCount: Int, taskType: String?): String {
+    fun receiveToolTaskReward(
+        rewardType: String?,
+        rewardCount: Int,
+        taskType: String?,
+    ): String {
         val args1 =
-            ("[{\"ignoreLimit\":false,\"requestType\":\"NORMAL\",\"rewardCount\":" + rewardCount
-                    + ",\"rewardType\":\"" + rewardType + "\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskType\":\""
-                    + taskType + "\",\"version\":\"" + VERSION + "\"}]")
+            (
+                "[{\"ignoreLimit\":false,\"requestType\":\"NORMAL\",\"rewardCount\":" + rewardCount +
+                    ",\"rewardType\":\"" + rewardType + "\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskType\":\"" +
+                    taskType + "\",\"version\":\"" + VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.receiveToolTaskReward", args1)
     }
 
@@ -328,28 +390,41 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun useFarmTool(targetFarmId: String?, toolId: String?, toolType: String?): String {
+    fun useFarmTool(
+        targetFarmId: String?,
+        toolId: String?,
+        toolType: String?,
+    ): String {
         val args1 =
-            ("[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"targetFarmId\":\""
-                    + targetFarmId + "\",\"toolId\":\"" + toolId + "\",\"toolType\":\"" + toolType + "\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"targetFarmId\":\"" +
+                    targetFarmId + "\",\"toolId\":\"" + toolId + "\",\"toolType\":\"" + toolType + "\",\"version\":\"" +
+                    VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.useFarmTool", args1)
     }
 
     @JvmStatic
     fun rankingList(pageStartSum: Int): String {
         val args1 =
-            ("[{\"pageSize\":20,\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"startNum\":"
-                    + pageStartSum + ",\"version\":\"" + VERSION + "\"}]")
+            (
+                "[{\"pageSize\":20,\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"startNum\":" +
+                    pageStartSum + ",\"version\":\"" + VERSION + "\"}]"
+            )
         return requestString("com.alipay.antfarm.rankingList", args1)
     }
 
     @JvmStatic
-    fun notifyFriend(animalId: String?, notifiedFarmId: String?): String {
-        val args1 = ("[{\"animalId\":\"" + animalId +
+    fun notifyFriend(
+        animalId: String?,
+        notifiedFarmId: String?,
+    ): String {
+        val args1 = (
+            "[{\"animalId\":\"" + animalId +
                 "\",\"animalType\":\"CHICK\",\"canBeGuest\":true,\"notifiedFarmId\":\"" + notifiedFarmId +
-                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                + VERSION + "\"}]")
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                VERSION + "\"}]"
+        )
         return requestString("com.alipay.antfarm.notifyFriend", args1)
     }
 
@@ -385,19 +460,20 @@ object AntFarmRpcCall {
 //        "isSkipTempLimit":true, 肥料满了也强行收取，解决 农场未开通 打扫鸡屎失败问题
         return requestString(
             "com.alipay.antfarm.collectManurePot",
-            ("[{\"isSkipTempLimit\":true,\"manurePotNOs\":\"" + manurePotNO +
-                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION
-                    + "\"}]")
+            (
+                "[{\"isSkipTempLimit\":true,\"manurePotNOs\":\"" + manurePotNO +
+                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION +
+                    "\"}]"
+            ),
         )
     }
 
     @JvmStatic
-    fun sign(): String {
-        return requestString(
+    fun sign(): String =
+        requestString(
             "com.alipay.antfarm.sign",
-            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]"
+            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]",
         )
-    }
 
     @JvmStatic
     fun initFarmGame(gameType: String?): String {
@@ -405,13 +481,15 @@ object AntFarmRpcCall {
             return requestString(
                 "com.alipay.antfarm.initFarmGame",
                 "[{\"gameType\":\"flyGame\",\"requestType\":\"RPC\",\"sceneCode\":\"FLAYGAME\"," +
-                        "\"source\":\"FARM_game_yundongfly\",\"toolTypes\":\"ACCELERATETOOL,SHARETOOL,NONE\",\"version\":\"\"}]"
+                    "\"source\":\"FARM_game_yundongfly\",\"toolTypes\":\"ACCELERATETOOL,SHARETOOL,NONE\",\"version\":\"\"}]",
             )
         }
         return requestString(
             "com.alipay.antfarm.initFarmGame",
-            ("[{\"gameType\":\"" + gameType
-                    + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"toolTypes\":\"STEALTOOL,ACCELERATETOOL,SHARETOOL\"}]")
+            (
+                "[{\"gameType\":\"" + gameType +
+                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"toolTypes\":\"STEALTOOL,ACCELERATETOOL,SHARETOOL\"}]"
+            ),
         )
     }
 
@@ -439,26 +517,34 @@ object AntFarmRpcCall {
             val foodCount = score / 50
             return requestString(
                 "com.alipay.antfarm.recordFarmGame",
-                ("[{\"foodCount\":" + foodCount + ",\"gameType\":\"flyGame\",\"md5\":\"" + md5String
-                        + "\",\"requestType\":\"RPC\",\"sceneCode\":\"FLAYGAME\",\"score\":" + score
-                        + ",\"source\":\"ANTFARM\",\"toolTypes\":\"ACCELERATETOOL,SHARETOOL,NONE\",\"uuid\":\"" + uuid
-                        + "\",\"version\":\"\"}]")
+                (
+                    "[{\"foodCount\":" + foodCount + ",\"gameType\":\"flyGame\",\"md5\":\"" + md5String +
+                        "\",\"requestType\":\"RPC\",\"sceneCode\":\"FLAYGAME\",\"score\":" + score +
+                        ",\"source\":\"ANTFARM\",\"toolTypes\":\"ACCELERATETOOL,SHARETOOL,NONE\",\"uuid\":\"" + uuid +
+                        "\",\"version\":\"\"}]"
+                ),
             )
         }
         return requestString(
             "com.alipay.antfarm.recordFarmGame",
-            ("[{\"gameType\":\"" + gameType + "\",\"md5\":\"" + md5String
-                    + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"score\":" + score
-                    + ",\"source\":\"H5\",\"toolTypes\":\"STEALTOOL,ACCELERATETOOL,SHARETOOL\",\"uuid\":\"" + uuid
-                    + "\"}]")
+            (
+                "[{\"gameType\":\"" + gameType + "\",\"md5\":\"" + md5String +
+                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"score\":" + score +
+                    ",\"source\":\"H5\",\"toolTypes\":\"STEALTOOL,ACCELERATETOOL,SHARETOOL\",\"uuid\":\"" + uuid +
+                    "\"}]"
+            ),
         )
     }
 
     private val uuid: String
         get() {
             val sb = StringBuilder()
-            for (str in UUID.randomUUID().toString().split("-".toRegex())
-                .dropLastWhile { it.isEmpty() }.toTypedArray()) {
+            for (str in UUID
+                .randomUUID()
+                .toString()
+                .split("-".toRegex())
+                .dropLastWhile { it.isEmpty() }
+                .toTypedArray()) {
                 sb.append(str.substring(str.length / 2))
             }
             return sb.toString()
@@ -489,7 +575,6 @@ object AntFarmRpcCall {
         }
     }
 
-
     /**
      * 小鸡厨房 - 进厨房
      *
@@ -511,45 +596,46 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun collectDailyFoodMaterial(dailyFoodMaterialAmount: Int): String {
-        return requestString(
+    fun collectDailyFoodMaterial(dailyFoodMaterialAmount: Int): String =
+        requestString(
             "com.alipay.antfarm.collectDailyFoodMaterial",
-            "[{\"collectDailyFoodMaterialAmount\":" + dailyFoodMaterialAmount + ",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"" + KITCHEN_TASK_SOURCE + "\",\"version\":\"unknown\"}]"
+            "[{\"collectDailyFoodMaterialAmount\":" + dailyFoodMaterialAmount +
+                ",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"" +
+                KITCHEN_TASK_SOURCE +
+                "\",\"version\":\"unknown\"}]",
         )
-    }
 
     @JvmStatic
-    fun queryFoodMaterialPack(): String {
-        return requestString(
+    fun queryFoodMaterialPack(): String =
+        requestString(
             "com.alipay.antfarm.queryFoodMaterialPack",
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"kitchen\",\"version\":\"unknown\"}]"
+            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"kitchen\",\"version\":\"unknown\"}]",
         )
-    }
 
     @JvmStatic
-    fun listCookbook(): String {
-        return requestString(
+    fun listCookbook(): String =
+        requestString(
             "com.alipay.antfarm.listCookbook",
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"ACHIEVEMENT\",\"version\":\"unknown\"}]"
+            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"ACHIEVEMENT\",\"version\":\"unknown\"}]",
         )
-    }
 
     @JvmStatic
-    fun collectDailyLimitedFoodMaterial(dailyLimitedFoodMaterialAmount: Int): String {
-        return requestString(
+    fun collectDailyLimitedFoodMaterial(dailyLimitedFoodMaterialAmount: Int): String =
+        requestString(
             "com.alipay.antfarm.collectDailyLimitedFoodMaterial",
-            ("[{\"collectDailyLimitedFoodMaterialAmount\":" + dailyLimitedFoodMaterialAmount
-                    + ",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"kitchen\",\"version\":\"unknown\"}]")
+            (
+                "[{\"collectDailyLimitedFoodMaterialAmount\":" + dailyLimitedFoodMaterialAmount +
+                    ",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"kitchen\",\"version\":\"unknown\"}]"
+            ),
         )
-    }
 
     @JvmStatic
-    fun farmFoodMaterialCollect(): String {
-        return requestString(
+    fun farmFoodMaterialCollect(): String =
+        requestString(
             "com.alipay.antorchard.farmFoodMaterialCollect",
-            "[{\"collect\":true,\"requestType\":\"RPC\",\"sceneCode\":\"ORCHARD\",\"source\":\"" + KITCHEN_TASK_SOURCE + "\",\"version\":\"unknown\"}]"
+            "[{\"collect\":true,\"requestType\":\"RPC\",\"sceneCode\":\"ORCHARD\",\"source\":\"" + KITCHEN_TASK_SOURCE +
+                "\",\"version\":\"unknown\"}]",
         )
-    }
 
     /**
      * 小鸡厨房 - 做菜
@@ -561,7 +647,7 @@ object AntFarmRpcCall {
     @JvmStatic
     @Throws(JSONException::class)
     fun cook(userId: String?): String {
-//[{"requestType":"RPC","sceneCode":"ANTFARM","source":"antfarmzuofanrw","userId":"2088522730162798","version":"unknown"}]
+// [{"requestType":"RPC","sceneCode":"ANTFARM","source":"antfarmzuofanrw","userId":"2088522730162798","version":"unknown"}]
         val args = JSONObject()
         args.put("requestType", "RPC")
         args.put("sceneCode", "ANTFARM")
@@ -575,13 +661,14 @@ object AntFarmRpcCall {
     @JvmStatic
     fun useFarmFood(cuisineList: JSONArray?): String {
         try {
-            val args = JSONObject().apply {
-                put("cuisineList", cuisineList ?: JSONArray())
-                put("requestType", "NORMAL")
-                put("sceneCode", "ANTFARM")
-                put("source", "chInfo_ch_appcenter__chsub_9patch")
-                put("version", VERSION)
-            }
+            val args =
+                JSONObject().apply {
+                    put("cuisineList", cuisineList ?: JSONArray())
+                    put("requestType", "NORMAL")
+                    put("sceneCode", "ANTFARM")
+                    put("source", "chInfo_ch_appcenter__chsub_9patch")
+                    put("version", VERSION)
+                }
             val params = "[$args]"
             return requestString("com.alipay.antfarm.useFarmFood", params)
         } catch (_: JSONException) {
@@ -590,80 +677,84 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun collectKitchenGarbage(): String {
-        return requestString(
+    fun collectKitchenGarbage(): String =
+        requestString(
             "com.alipay.antfarm.collectKitchenGarbage",
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"VILLA\",\"version\":\"unknown\"}]"
+            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"VILLA\",\"version\":\"unknown\"}]",
         )
-    }
 
-    /* 日常任务 */
+    // 日常任务
     @JvmStatic
-    fun doFarmTask(bizKey: String?): String {
-        return requestString(
+    fun doFarmTask(bizKey: String?): String =
+        requestString(
             "com.alipay.antfarm.doFarmTask",
-            ("[{\"bizKey\":\"" + bizKey
-                    + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"bizKey\":\"" + bizKey +
+                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            ),
         )
-    }
 
     @JvmStatic
-    fun queryTabVideoUrl(): String {
-        return requestString(
+    fun queryTabVideoUrl(): String =
+        requestString(
             "com.alipay.antfarm.queryTabVideoUrl",
-            ("[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION
-                    + "\"}]")
+            (
+                "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION +
+                    "\"}]"
+            ),
         )
-    }
 
     @JvmStatic
-    fun videoDeliverModule(bizId: String?): String {
-        return requestString(
+    fun videoDeliverModule(bizId: String?): String =
+        requestString(
             "alipay.content.reading.life.deliver.module",
-            ("[{\"bizId\":\"" + bizId
-                    + "\",\"bizType\":\"CONTENT\",\"chInfo\":\"ch_antFarm\",\"refer\":\"antFarm\",\"timestamp\":\""
-                    + System.currentTimeMillis() + "\"}]")
+            (
+                "[{\"bizId\":\"" + bizId +
+                    "\",\"bizType\":\"CONTENT\",\"chInfo\":\"ch_antFarm\",\"refer\":\"antFarm\",\"timestamp\":\"" +
+                    System.currentTimeMillis() + "\"}]"
+            ),
         )
-    }
 
     @JvmStatic
-    fun videoTrigger(bizId: String?): String {
-        return requestString(
+    fun videoTrigger(bizId: String?): String =
+        requestString(
             "alipay.content.reading.life.prize.trigger",
-            ("[{\"bizId\":\"" + bizId
-                    + "\",\"bizType\":\"CONTENT\",\"prizeFlowNum\":\"VIDEO_TASK\",\"prizeType\":\"farmFeed\"}]")
+            (
+                "[{\"bizId\":\"" + bizId +
+                    "\",\"bizType\":\"CONTENT\",\"prizeFlowNum\":\"VIDEO_TASK\",\"prizeType\":\"farmFeed\"}]"
+            ),
         )
-    }
 
-    /* 惊喜礼包 */
+    // 惊喜礼包
     @JvmStatic
-    fun drawLotteryPlus(): String {
-        return requestString(
+    fun drawLotteryPlus(): String =
+        requestString(
             "com.alipay.antfarm.drawLotteryPlus",
-            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5 \",\"version\":\"\"}]"
+            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5 \",\"version\":\"\"}]",
         )
-    }
 
-    /* 小麦 */
+    // 小麦
     @JvmStatic
-    fun acceptGift(): String {
-        return requestString(
+    fun acceptGift(): String =
+        requestString(
             "com.alipay.antfarm.acceptGift",
-            ("[{\"ignoreLimit\":false,\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"ignoreLimit\":false,\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            ),
         )
-    }
 
     @JvmStatic
-    fun visitFriend(friendFarmId: String?): String {
-        return requestString(
+    fun visitFriend(friendFarmId: String?): String =
+        requestString(
             "com.alipay.antfarm.visitFriend",
-            ("[{\"friendFarmId\":\"" + friendFarmId
-                    + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\""
-                    + VERSION + "\"}]")
+            (
+                "[{\"friendFarmId\":\"" + friendFarmId +
+                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                    VERSION + "\"}]"
+            ),
         )
-    }
 
     /**
      * 小鸡日志当月日期查询
@@ -671,12 +762,11 @@ object AntFarmRpcCall {
      * @return
      */
     @JvmStatic
-    fun queryChickenDiaryList(): String {
-        return requestString(
+    fun queryChickenDiaryList(): String =
+        requestString(
             "com.alipay.antfarm.queryChickenDiaryList",
-            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]"
+            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]",
         )
-    }
 
     /**
      * 小鸡日志指定月份日期查询
@@ -685,30 +775,34 @@ object AntFarmRpcCall {
      * @return
      */
     @JvmStatic
-    fun queryChickenDiaryList(yearMonth: String?): String {
-        return requestString(
+    fun queryChickenDiaryList(yearMonth: String?): String =
+        requestString(
             "com.alipay.antfarm.queryChickenDiaryList",
-            "[{\"queryMonthStr\":\"" + yearMonth + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]"
+            "[{\"queryMonthStr\":\"" + yearMonth + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]",
         )
-    }
 
     @JvmStatic
-    fun queryChickenDiary(queryDayStr: String?): String {
-        return requestString(
+    fun queryChickenDiary(queryDayStr: String?): String =
+        requestString(
             "com.alipay.antfarm.queryChickenDiary",
-            ("[{\"queryDayStr\":\"" + queryDayStr
-                    + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]")
+            (
+                "[{\"queryDayStr\":\"" + queryDayStr +
+                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]"
+            ),
         )
-    }
 
     @JvmStatic
-    fun diaryTietie(diaryDate: String?, roleId: String?): String {
-        return requestString(
+    fun diaryTietie(
+        diaryDate: String?,
+        roleId: String?,
+    ): String =
+        requestString(
             "com.alipay.antfarm.diaryTietie",
-            ("[{\"diaryDate\":\"" + diaryDate + "\",\"requestType\":\"NORMAL\",\"roleId\":\"" + roleId
-                    + "\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]")
+            (
+                "[{\"diaryDate\":\"" + diaryDate + "\",\"requestType\":\"NORMAL\",\"roleId\":\"" + roleId +
+                    "\",\"sceneCode\":\"DIARY\",\"source\":\"antfarm_icon\"}]"
+            ),
         )
-    }
 
     /**
      * 小鸡日记点赞
@@ -717,54 +811,49 @@ object AntFarmRpcCall {
      * @return
      */
     @JvmStatic
-    fun collectChickenDiary(DiaryId: String?): String {
-        return requestString(
+    fun collectChickenDiary(DiaryId: String?): String =
+        requestString(
             "com.alipay.antfarm.collectChickenDiary",
-            "[{\"collectStatus\":true,\"diaryId\":\"" + DiaryId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"MOOD\",\"source\":\"H5\"}]"
+            "[{\"collectStatus\":true,\"diaryId\":\"" + DiaryId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"MOOD\",\"source\":\"H5\"}]",
         )
-    }
 
     @JvmStatic
-    fun visitAnimal(): String {
-        return requestString(
+    fun visitAnimal(): String =
+        requestString(
             "com.alipay.antfarm.visitAnimal",
             "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION +
-                    "\"}]"
+                "\"}]",
         )
-    }
 
     @JvmStatic
-    fun feedFriendAnimalVisit(friendFarmId: String?): String {
-        return requestString(
+    fun feedFriendAnimalVisit(friendFarmId: String?): String =
+        requestString(
             "com.alipay.antfarm.feedFriendAnimal",
             "[{\"friendFarmId\":\"" + friendFarmId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\"," +
-                    "\"source\":\"visitChicken\",\"version\":\"" + VERSION + "\"}]"
+                "\"source\":\"visitChicken\",\"version\":\"" + VERSION + "\"}]",
         )
-    }
 
     @JvmStatic
-    fun visitAnimalSendPrize(token: String?): String {
-        return requestString(
+    fun visitAnimalSendPrize(token: String?): String =
+        requestString(
             "com.alipay.antfarm.visitAnimalSendPrize",
             "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"token\":\"" + token +
-                    "\",\"version\":\"" + VERSION + "\"}]"
+                "\",\"version\":\"" + VERSION + "\"}]",
         )
-    }
 
-    /* 抽抽乐 */
+    // 抽抽乐
     @JvmStatic
-    fun enterDrawMachine(): String {
-        return requestString(
+    fun enterDrawMachine(): String =
+        requestString(
             "com.alipay.antfarm.enterDrawMachine",
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"siliaorenwu\"}]"
+            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"siliaorenwu\"}]",
         )
-    }
 
     @JvmStatic
     fun refinedOperation(
         actionId: String,
         source: String = "H5",
-        requestType: String = "NORMAL"
+        requestType: String = "NORMAL",
     ): String {
         val args = JSONObject()
         args.put("actionId", actionId)
@@ -820,7 +909,10 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     @Throws(JSONException::class)
-    fun chouchouleDoFarmTask(drawType: String, bizKey: String?): String {
+    fun chouchouleDoFarmTask(
+        drawType: String,
+        bizKey: String?,
+    ): String {
         val taskSceneCode = chouchouleSelector(drawType)
         val args = JSONObject()
         args.put("bizKey", bizKey)
@@ -831,7 +923,6 @@ object AntFarmRpcCall {
         val params = "[" + args + "]"
         return requestString("com.alipay.antfarm.doFarmTask", params)
     }
-
 
     /**
      * 领取抽抽乐任务奖励-抽奖次数
@@ -846,7 +937,7 @@ object AntFarmRpcCall {
     fun chouchouleReceiveFarmTaskAward(
         drawType: String,
         taskId: String?,
-        awardType: String? = null
+        awardType: String? = null,
     ): String {
         val taskSceneCode = chouchouleSelector(drawType)
         val args = JSONObject()
@@ -866,12 +957,11 @@ object AntFarmRpcCall {
      * IP抽抽乐查询活动与抽奖次数
      */
     @JvmStatic
-    fun queryDrawMachineActivity(): String {
-        return requestString(
+    fun queryDrawMachineActivity(): String =
+        requestString(
             "com.alipay.antfarm.queryDrawMachineActivity",
-            "[{\"otherScenes\":[\"dailyDrawMachine\"],\"requestType\":\"RPC\",\"scene\":\"ipDrawMachine\",\"sceneCode\":\"ANTFARM\",\"source\":\"ip_ccl\"}]"
+            "[{\"otherScenes\":[\"dailyDrawMachine\"],\"requestType\":\"RPC\",\"scene\":\"ipDrawMachine\",\"sceneCode\":\"ANTFARM\",\"source\":\"ip_ccl\"}]",
         )
-    }
 
     /**
      * 查询抽抽乐活动详情（新版统一接口）
@@ -880,23 +970,24 @@ object AntFarmRpcCall {
      * @param otherScene 其他场景
      */
     @JvmStatic
-    fun queryDrawMachineActivity_New(scene: String, otherScene: String): String {
-        return requestString(
+    fun queryDrawMachineActivity_New(
+        scene: String,
+        otherScene: String,
+    ): String =
+        requestString(
             "com.alipay.antfarm.queryDrawMachineActivity",
-            "[{\"otherScenes\":[\"$otherScene\"],\"requestType\":\"RPC\",\"scene\":\"$scene\",\"sceneCode\":\"ANTFARM\",\"source\":\"antfarm_villa\"}]"
+            "[{\"otherScenes\":[\"$otherScene\"],\"requestType\":\"RPC\",\"scene\":\"$scene\",\"sceneCode\":\"ANTFARM\",\"source\":\"antfarm_villa\"}]",
         )
-    }
 
     /**
      * IP抽抽乐抽奖
      */
     @JvmStatic
-    fun drawMachine(): String {
-        return requestString(
+    fun drawMachine(): String =
+        requestString(
             "com.alipay.antfarm.drawMachine",
-            "[{\"requestType\":\"RPC\",\"scene\":\"ipDrawMachine\",\"sceneCode\":\"ANTFARM\",\"source\":\"ip_ccl\"}]"
+            "[{\"requestType\":\"RPC\",\"scene\":\"ipDrawMachine\",\"sceneCode\":\"ANTFARM\",\"source\":\"ip_ccl\"}]",
         )
-    }
 
     /**
      * 执行抽奖（IP抽抽乐）- 支持连抽
@@ -921,7 +1012,10 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     @Throws(JSONException::class)
-    fun xlightPlugin(referToken: String, spaceCode: String): String {
+    fun xlightPlugin(
+        referToken: String,
+        spaceCode: String,
+    ): String {
         val positionRequest = JSONObject()
         val referInfo = JSONObject()
         referInfo.put("referToken", referToken)
@@ -957,7 +1051,7 @@ object AntFarmRpcCall {
         playBizId: String,
         playEventInfo: JSONObject,
         iepTaskType: String,
-        iepTaskSceneCode: String
+        iepTaskSceneCode: String,
     ): String {
         val extendInfo = JSONObject()
         extendInfo.put("iepTaskSceneCode", iepTaskSceneCode)
@@ -974,12 +1068,17 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun hireAnimal(farmId: String?, animalId: String?): String {
-        return requestString(
+    fun hireAnimal(
+        farmId: String?,
+        animalId: String?,
+    ): String =
+        requestString(
             "com.alipay.antfarm.hireAnimal",
-            "[{\"friendFarmId\":\"" + farmId + "\",\"hireActionType\":\"HIRE_IN_FRIEND_FARM\",\"hireAnimalId\":\"" + animalId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"sendCardChat\":false,\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]"
+            "[{\"friendFarmId\":\"" + farmId + "\",\"hireActionType\":\"HIRE_IN_FRIEND_FARM\",\"hireAnimalId\":\"" + animalId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"sendCardChat\":false,\"source\":\"H5\",\"version\":\"" +
+                VERSION +
+                "\"}]",
         )
-    }
 
     /**
      * 雇佣NPC小鸡（支持传入source）
@@ -989,7 +1088,10 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     @Throws(JSONException::class)
-    fun hireNpcAnimal(animalId: String?, source: String?): String {
+    fun hireNpcAnimal(
+        animalId: String?,
+        source: String?,
+    ): String {
         val args = JSONObject()
         args.put("hireActionType", "HIRE_IN_SELF_FARM")
         args.put("hireAnimalId", animalId)
@@ -1006,16 +1108,22 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     @Throws(JSONException::class)
-    fun sendBackNpcAnimal(animalId: String?, currentFarmId: String?, masterFarmId: String?): String {
+    fun sendBackNpcAnimal(
+        animalId: String?,
+        currentFarmId: String?,
+        masterFarmId: String?,
+        receiveNpcReward: Boolean = true,
+        source: String = "H5",
+    ): String {
         val args = JSONObject()
         args.put("animalId", animalId)
         args.put("currentFarmId", currentFarmId)
         args.put("masterFarmId", masterFarmId)
-        args.put("receiveNPCReward", true)
+        args.put("receiveNPCReward", receiveNpcReward)
         args.put("requestType", "NORMAL")
         args.put("sceneCode", "ANTFARM")
         args.put("sendType", "NORMAL")
-        args.put("source", "H5")
+        args.put("source", source)
         args.put("version", VERSION)
         return requestString("com.alipay.antfarm.sendBackAnimal", "[$args]")
     }
@@ -1034,32 +1142,39 @@ object AntFarmRpcCall {
      * 领取芝麻NPC任务奖励
      */
     @JvmStatic
-    fun receiveZhimaNpcFarmTaskAward(taskId: String): String {
+    fun receiveZhimaNpcFarmTaskAward(
+        taskId: String,
+        awardType: String,
+    ): String {
         val args =
-            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"zhimaxiaoji_lianjin\",\"taskId\":\"$taskId\",\"taskSceneCode\":\"ANTFARM_ZHIMA_NPC_TASK\",\"version\":\"$VERSION\"}]"
-        return requestString("com.alipay.antfarm.receiveFarmTaskAward", args)
+            JSONObject().apply {
+                put("awardType", awardType)
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM")
+                put("source", "zhimaxiaoji_lianjin")
+                put("taskId", taskId)
+                put("taskSceneCode", "ANTFARM_ZHIMA_NPC_TASK")
+                put("version", VERSION)
+            }
+        return requestString("com.alipay.antfarm.receiveFarmTaskAward", JSONArray().put(args).toString())
     }
 
     @JvmStatic
-    fun DrawPrize(): String {
-        return requestString(
+    fun DrawPrize(): String =
+        requestString(
             "com.alipay.antfarm.DrawPrize",
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"chouchoule\"}]"
+            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"chouchoule\"}]",
         )
-    }
 
     @JvmStatic
-    fun DrawPrize(activityId: String?): String {
-        return requestString(
+    fun DrawPrize(activityId: String?): String =
+        requestString(
             "com.alipay.antfarm.DrawPrize",
-            "[{\"activityId\":\"" + activityId + "\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"icon\"}]"
+            "[{\"activityId\":\"" + activityId + "\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM\",\"source\":\"icon\"}]",
         )
-    }
 
     @JvmStatic
-    fun drawGameCenterAward(): String {
-        return drawGameCenterAward(1)
-    }
+    fun drawGameCenterAward(): String = drawGameCenterAward(1)
 
     /**
      * 领取蚂蚁庄园游戏中心奖励 (开宝箱)
@@ -1067,122 +1182,129 @@ object AntFarmRpcCall {
      * @param drawTimes 开启次数
      */
     @JvmStatic
-    fun drawGameCenterAward(drawTimes: Int): String {
-        return try {
-            val args = JSONObject().apply {
-                put("batchDrawCount", drawTimes.coerceAtLeast(1))
-                put("bizType", "ANTFARM")
-                put("requestType", "NORMAL")
-                put("sceneCode", "ANTFARM")
-                put("source", "H5")
-                put("version", GAME_CENTER_VERSION)
-            }
+    fun drawGameCenterAward(drawTimes: Int): String =
+        try {
+            val args =
+                JSONObject().apply {
+                    put("batchDrawCount", drawTimes.coerceAtLeast(1))
+                    put("bizType", "ANTFARM")
+                    put("requestType", "NORMAL")
+                    put("sceneCode", "ANTFARM")
+                    put("source", "H5")
+                    put("version", GAME_CENTER_VERSION)
+                }
             requestString(
                 "com.alipay.charitygamecenter.drawGameCenterAward",
-                JSONArray().put(args).toString()
+                JSONArray().put(args).toString(),
             )
         } catch (_: Exception) {
             ""
         }
-    }
 
     @JvmStatic
-    fun queryGameList(): String {
-        return try {
-            val args = JSONObject().apply {
-                put("bizType", "ANTFARM")
-                put(
-                    "commonDegradeFilterRequest",
-                    JSONObject().apply {
-                        put("deviceLevel", "high")
-                        put("platform", "Android")
-                        put("unityDeviceLevel", "high")
-                    }
-                )
-                put("requestType", "NORMAL")
-                put("sceneCode", "ANTFARM")
-                put("source", "H5")
-                put("version", GAME_CENTER_VERSION)
-            }
+    fun queryGameList(): String =
+        try {
+            val args =
+                JSONObject().apply {
+                    put("bizType", "ANTFARM")
+                    put(
+                        "commonDegradeFilterRequest",
+                        JSONObject().apply {
+                            put("deviceLevel", "high")
+                            put("platform", "Android")
+                            put("unityDeviceLevel", "high")
+                        },
+                    )
+                    put("requestType", "NORMAL")
+                    put("sceneCode", "ANTFARM")
+                    put("source", "H5")
+                    put("version", GAME_CENTER_VERSION)
+                }
             requestString(
                 "com.alipay.charitygamecenter.queryGameList",
-                JSONArray().put(args).toString()
+                JSONArray().put(args).toString(),
             )
         } catch (_: Exception) {
             ""
         }
-    }
 
     @JvmStatic
-    fun queryOptionalPlay(): String {
-        return try {
-            val args = JSONObject().apply {
-                put("bizType", "ANTFARM")
-                put(
-                    "commonDegradeFilterRequest",
-                    JSONObject().apply {
-                        put("appMode", "normal")
-                        put("deviceLevel", "high")
-                        put("initialized", true)
-                        put("platform", "Android")
-                        put("unityDeviceLevel", "high")
-                    }
-                )
-                put("playTypeList", JSONArray().put("TASK_TRIGGER").put("TOP_UP_COUPON"))
-                put("requestType", "NORMAL")
-                put("sceneCode", "ANTFARM_COMMON")
-                put("source", "H5")
-                put("version", GAME_CENTER_VERSION)
-            }
+    fun queryOptionalPlay(): String =
+        try {
+            val args =
+                JSONObject().apply {
+                    put("bizType", "ANTFARM")
+                    put(
+                        "commonDegradeFilterRequest",
+                        JSONObject().apply {
+                            put("appMode", "normal")
+                            put("deviceLevel", "high")
+                            put("initialized", true)
+                            put("platform", "Android")
+                            put("unityDeviceLevel", "high")
+                        },
+                    )
+                    put("playTypeList", JSONArray().put("TASK_TRIGGER").put("TOP_UP_COUPON"))
+                    put("requestType", "NORMAL")
+                    put("sceneCode", "ANTFARM_COMMON")
+                    put("source", "H5")
+                    put("version", GAME_CENTER_VERSION)
+                }
             requestString(
                 "com.alipay.charitygamecenter.queryOptionalPlay",
-                JSONArray().put(args).toString()
+                JSONArray().put(args).toString(),
             )
         } catch (_: Exception) {
             ""
         }
-    }
 
     @JvmStatic
     fun receiveTaskAwardAntFarm(
         sceneCode: String,
         taskType: String,
-        awardCountForReceive: Int
-    ): String {
-        return try {
-            val args = JSONObject().apply {
-                put("awardCountForReceive", awardCountForReceive)
-                put("ignoreLimit", true)
-                put("requestType", "RPC")
-                put("sceneCode", sceneCode)
-                put("source", "antfarm")
-                put("taskType", taskType)
-            }
+        awardCountForReceive: Int,
+    ): String =
+        try {
+            val args =
+                JSONObject().apply {
+                    put("awardCountForReceive", awardCountForReceive)
+                    put("ignoreLimit", true)
+                    put("requestType", "RPC")
+                    put("sceneCode", sceneCode)
+                    put("source", "antfarm")
+                    put("taskType", taskType)
+                }
             requestString(
                 "com.alipay.antieptask.receiveTaskAwardantfarm",
-                JSONArray().put(args).toString()
+                JSONArray().put(args).toString(),
             )
         } catch (_: Exception) {
             ""
         }
-    }
 
     // 小鸡换装
     @JvmStatic
-    fun listOrnaments(): String {
-        return requestString(
+    fun listOrnaments(): String =
+        requestString(
             "com.alipay.antfarm.listOrnaments",
-            "[{\"pageNo\":\"1\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"setsType\":\"ACHIEVEMENTSETS\",\"source\":\"H5\",\"subType\":\"sets\",\"type\":\"apparels\",\"version\":\"" + VERSION + "\"}]"
+            "[{\"pageNo\":\"1\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"setsType\":\"ACHIEVEMENTSETS\",\"source\":\"H5\",\"subType\":\"sets\",\"type\":\"apparels\",\"version\":\"" +
+                VERSION +
+                "\"}]",
         )
-    }
 
     @JvmStatic
-    fun saveOrnaments(animalId: String?, farmId: String?, ornaments: String?): String {
-        return requestString(
+    fun saveOrnaments(
+        animalId: String?,
+        farmId: String?,
+        ornaments: String?,
+    ): String =
+        requestString(
             "com.alipay.antfarm.saveOrnaments",
-            "[{\"animalId\":\"" + animalId + "\",\"farmId\":\"" + farmId + "\",\"ornaments\":\"" + ornaments + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]"
+            "[{\"animalId\":\"" + animalId + "\",\"farmId\":\"" + farmId + "\",\"ornaments\":\"" + ornaments +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
+                VERSION +
+                "\"}]",
         )
-    }
 
     // 亲密家庭
     @JvmStatic
@@ -1213,7 +1335,8 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     fun familyTaskTips(animals: JSONArray): String {
-        val args = "[{" +
+        val args =
+            "[{" +
                 "\"animals\":$animals," +
                 "\"requestType\":\"NORMAL\"," +
                 "\"sceneCode\":\"ANTFARM\"," +
@@ -1234,7 +1357,9 @@ object AntFarmRpcCall {
     @JvmStatic
     fun familyReceiveFarmTaskAward(taskId: String?): String {
         val args =
-            "[{\"awardType\":\"FAMILY_INTIMACY\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskId\":\"" + taskId + "\",\"taskSceneCode\":\"ANTFARM_FAMILY_TASK\"}]"
+            "[{\"awardType\":\"FAMILY_INTIMACY\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskId\":\"" +
+                taskId +
+                "\",\"taskSceneCode\":\"ANTFARM_FAMILY_TASK\"}]"
         return requestString("com.alipay.antfarm.receiveFarmTaskAward", args)
     }
 
@@ -1252,20 +1377,26 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun assignFamilyMember(assignAction: String?, beAssignUser: String?): String {
-        return requestString(
+    fun assignFamilyMember(
+        assignAction: String?,
+        beAssignUser: String?,
+    ): String =
+        requestString(
             "com.alipay.antfarm.assignFamilyMember",
-            "[{\"assignAction\":\"" + assignAction + "\",\"beAssignUser\":\"" + beAssignUser + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
+            "[{\"assignAction\":\"" + assignAction + "\",\"beAssignUser\":\"" + beAssignUser +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]",
         )
-    }
 
     @JvmStatic
-    fun sendChat(chatCardType: String?, receiverUserId: String?): String {
-        return requestString(
+    fun sendChat(
+        chatCardType: String?,
+        receiverUserId: String?,
+    ): String =
+        requestString(
             "com.alipay.antfarm.sendChat",
-            "[{\"chatCardType\":\"" + chatCardType + "\",\"receiverUserId\":\"" + receiverUserId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
+            "[{\"chatCardType\":\"" + chatCardType + "\",\"receiverUserId\":\"" + receiverUserId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]",
         )
-    }
 
     @JvmStatic
     fun deliverSubjectRecommend(friendUserIdList: JSONArray?): String {
@@ -1287,7 +1418,6 @@ object AntFarmRpcCall {
         return requestString("com.alipay.antfarm.OpenPrivatePolicy", params)
     }
 
-
     @JvmStatic
     @Throws(JSONException::class)
     fun deliverContentExpand(
@@ -1299,7 +1429,7 @@ object AntFarmRpcCall {
         sceneId: String?,
         sceneName: String?,
         success: Boolean,
-        friendUserIdList: JSONArray?
+        friendUserIdList: JSONArray?,
     ): String {
         val args = JSONObject()
         args.put("ariverRpcTraceId", ariverRpcTraceId)
@@ -1336,7 +1466,7 @@ object AntFarmRpcCall {
         groupId: String?,
         friendUserIds: JSONArray?,
         content: String?,
-        deliverId: String?
+        deliverId: String?,
     ): String {
         val args = JSONObject()
         args.put("content", content)
@@ -1353,16 +1483,24 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun syncFamilyStatus(groupId: String?, operType: String?, syncUserIds: String?): String {
+    fun syncFamilyStatus(
+        groupId: String?,
+        operType: String?,
+        syncUserIds: String?,
+    ): String {
         val args =
-            "[{\"groupId\":\"" + groupId + "\",\"operType\":\"" + operType + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"syncUserIds\":[\"" + syncUserIds + "\"]}]"
+            "[{\"groupId\":\"" + groupId + "\",\"operType\":\"" + operType +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"syncUserIds\":[\"" +
+                syncUserIds +
+                "\"]}]"
         return requestString("com.alipay.antfarm.syncFamilyStatus", args)
     }
 
     @JvmStatic
     fun inviteFriendVisitFamily(receiverUserId: JSONArray?): String {
         val args =
-            "[{\"bizType\":\"FAMILY_SHARE\",\"receiverUserId\":" + receiverUserId + ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
+            "[{\"bizType\":\"FAMILY_SHARE\",\"receiverUserId\":" + receiverUserId +
+                ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
         return requestString("com.alipay.antfarm.inviteFriendVisitFamily", args)
     }
 
@@ -1370,10 +1508,11 @@ object AntFarmRpcCall {
     fun familyEatTogether(
         groupId: String?,
         friendUserIdList: JSONArray?,
-        cuisines: JSONArray?
+        cuisines: JSONArray?,
     ): String {
         val args =
-            "[{\"cuisines\":" + cuisines + ",\"friendUserIds\":" + friendUserIdList + ",\"groupId\":\"" + groupId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"spaceType\":\"ChickFamily\"}]"
+            "[{\"cuisines\":" + cuisines + ",\"friendUserIds\":" + friendUserIdList + ",\"groupId\":\"" + groupId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"spaceType\":\"ChickFamily\"}]"
         return requestString("com.alipay.antfarm.familyEatTogether", args)
     }
 
@@ -1385,9 +1524,13 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun feedFriendAnimal(friendFarmId: String?, groupId: String?): String {
+    fun feedFriendAnimal(
+        friendFarmId: String?,
+        groupId: String?,
+    ): String {
         val args =
-            "[{\"friendFarmId\": \"" + friendFarmId + "\",\"groupId\": \"" + groupId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ChickFamily\",\"source\":\"H5\",\"spaceType\":\"ChickFamily\"}]"
+            "[{\"friendFarmId\": \"" + friendFarmId + "\",\"groupId\": \"" + groupId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ChickFamily\",\"source\":\"H5\",\"spaceType\":\"ChickFamily\"}]"
         return requestString("com.alipay.antfarm.feedFriendAnimal", args)
     }
 
@@ -1406,16 +1549,22 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun familyBatchInviteP2P(inviteP2PVOList: JSONArray?, sceneCode: String?): String {
+    fun familyBatchInviteP2P(
+        inviteP2PVOList: JSONArray?,
+        sceneCode: String?,
+    ): String {
         val args =
-            "[{\"inviteP2PVOList\":" + inviteP2PVOList + ",\"requestType\":\"RPC\",\"sceneCode\":\"" + sceneCode + "\",\"source\":\"antfarm\"}]"
+            "[{\"inviteP2PVOList\":" + inviteP2PVOList + ",\"requestType\":\"RPC\",\"sceneCode\":\"" + sceneCode +
+                "\",\"source\":\"antfarm\"}]"
         return requestString("com.alipay.antiep.batchInviteP2P", args)
     }
 
     @JvmStatic
     fun familyDrawSignReceiveFarmTaskAward(taskId: String?): String {
         val args =
-            "[{\"awardType\":\"FAMILY_DRAW_TIME\",\"bizType\":\"ANTFARM_GAME_CENTER\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskId\":\"" + taskId + "\",\"taskSceneCode\":\"ANTFARM_FAMILY_DRAW_TASK\"}]"
+            "[{\"awardType\":\"FAMILY_DRAW_TIME\",\"bizType\":\"ANTFARM_GAME_CENTER\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskId\":\"" +
+                taskId +
+                "\",\"taskSceneCode\":\"ANTFARM_FAMILY_DRAW_TASK\"}]"
         return requestString("com.alipay.antfarm.receiveFarmTaskAward", args)
     }
 
@@ -1443,9 +1592,13 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun giftFamilyDrawFragment(giftUserId: String?, giftNum: Int): String {
+    fun giftFamilyDrawFragment(
+        giftUserId: String?,
+        giftNum: Int,
+    ): String {
         val args =
-            "[{\"bizType\":\"ANTFARM_GAME_CENTER\",\"giftNum\":" + giftNum + ",\"giftUserId\":\"" + giftUserId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
+            "[{\"bizType\":\"ANTFARM_GAME_CENTER\",\"giftNum\":" + giftNum + ",\"giftUserId\":\"" + giftUserId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
         return requestString("com.alipay.antfarm.giftFamilyDrawFragment", args)
     }
 
@@ -1459,14 +1612,21 @@ object AntFarmRpcCall {
     @JvmStatic
     fun getMallItemDetail(spuId: String?): String {
         val data =
-            "[{\"bizType\":\"ANTFARM_GAME_CENTER\",\"itemId\":\"" + spuId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
+            "[{\"bizType\":\"ANTFARM_GAME_CENTER\",\"itemId\":\"" + spuId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
         return requestString("com.alipay.charitygamecenter.getMallItemDetail", data)
     }
 
     @JvmStatic
-    fun exchangeBenefit(spuId: String?, skuId: String?): String {
+    fun exchangeBenefit(
+        spuId: String?,
+        skuId: String?,
+    ): String {
         val data =
-            "[{\"bizType\":\"ANTFARM_GAME_CENTER\",\"ignoreHoldLimit\":false,\"itemId\":\"" + spuId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"subItemId\":\"" + skuId + "\"}]"
+            "[{\"bizType\":\"ANTFARM_GAME_CENTER\",\"ignoreHoldLimit\":false,\"itemId\":\"" + spuId +
+                "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"subItemId\":\"" +
+                skuId +
+                "\"}]"
         return requestString("com.alipay.charitygamecenter.buyMallItem", data)
     }
 
@@ -1474,8 +1634,13 @@ object AntFarmRpcCall {
      * 装修金商城 - 分页查询家具列表
      */
     @JvmStatic
-    fun getFitmentItemList(activityId: String?, pageSize: Int, labelType: String?, startIndex: Int): String {
-        return try {
+    fun getFitmentItemList(
+        activityId: String?,
+        pageSize: Int,
+        labelType: String?,
+        startIndex: Int,
+    ): String =
+        try {
             val args = JSONObject()
             args.put("activityId", activityId)
             if (!labelType.isNullOrEmpty()) {
@@ -1490,7 +1655,6 @@ object AntFarmRpcCall {
         } catch (_: Exception) {
             ""
         }
-    }
 
     /**
      * 查询物品列表（IP抽抽乐）
@@ -1500,7 +1664,11 @@ object AntFarmRpcCall {
      * @param startIndex 起始索引
      */
     @JvmStatic
-    fun getItemList(activityId: String?, pageSize: Int, startIndex: Int): String {
+    fun getItemList(
+        activityId: String?,
+        pageSize: Int,
+        startIndex: Int,
+    ): String {
         val data = "[{\"activityId\":\"$activityId\",\"pageSize\":$pageSize,\"requestType\":\"RPC\",\"sceneCode\":\"ANTFARM_IP_DRAW_MALL\",\"source\":\"antfarm_villa\",\"startIndex\":$startIndex}]"
         return requestString("com.alipay.antiep.itemList", data)
     }
@@ -1510,12 +1678,13 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     fun getIpDrawMallItemDetail(spuId: String?): String {
-        val args = JSONObject().apply {
-            put("requestType", "RPC")
-            put("sceneCode", "ANTFARM_IP_DRAW_MALL")
-            put("source", "antfarm_villa")
-            put("spuId", spuId ?: "")
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "RPC")
+                put("sceneCode", "ANTFARM_IP_DRAW_MALL")
+                put("source", "antfarm_villa")
+                put("spuId", spuId ?: "")
+            }
         return requestString("com.alipay.antiep.itemDetail", "[$args]")
     }
 
@@ -1523,7 +1692,11 @@ object AntFarmRpcCall {
      * 兑换庄园家具（装修金商城）
      */
     @JvmStatic
-    fun exchangeBenefit(spuId: String?, skuId: String?, activityId: String?): String {
+    fun exchangeBenefit(
+        spuId: String?,
+        skuId: String?,
+        activityId: String?,
+    ): String {
         val requestId = generateRequestId()
         return try {
             val requestDataItem = JSONObject()
@@ -1561,7 +1734,7 @@ object AntFarmRpcCall {
         skuId: String?,
         activityId: String?,
         sceneCode: String?,
-        source: String?
+        source: String?,
     ): String {
         val requestId = generateRequestId()
         return try {
@@ -1603,9 +1776,15 @@ object AntFarmRpcCall {
      * @return
      */
     @JvmStatic
-    fun clickForGiftV2(foodType: String?, giftIndex: Int): String {
+    fun clickForGiftV2(
+        foodType: String?,
+        giftIndex: Int,
+    ): String {
         val data =
-            "[{\"foodType\":\"" + foodType + "\",\"giftIndex\":" + giftIndex + ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"ANTFOREST\",\"version\":\"" + VERSION + "\"}]"
+            "[{\"foodType\":\"" + foodType + "\",\"giftIndex\":" + giftIndex +
+                ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"ANTFOREST\",\"version\":\"" +
+                VERSION +
+                "\"}]"
         return requestString("com.alipay.antfarm.clickForGiftV2", data)
     }
 
@@ -1613,14 +1792,18 @@ object AntFarmRpcCall {
      * 装扮币商城 - 查询物品列表
      */
     @JvmStatic
-    fun getOrnamentItemList(pageSize: Int, startIndex: Int): String {
-        val args = JSONObject().apply {
-            put("pageSize", pageSize)
-            put("requestType", "RPC")
-            put("sceneCode", "ANTFARM_DRESSUP_MALL")
-            put("source", "H5")
-            put("startIndex", startIndex)
-        }
+    fun getOrnamentItemList(
+        pageSize: Int,
+        startIndex: Int,
+    ): String {
+        val args =
+            JSONObject().apply {
+                put("pageSize", pageSize)
+                put("requestType", "RPC")
+                put("sceneCode", "ANTFARM_DRESSUP_MALL")
+                put("source", "H5")
+                put("startIndex", startIndex)
+            }
         return requestString("com.alipay.antiep.itemList", "[$args]")
     }
 
@@ -1629,12 +1812,13 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     fun getOrnamentItemDetail(spuId: String?): String {
-        val args = JSONObject().apply {
-            put("requestType", "RPC")
-            put("sceneCode", "ANTFARM_DRESSUP_MALL")
-            put("source", "H5")
-            put("spuId", spuId ?: "")
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "RPC")
+                put("sceneCode", "ANTFARM_DRESSUP_MALL")
+                put("source", "H5")
+                put("spuId", spuId ?: "")
+            }
         return requestString("com.alipay.antiep.itemDetail", "[$args]")
     }
 
@@ -1642,17 +1826,21 @@ object AntFarmRpcCall {
      * 装扮币商城 - 兑换装扮
      */
     @JvmStatic
-    fun exchangeOrnamentBenefit(spuId: String?, skuId: String?): String {
+    fun exchangeOrnamentBenefit(
+        spuId: String?,
+        skuId: String?,
+    ): String {
         val requestId = generateRequestId()
-        val args = JSONObject().apply {
-            put("context", JSONObject())
-            put("requestId", requestId)
-            put("requestType", "RPC")
-            put("sceneCode", "ANTFARM_DRESSUP_MALL")
-            put("skuId", skuId ?: "")
-            put("source", "H5")
-            put("spuId", spuId ?: "")
-        }
+        val args =
+            JSONObject().apply {
+                put("context", JSONObject())
+                put("requestId", requestId)
+                put("requestType", "RPC")
+                put("sceneCode", "ANTFARM_DRESSUP_MALL")
+                put("skuId", skuId ?: "")
+                put("source", "H5")
+                put("spuId", spuId ?: "")
+            }
         return requestString("com.alipay.antcommonweal.exchange.h5.exchangeBenefit", "[$args]")
     }
 
@@ -1661,72 +1849,76 @@ object AntFarmRpcCall {
      */
     @JvmStatic
     fun syncOrnamentCoin(): String {
-        val args = JSONObject().apply {
-            put("requestType", "RPC")
-            put("sceneCode", "ANTFARM")
-            put("source", "H5")
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "RPC")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+            }
         return requestString("com.alipay.antfarm.syncOrnamentCoin", "[$args]")
     }
 
-
     @JvmStatic
     fun queryCompetitionEntranceInfo(): String {
-        val args = JSONObject().apply {
-            put("requestType", "NORMAL")
-            put("sceneCode", "ANTFARM")
-            put("source", "H5")
-            put("version", VERSION)
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+                put("version", VERSION)
+            }
         return RequestManager.requestString("com.alipay.antfarm.queryCompetitionEntranceInfo", "[$args]")
     }
 
     @JvmStatic
     fun enterDonationCompetitionRank(): String {
-        val args = JSONObject().apply {
-            put("requestType", "NORMAL")
-            put("sceneCode", "ANTFARM")
-            put("source", "H5")
-            put("version", VERSION)
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+                put("version", VERSION)
+            }
         return RequestManager.requestString("com.alipay.antfarm.enterDonationCompetitionRank", "[$args]")
     }
 
     @JvmStatic
     fun enterCompetitionAwardPage(): String {
-        val args = JSONObject().apply {
-            put("requestType", "NORMAL")
-            put("sceneCode", "ANTFARM")
-            put("source", "H5")
-            put("version", VERSION)
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+                put("version", VERSION)
+            }
         return RequestManager.requestString("com.alipay.antfarm.enterCompetitionAwardPage", "[$args]")
     }
 
     @JvmStatic
     fun receiveDonationLevelReward(rightsId: String?): String {
-        val args = JSONObject().apply {
-            put("requestType", "NORMAL")
-            put("rightsId", rightsId ?: "")
-            put("sceneCode", "ANTFARM")
-            put("source", "H5")
-            put("version", VERSION)
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "NORMAL")
+                put("rightsId", rightsId ?: "")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+                put("version", VERSION)
+            }
         return RequestManager.requestString("com.alipay.antfarm.receiveDonationLevelReward", "[$args]")
     }
 
     @JvmStatic
     fun receiveDonationCompetitionProgressAward(): String {
-        val args = JSONObject().apply {
-            put("requestType", "NORMAL")
-            put("sceneCode", "ANTFARM")
-            put("source", "H5")
-            put("version", VERSION)
-        }
+        val args =
+            JSONObject().apply {
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+                put("version", VERSION)
+            }
         return RequestManager.requestString(
             "com.alipay.antfarm.receiveDonationCompetitionProgressAward",
-            "[$args]"
+            "[$args]",
         )
     }
 }
-

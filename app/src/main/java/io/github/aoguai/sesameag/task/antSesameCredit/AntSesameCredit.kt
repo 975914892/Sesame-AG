@@ -12,12 +12,14 @@ import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
 import io.github.aoguai.sesameag.hook.HookReadyChecker
 import io.github.aoguai.sesameag.hook.internal.LocationHelper.requestLocationSuspend
 import io.github.aoguai.sesameag.hook.internal.SecurityBodyHelper.getSecurityBodyData
+import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.SelectModelField
 import io.github.aoguai.sesameag.task.ModelTask
+import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antOrchard.AntOrchardRpcCall.orchardSpreadManure
 import io.github.aoguai.sesameag.task.antOrchard.UrlUtil
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
@@ -1828,6 +1830,7 @@ class AntSesameCredit : ModelTask() {
 
     private suspend fun processAlchemyTaskListsUntilStable(): Int {
         val processedBlacklistTasks = mutableSetOf<String>()
+        val processedZhimaPigeonTasks = mutableSetOf<String>()
         var totalProcessedCount = 0
         val maxRound = 20
 
@@ -1848,15 +1851,23 @@ class AntSesameCredit : ModelTask() {
             }
 
             var roundProcessedCount = 0
-            roundProcessedCount += processAlchemyTasks(data.optJSONArray("toCompleteVOS"), processedBlacklistTasks)
+            roundProcessedCount += processAlchemyTasks(
+                data.optJSONArray("toCompleteVOS"),
+                processedBlacklistTasks,
+                processedZhimaPigeonTasks
+            )
 
             val dailyTaskVO = data.optJSONObject("dailyTaskListVO")
             if (dailyTaskVO != null) {
                 roundProcessedCount += processAlchemyTasks(
-                    dailyTaskVO.optJSONArray("waitJoinTaskVOS"), processedBlacklistTasks
+                    dailyTaskVO.optJSONArray("waitJoinTaskVOS"),
+                    processedBlacklistTasks,
+                    processedZhimaPigeonTasks
                 )
                 roundProcessedCount += processAlchemyTasks(
-                    dailyTaskVO.optJSONArray("waitCompleteTaskVOS"), processedBlacklistTasks
+                    dailyTaskVO.optJSONArray("waitCompleteTaskVOS"),
+                    processedBlacklistTasks,
+                    processedZhimaPigeonTasks
                 )
             }
 
@@ -1883,7 +1894,9 @@ class AntSesameCredit : ModelTask() {
      */
     @Throws(JSONException::class)
     private suspend fun processAlchemyTasks(
-        taskList: JSONArray?, processedBlacklistTasks: MutableSet<String>
+        taskList: JSONArray?,
+        processedBlacklistTasks: MutableSet<String>,
+        processedZhimaPigeonTasks: MutableSet<String>
     ): Int {
         if (taskList == null || taskList.length() == 0) return 0
 
@@ -1926,6 +1939,50 @@ class AntSesameCredit : ModelTask() {
                     Log.printStackTrace("$TAG.processAlchemyTasks.adTask", e)
                 }
                 // 广告任务不再走 templateId / recordId 这套逻辑
+                continue
+            }
+
+            // 大表鸽任务的完成动作在庄园内闭环，不能复用后续的 pushActivity。
+            if (templateId == AntFarm.ZHIMA_PIGEON_ALCHEMY_TEMPLATE_ID) {
+                if (!processedZhimaPigeonTasks.add(templateId)) {
+                    continue
+                }
+                val antFarm = Model.getModel(AntFarm::class.java)
+                if (antFarm?.isZhimaPigeonConfigured() != true) {
+                    Log.sesame("芝麻炼金任务: $title 需要庄园配置芝麻大表鸽，跳过")
+                    continue
+                }
+
+                if (task.optString("recordId").isBlank()) {
+                    val joinRes = AntSesameCreditRpcCall.joinSesameTask(templateId, sceneCode = "alchemy")
+                    val joinJo = JSONObject(joinRes)
+                    if (!ResChecker.checkRes(TAG, joinJo)) {
+                        Log.error(
+                            TAG,
+                            "芝麻大表鸽任务领取失败: ${joinJo.optString("resultView", joinRes)} raw=$joinRes"
+                        )
+                        continue
+                    }
+                    Log.sesame("芝麻炼金任务: $title 领取成功")
+                }
+
+                if (!reportSesameTaskFeedback(
+                        task,
+                        title,
+                        "芝麻炼金⚗️",
+                        sesameAlchemyTaskBlacklistModule,
+                        version = "alchemy"
+                    )
+                ) {
+                    continue
+                }
+
+                if (antFarm.activateZhimaPigeonFromAlchemyTask()) {
+                    Log.sesame("芝麻炼金任务: $title 已委派庄园大表鸽闭环")
+                    processedCount++
+                } else {
+                    Log.sesame("芝麻炼金任务: $title 庄园未就绪，保留后续重试")
+                }
                 continue
             }
 

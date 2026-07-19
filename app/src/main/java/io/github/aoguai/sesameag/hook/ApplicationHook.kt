@@ -44,6 +44,7 @@ import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
 import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit.clearIntervalLimit
 import io.github.aoguai.sesameag.hook.server.ModuleHttpServerManager.startIfNeeded
+import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.BaseModel.Companion.batteryPerm
 import io.github.aoguai.sesameag.model.BaseModel.Companion.checkInterval
 import io.github.aoguai.sesameag.model.BaseModel.Companion.debugMode
@@ -258,9 +259,12 @@ class ApplicationHook {
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
         pendingPersistentLaunchScheduleId = scheduleId
+        pendingPersistentLaunchBatch =
+            activityIntent.getBooleanExtra(SystemWakeScheduler.EXTRA_PLANNED_BATCH, false)
         scheduleId?.let { ScheduledTaskRouter.confirmTargetLaunch(it) }
         activityIntent.removeExtra(SystemWakeScheduler.EXTRA_PERSISTENT_ALARM_LAUNCH)
         activityIntent.removeExtra(SystemWakeScheduler.EXTRA_SCHEDULE_ID)
+        activityIntent.removeExtra(SystemWakeScheduler.EXTRA_PLANNED_BATCH)
         return true
     }
 
@@ -279,6 +283,13 @@ class ApplicationHook {
         if (isReadyForExec() && context != null) {
             record(TAG, "持久调度唤醒目标应用，检查到期任务: $source")
             val launchScheduleId = pendingPersistentLaunchScheduleId
+            if (pendingPersistentLaunchBatch) {
+                val dueCount = PersistentScheduleRegistry.fireDueSchedules(context, "$source:planned_batch")
+                record(TAG, "持久调度物理唤醒批量路由完成，计划数=$dueCount")
+                pendingPersistentLaunchBatch = false
+                pendingPersistentLaunchScheduleId = null
+                return
+            }
             if (!launchScheduleId.isNullOrBlank()) {
                 val schedule = PersistentScheduleRegistry.get(launchScheduleId)
                 if (schedule != null) {
@@ -590,6 +601,9 @@ class ApplicationHook {
 
         @Volatile
         private var pendingPersistentLaunchScheduleId: String? = null
+
+        @Volatile
+        private var pendingPersistentLaunchBatch: Boolean = false
 
         private fun ensureMainTask() {
             if (mainTask == null) {
@@ -916,15 +930,19 @@ class ApplicationHook {
                         }
 
                         val models = Model.modelArray.filterNotNull()
+                        // 保持唤醒是显式的耗电策略；默认关闭时不应隐式持有覆盖整轮任务的 10 分钟 CPU 锁。
+                        // 定时 Receiver 仍以短锁完成路由，任务需要持续后台执行时由用户开启 stayAwake。
                         val executionLease =
-                            appContext?.let { context ->
-                                WakeLockManager.acquire(
-                                    context = context,
-                                    timeoutMs = PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
-                                    source = "main_task",
-                                    scheduleId = activePersistentScheduleId,
-                                )
-                            }
+                            appContext
+                                ?.takeIf { BaseModel.stayAwake.value == true }
+                                ?.let { context ->
+                                    WakeLockManager.acquire(
+                                        context = context,
+                                        timeoutMs = PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
+                                        source = "main_task",
+                                        scheduleId = activePersistentScheduleId,
+                                    )
+                                }
                         try {
                             CoroutineTaskRunner(models).run(isFirst = true)
                             mainTaskRunCompletedAtMs = System.currentTimeMillis()

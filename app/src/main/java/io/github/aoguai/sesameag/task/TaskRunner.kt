@@ -217,16 +217,15 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         updateRunningTaskOrder(taskBatches.flatten().map { it.getName() })
         Log.record(TAG, "🔄 [第 $round/$totalRounds 轮] 开始，共 ${tasksToRun.size} 个任务，分 ${taskBatches.size} 个批次")
 
-        // 2. 按原顺序将各批次任务加入同一轮全局并发队列，再统一等待全部结束。
-        val deferreds = mutableListOf<Job>()
+        // 2. 按依赖顺序逐批执行；仅同批中明确独立的任务允许受全局信号量控制并行。
+        //    不能把后续批次提前入队，否则前置模块的状态刷新尚未落地就会放大 RPC 并发。
         for ((batchIndex, batchTasks) in taskBatches.withIndex()) {
             if (ApplicationHookConstants.isOffline()) {
                 Log.record(TAG, "⏸ [第 $round/$totalRounds 轮] 检测到离线模式，停止后续批次")
                 break
             }
-            deferreds += scheduleTaskBatch(round, totalRounds, batchIndex + 1, taskBatches.size, batchTasks)
+            scheduleTaskBatch(round, totalRounds, batchIndex + 1, taskBatches.size, batchTasks).joinAll()
         }
-        deferreds.joinAll()
 
         val roundTime = System.currentTimeMillis() - roundStartTime
         Log.record(TAG, "✅ [第 $round/$totalRounds 轮] 结束，耗时: ${roundTime}ms")

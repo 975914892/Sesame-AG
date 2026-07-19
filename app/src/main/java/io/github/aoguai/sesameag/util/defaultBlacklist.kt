@@ -82,8 +82,6 @@ private val sesameAlchemyDefaultBlacklist =
         "订阅炼金",
         "逛一逛蚂蚁阿福",
         "租游戏账号",
-        "芝麻大表鸽",
-        "hjwf_myzy_gyxj_erfang", // 大表鸽/雇佣小鸡模板别名，当前不纳入自动化
         "坚持签到",
         "玩游戏完成10个订单",
         "玩任意游戏30秒", // 缺少 promiseActivityExtCheck 闭环：ILLEGAL_ARGUMENT

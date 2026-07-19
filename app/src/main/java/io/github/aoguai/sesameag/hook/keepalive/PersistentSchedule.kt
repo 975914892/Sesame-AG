@@ -18,6 +18,47 @@ object PersistentScheduleState {
     const val EXPIRED = "EXPIRED"
 }
 
+/**
+ * Alarm precision is infrastructure metadata, never business payload.  Existing records omit the
+ * field, so their policy is derived from kind to preserve prior wake-up semantics on migration.
+ */
+object PersistentSchedulePrecisionPolicy {
+    const val FLEXIBLE_POLL = "FLEXIBLE_POLL"
+    const val USER_EXACT = "USER_EXACT"
+    const val HARD_DEADLINE_CHILD = "HARD_DEADLINE_CHILD"
+
+    fun defaultForKind(kind: String): String =
+        when (kind) {
+            PersistentScheduleKind.GLOBAL_POLL -> FLEXIBLE_POLL
+
+            PersistentScheduleKind.MODULE_CHILD -> HARD_DEADLINE_CHILD
+
+            PersistentScheduleKind.GLOBAL_WAKEUP,
+            PersistentScheduleKind.GLOBAL_PREWAKEUP,
+            -> USER_EXACT
+
+            else -> USER_EXACT
+        }
+
+    fun normalize(
+        policy: String?,
+        kind: String,
+    ): String =
+        when (policy) {
+            FLEXIBLE_POLL,
+            USER_EXACT,
+            HARD_DEADLINE_CHILD,
+            -> policy
+
+            else -> defaultForKind(kind)
+        }
+
+    fun isStrict(
+        policy: String?,
+        kind: String,
+    ): Boolean = normalize(policy, kind) != FLEXIBLE_POLL
+}
+
 enum class PersistentReconcileMode {
     RESCHEDULE_ONLY,
     FIRE_ALARM_DUE,
@@ -29,6 +70,7 @@ data class PersistentSchedule(
     val kind: String = "",
     val triggerAtMs: Long = 0L,
     val toleranceMs: Long = PersistentScheduleDefaults.DEFAULT_TOLERANCE_MS,
+    val precisionPolicy: String = "",
     val dedupeKey: String = "",
     val payloadJson: String = "{}",
     val ownerUserId: String? = null,
@@ -40,6 +82,8 @@ data class PersistentSchedule(
     val lastFireAtMs: Long = 0L,
     val lastError: String? = null,
 ) {
+    fun effectivePrecisionPolicy(): String = PersistentSchedulePrecisionPolicy.normalize(precisionPolicy, kind)
+
     fun withScheduleState(
         state: String,
         now: Long = System.currentTimeMillis(),
