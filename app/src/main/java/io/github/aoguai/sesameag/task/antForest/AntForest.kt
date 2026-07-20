@@ -6050,7 +6050,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         syncEnergyRainGameCenterResponse("queryOptionalPlay") {
             AntForestRpcCall.queryOptionalPlay(currentForestGameCenterRecentAppRecords())
         }?.let { payload ->
-            triggerTasks = extractEnergyRainGameCenterTriggerTasks(payload, request.appId)
+            triggerTasks = extractEnergyRainGameCenterTriggerTasks(
+                payload,
+                request.appId,
+                request.sceneCode
+            )
             appendEnergyRainGameCenterDeliveryTasks("queryOptionalPlay", payload, request.appId, deliveryTasks)
         }
         return EnergyRainGameCenterContext(
@@ -6061,13 +6065,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
     private fun extractEnergyRainGameCenterTriggerTasks(
         payload: JSONObject,
-        requestAppId: String?
+        requestAppId: String?,
+        sceneCode: String,
     ): List<ForestLeyuanOptionalTask> {
         if (requestAppId.isNullOrBlank()) {
             return emptyList()
         }
         return parseForestGameCenterOptionalTasks(payload).filter { task ->
-            task.sceneCode == FOREST_LEYUAN_DAILY_TASK_SCENE_CODE &&
+            task.sceneCode == sceneCode &&
                 task.status in FOREST_LEYUAN_PROGRESS_PENDING_STATUSES &&
                 task.appId == requestAppId
         }
@@ -6789,11 +6794,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun isNormalPatrolAnimal(animal: JSONObject): Boolean {
-        if (animal.optInt("id", -1) <= 0) {
-            return false
-        }
-        val status = animal.optString("status", "ONLINE")
-        if (status.isNotBlank() && !status.equals("ONLINE", true)) {
+        if (animal.optInt("id", -1) <= 0 || !animal.optString("status").equals("ONLINE", true)) {
             return false
         }
         if (animal.optBoolean("limited", false) ||
@@ -6806,7 +6807,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         if (extInfo != null &&
             (extInfo.optBoolean("limited", false) ||
                 extInfo.optBoolean("limit", false) ||
-                extInfo.optBoolean("special", false))
+                extInfo.optBoolean("special", false) ||
+                extInfo.optString("shortDesc").contains("限定"))
         ) {
             return false
         }
@@ -6814,15 +6816,24 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun normalPatrolAnimalIds(patrolConfig: JSONObject): Set<Int> {
+        val patrolId = patrolConfig.optInt("patrolId", 0)
         val animals = patrolConfig.optJSONArray("animals")
         if (animals == null || animals.length() == 0) {
-            Log.forest("巡护地图缺少动物列表[patrolId=${patrolConfig.optInt("patrolId", 0)}]，跳过图鉴优先判断")
+            Log.forest("巡护地图缺少动物列表[patrolId=$patrolId]，不以图鉴缺片优先")
             return emptySet()
         }
         val animalIds = mutableSetOf<Int>()
         for (i in 0 until animals.length()) {
             val animal = animals.optJSONObject(i) ?: continue
             if (!isNormalPatrolAnimal(animal)) {
+                val shortDesc = animal.optJSONObject("extInfo")?.optString("shortDesc").orEmpty()
+                if (shortDesc.contains("限定")) {
+                    Log.forest(
+                        "巡护图鉴排除活动动物[patrolId=$patrolId," +
+                            "animalId=${animal.optInt("id", -1)}," +
+                            "name=${animal.optString("name", "未知")},shortDesc=$shortDesc]"
+                    )
+                }
                 continue
             }
             val animalId = animal.optInt("id", -1)
@@ -6831,7 +6842,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
         }
         if (animalIds.isEmpty()) {
-            Log.forest("巡护地图无普通在线动物[patrolId=${patrolConfig.optInt("patrolId", 0)}]，跳过图鉴优先判断")
+            Log.forest("巡护地图无可证明的常驻在线动物[patrolId=$patrolId]，不以图鉴缺片优先")
         }
         return animalIds
     }
@@ -6870,12 +6881,18 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 for (pieceIndex in 0 until pieces.length()) {
                     val piece = pieces.optJSONObject(pieceIndex) ?: continue
                     if (piece.optInt("holdsNum", 0) <= 0) {
+                        Log.forest(
+                            "巡护图鉴确认可推进缺片[${record.reserveName}/${record.patrolId}/" +
+                                "${animal.optString("name", animalId.toString())}]"
+                        )
                         return true
                     }
                 }
             }
             if (!matched) {
-                Log.forest("巡护图鉴未返回当前保护地普通动物碎片[${record.reserveName}/${record.patrolId}]")
+                Log.forest("巡护图鉴未返回当前保护地常驻在线动物碎片[${record.reserveName}/${record.patrolId}]，不以图鉴缺片优先")
+            } else {
+                Log.forest("巡护图鉴无可推进的常驻动物缺片[${record.reserveName}/${record.patrolId}]")
             }
             false
         } catch (t: Throwable) {
@@ -7144,10 +7161,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
     }
 
-    private fun selectBestAnimalProp(animalProps: JSONArray): JSONObject? {
-        var bestAnimalProp: JSONObject? = null
-        var bestHoldsNum = 0
-        var bestEstimatedEnergy = 0
+    private data class AnimalPropSelection(
+        val animalProp: JSONObject,
+        val holdsNum: Int,
+        val estimatedEnergy: Int,
+    )
+
+    private fun selectBestAnimalProp(animalProps: JSONArray): AnimalPropSelection? {
+        var bestSelection: AnimalPropSelection? = null
         for (i in 0 until animalProps.length()) {
             val animalProp = animalProps.optJSONObject(i) ?: continue
             val holdsNum = getAnimalPropHoldsNum(animalProp)
@@ -7155,16 +7176,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 continue
             }
             val estimatedEnergy = estimateAnimalPropRobEnergy(animalProp)
-            if (bestAnimalProp == null ||
-                estimatedEnergy > bestEstimatedEnergy ||
-                estimatedEnergy == bestEstimatedEnergy && holdsNum > bestHoldsNum
+            val currentBest = bestSelection
+            if (currentBest == null ||
+                holdsNum > currentBest.holdsNum ||
+                holdsNum == currentBest.holdsNum && estimatedEnergy > currentBest.estimatedEnergy
             ) {
-                bestAnimalProp = animalProp
-                bestHoldsNum = holdsNum
-                bestEstimatedEnergy = estimatedEnergy
+                bestSelection = AnimalPropSelection(animalProp, holdsNum, estimatedEnergy)
             }
         }
-        return bestAnimalProp
+        return bestSelection
     }
 
     private fun getAnimalPropHoldsNum(animalProp: JSONObject): Int {
@@ -7215,18 +7235,17 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     /**
      * 派遣伙伴进行巡护
      *
-     * @param animalProp 选择的动物属性
+     * @param selection 按库存优先、同库存收益优先选出的动物属性。
      */
-    private fun consumeAnimalProp(animalProp: JSONObject?) {
-        if (animalProp == null) return  // 如果没有可派遣的伙伴，则返回
+    private fun consumeAnimalProp(selection: AnimalPropSelection?) {
+        if (selection == null) return  // 如果没有可派遣的伙伴，则返回
 
         try {
+            val animalProp = selection.animalProp
             // 获取伙伴的属性信息
             val propGroup = animalProp.getJSONObject("main").getString("propGroup")
             val propType = animalProp.getJSONObject("main").getString("propType")
             val name = animalProp.getJSONObject("partner").getString("name")
-            val holdsNum = getAnimalPropHoldsNum(animalProp)
-            val estimatedEnergy = estimateAnimalPropRobEnergy(animalProp)
             // 调用API进行伙伴派遣
             val jo = JSONObject(
                 AntForestRpcCall.consumeProp(
@@ -7238,7 +7257,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 )
             )
             if (ResChecker.checkRes(TAG, "巡护派遣失败:", jo)) {
-                Log.forest("巡护派遣🐆[$name]#持有${holdsNum}个，预计能量${estimatedEnergy}g")
+                Log.forest(
+                    "巡护派遣🐆[$name]#持有${selection.holdsNum}个，" +
+                        "预计能量${selection.estimatedEnergy}g。"
+                )
             } else {
                 Log.forest(jo.getString("resultDesc"))
             }

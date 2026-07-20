@@ -24,21 +24,35 @@ jobs:
               return;
             }
 
-            if (
-              context.eventName === 'issue_comment' &&
-              context.payload.comment?.user?.type === 'Bot'
-            ) {
-              core.info('Skipping bot comment.');
-              return;
-            }
-
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const issueNumber = issue.number;
             const issueBody = issue.body || '';
             const author = issue.user?.login || 'there';
+            const isIssueCommentEvent = context.eventName === 'issue_comment';
+            const commentAuthor = context.payload.comment?.user?.login || '';
             const openedNow =
               context.eventName === 'issues' && context.payload.action === 'opened';
+
+            if (context.eventName === 'issues' && issue.state !== 'open') {
+              core.info('Skipping closed issue event.');
+              return;
+            }
+
+            if (isIssueCommentEvent) {
+              if (context.payload.comment?.user?.type === 'Bot') {
+                core.info('Skipping bot comment.');
+                return;
+              }
+              if (issue.state !== 'open') {
+                core.info('Skipping comment on closed issue.');
+                return;
+              }
+              if (commentAuthor !== author) {
+                core.info('Skipping comment from non-author.');
+                return;
+              }
+            }
 
             const labels = (issue.labels || []).map((label) => label.name);
             const lowerLabels = new Set(labels.map((label) => label.toLowerCase()));
@@ -75,6 +89,16 @@ jobs:
                 'i'
               );
               return markdown.match(pattern)?.[1]?.trim() || '';
+            }
+
+            function extractFirstSection(markdown, headings) {
+              for (const heading of headings) {
+                const value = extractSection(markdown, heading);
+                if (value) {
+                  return value;
+                }
+              }
+              return '';
             }
 
             function parseScope(markdown) {
@@ -151,6 +175,7 @@ jobs:
               });
             }
 
+            const hasScopeField = /(?:^|\n)###\s+反馈对象\s*\n/i.test(issueBody);
             const scope = parseScope(issueBody);
             if (scope) {
               await addLabel(scope);
@@ -162,16 +187,19 @@ jobs:
             }
 
             const missing = [];
-            if (!scope) {
+            if (hasScopeField && !scope) {
               missing.push('反馈对象（请选择“模块本体”或“目标应用”）');
             }
 
             if (isBug) {
               let hasErrorLogs = attachmentLinks(
-                extractSection(issueBody, '错误日志附件')
+                extractFirstSection(issueBody, ['错误日志附件', '错误日志附件（必填）'])
               ).length > 0;
               let hasCompleteAndModuleLogs = attachmentLinks(
-                extractSection(issueBody, '完整日志及相关模块日志附件')
+                extractFirstSection(issueBody, [
+                  '完整日志及相关模块日志附件',
+                  '全部日志 / 对应模块日志附件（必填）'
+                ])
               ).length > 0;
 
               const comments = await github.paginate(github.rest.issues.listComments, {
