@@ -26,7 +26,8 @@ import kotlin.math.ceil
  */
 
 private const val DONATION_COMPETITION_FINISHED_FLAG = "AntFarm::DonationCompetitionFinished"
-private const val DONATION_COMPETITION_UNAVAILABLE_RESULT_CODE = "DONATION_COMPETITION01"
+private val DONATION_COMPETITION_UNAVAILABLE_RESULT_CODES =
+    setOf("DONATION_COMPETITION01", "DONATION_COMPETITION02")
 private const val DONATION_COMPETITION_FIRST_SEEN_KEY_PREFIX = "antFarmDonationCompetitionStableFirstSeen::"
 private const val DONATION_COMPETITION_SETTLE_HOUR = 20
 private const val TOP_LEVEL_STAR_SENTINEL = 10000
@@ -94,7 +95,7 @@ private fun putDonationCompetitionFirstSeen(
 private fun isDonationCompetitionUnavailableToday(): Boolean = Status.hasFlagToday(StatusFlags.FLAG_FARM_DONATION_COMPETITION_UNAVAILABLE)
 
 private fun isDonationCompetitionUnavailableResponse(response: JSONObject): Boolean =
-    response.optString("resultCode") == DONATION_COMPETITION_UNAVAILABLE_RESULT_CODE
+    response.optString("resultCode") in DONATION_COMPETITION_UNAVAILABLE_RESULT_CODES
 
 private fun markDonationCompetitionUnavailableToday(
     rpc: String,
@@ -102,11 +103,12 @@ private fun markDonationCompetitionUnavailableToday(
 ) {
     if (isDonationCompetitionUnavailableToday()) return
 
-    // 此码未携带可信赛季结束时间，只能止损当天，不能写入跨赛季完成态。
+    // 入口关闭和明确不可用码都只止损当天，不能写入跨赛季完成态。
     Status.setFlagToday(StatusFlags.FLAG_FARM_DONATION_COMPETITION_UNAVAILABLE)
+    val code = response.optString("resultCode").ifBlank { "FUNCTION_SWITCH_OFF" }
     Log.record(
         TAG,
-        "捐蛋排位赛活动不可用，今日停止：rpc=$rpc, code=$DONATION_COMPETITION_UNAVAILABLE_RESULT_CODE, raw=$response",
+        "捐蛋排位赛活动不可用，今日停止：rpc=$rpc, code=$code, raw=$response",
     )
 }
 
@@ -121,10 +123,35 @@ private fun stopDonationCompetitionIfUnavailable(
     return true
 }
 
+private fun AntFarm.isDonationCompetitionEntryOpen(): Boolean {
+    val response =
+        try {
+            JSONObject(AntFarmRpcCall.queryCompetitionEntranceInfo())
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "查询捐蛋排位赛入口失败", t)
+            return false
+        }
+    if (stopDonationCompetitionIfUnavailable("queryCompetitionEntranceInfo", response)) {
+        return false
+    }
+    if (!ResChecker.checkRes(TAG, response)) {
+        Log.record(TAG, "查询捐蛋排位赛入口失败，保留后续重试：$response")
+        return false
+    }
+    if (response.has("functionSwitch") && !response.optBoolean("functionSwitch")) {
+        markDonationCompetitionUnavailableToday("queryCompetitionEntranceInfo", response)
+        return false
+    }
+    return true
+}
+
 internal fun AntFarm.handleDonationCompetition() {
     if (donationCompetition?.value != true) return
 
     if (hasDonationCompetitionFinished() || isDonationCompetitionUnavailableToday()) {
+        return
+    }
+    if (!isDonationCompetitionEntryOpen()) {
         return
     }
 

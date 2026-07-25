@@ -17,6 +17,7 @@ import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.TaskCommon
 import io.github.aoguai.sesameag.task.TaskStatus
 import io.github.aoguai.sesameag.task.antForest.AntForest
+import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
@@ -624,23 +625,7 @@ class AntOcean : ModelTask() {
         Log.ocean("神奇海洋🌊帮助清理次数已达上限：${extractOceanResultDesc(jo)}，已记录为当日限制，本轮剩余好友清理全部跳过")
     }
 
-    private fun isSelfCleanTask(
-        taskType: String,
-        taskTitle: String,
-    ): Boolean {
-        val normalizedTaskType = taskType.uppercase()
-        return normalizedTaskType == "CLEAN_RUBBISH_2_EVERY_DAY" ||
-            (normalizedTaskType.contains("SELF") && normalizedTaskType.contains("CLEAN")) ||
-            (normalizedTaskType.contains("OWN") && normalizedTaskType.contains("CLEAN")) ||
-            (
-                normalizedTaskType.contains("CLEAN_RUBBISH") &&
-                    !normalizedTaskType.contains("FRIEND") &&
-                    !normalizedTaskType.contains("HELP")
-            ) ||
-            taskTitle.contains("清理自己") ||
-            taskTitle.contains("自己海域") ||
-            taskTitle.contains("自己垃圾")
-    }
+    private fun isSelfCleanTask(taskType: String): Boolean = taskType == "CLEAN_RUBBISH_2_EVERY_DAY"
 
     private fun isHelpFriendCleanTask(
         taskType: String,
@@ -673,7 +658,7 @@ class AntOcean : ModelTask() {
     ): Boolean =
         !isHelpFriendCleanTask(taskType, taskTitle) &&
             (
-                isSelfCleanTask(taskType, taskTitle) ||
+                isSelfCleanTask(taskType) ||
                     taskType.startsWith("CLEAN_") ||
                     taskTitle.contains("清理好友") ||
                     taskTitle.contains("清理海域")
@@ -1176,6 +1161,11 @@ class AntOcean : ModelTask() {
             while (remainTouchChance > 0 && touchCount < maxAttempts) {
                 val response = AntOceanRpcCall.touchAiFish()
                 val result = JsonUtil.parseJSONObjectOrNull(response) ?: break
+                if (result.optString("resultCode") == "USER_CAPTURED") {
+                    Log.ocean("海洋摸鱼🐟目标已被其他用户抢先处理，刷新摸鱼状态")
+                    queryAiFishHomepage(logSummary = true)
+                    break
+                }
                 if (!ResChecker.checkRes(TAG, "海洋摸鱼执行失败:", result)) {
                     Log.ocean("海洋摸鱼🐟摸鱼失败：${extractOceanResultDesc(result)}")
                     break
@@ -2011,7 +2001,7 @@ class AntOcean : ModelTask() {
         try {
             val adapter = OceanTaskFlowAdapter()
             val result = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
-            if (!result.interrupted && adapter.canMarkTasksDone()) {
+            if (result.completed && !result.interrupted && adapter.canMarkTasksDone()) {
                 Status.setFlagToday(StatusFlags.FLAG_ANTOCEAN_TASKS_DONE)
                 oceanTasksDoneInvalidatedThisRun = false
                 Log.ocean("海洋任务🌊今日已确认完成")
@@ -2132,12 +2122,8 @@ class AntOcean : ModelTask() {
                     TaskFlowPhase.READY_TO_COMPLETE
                 }
 
-                item.status == TaskStatus.TODO.name && isSelfCleanTask(item.type, item.title) -> {
-                    if (canRetrySelfOceanCleanTask()) {
-                        TaskFlowPhase.READY_TO_COMPLETE
-                    } else {
-                        TaskFlowPhase.BUSINESS_ACTION
-                    }
+                item.status == TaskStatus.TODO.name && isSelfCleanTask(item.type) -> {
+                    TaskFlowPhase.READY_TO_COMPLETE
                 }
 
                 item.status == TaskStatus.TODO.name && isOceanActionTask(item.type, item.title) -> {
@@ -2235,15 +2221,18 @@ class AntOcean : ModelTask() {
                 return TaskFlowActionResult.success(progressChanged = false)
             }
 
-            if (isSelfCleanTask(item.type, item.title)) {
+            if (isSelfCleanTask(item.type)) {
                 return if (retrySelfOceanCleanIfNeeded(item.title)) {
                     TaskFlowActionResult.success()
                 } else {
-                    logOceanTaskOnce(
-                        "海洋任务🌊[${item.title}]自清理业务动作当前无可推进垃圾，" +
-                            oceanTaskActionDetail(item, "retrySelfOceanCleanIfNeeded"),
+                    val detail = oceanTaskActionDetail(item, "retrySelfOceanCleanIfNeeded")
+                    logOceanTaskOnce("海洋任务🌊[${item.title}]自清理业务动作当前无可推进垃圾，$detail")
+                    TaskFlowActionResult.defer(
+                        deferredReason = DeferredReason.NO_PROGRESS_COOLDOWN,
+                        message = "自清理当前无可推进垃圾",
+                        rpc = "AntOcean.retrySelfOceanCleanIfNeeded",
+                        detail = detail,
                     )
-                    TaskFlowActionResult.success(progressChanged = false)
                 }
             }
 
@@ -2315,27 +2304,8 @@ class AntOcean : ModelTask() {
                 if (phase == TaskFlowPhase.UNKNOWN) {
                     return false
                 }
-                if (phase == TaskFlowPhase.TERMINAL || phase == TaskFlowPhase.BUSINESS_ACTION) {
-                    continue
-                }
-                if (phase == TaskFlowPhase.REWARD_READY) {
+                if (phase != TaskFlowPhase.TERMINAL) {
                     return false
-                }
-                if (super<TaskFlowAdapter>.isBlacklisted(item)) {
-                    continue
-                }
-                when (phase) {
-                    TaskFlowPhase.READY_TO_COMPLETE,
-                    TaskFlowPhase.SIGNUP_REQUIRED,
-                    TaskFlowPhase.SIGNUP_COMPLETE,
-                    TaskFlowPhase.UNSUPPORTED,
-                    -> return false
-
-                    TaskFlowPhase.TERMINAL,
-                    TaskFlowPhase.BUSINESS_ACTION,
-                    TaskFlowPhase.REWARD_READY,
-                    TaskFlowPhase.UNKNOWN,
-                    -> Unit
                 }
             }
             return true

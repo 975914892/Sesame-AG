@@ -15,6 +15,7 @@ internal fun AntSports.runBattleForFriendsWorkflow() {
     if (battleForFriends.value != true) {
         return
     }
+    buyBackSoldSelfMember()
     if (trainFriend.value == true) {
         queryTrainItem()
     }

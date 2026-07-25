@@ -110,6 +110,7 @@ private val orchardDefaultBlacklist =
         "ZHUFANG3IN1", // 添加农场小组件并访问
         "70000|逛好物最高得1500肥料", // XLight广告流量风控，缺少稳定自动闭环
         "12173", // 买好货
+        "44797|逛助农好货得肥料", // finishTask 返回 400000001：任务全局配置不存在
         "TOUTIAO|逛一逛今日头条", // 精确匹配旧今日头条任务，避免误伤趣头条任务
         "ORCHARD_NORMAL_ZADAN10_3000", // 砸蛋10次得3000肥料
         "ORCHARD_NORMAL_JIUYIHUISHOU_VISIT", // 旧衣服回收
@@ -117,7 +118,7 @@ private val orchardDefaultBlacklist =
         "ORCHARD_NORMAL_TAB3_ZHIFA", // 看视频领肥料
         "ORCHARD_NORMAL_AQ_XIAZAI", // 下载蚂蚁阿福看健康攻略
         "ORCHARD_NORMAL_NCLY_GLY", // 新春限时试玩福利
-        "ORCHARD_NCLY_GAME_TASK", // 试玩农场乐园火爆新游
+        "ORCHARD_NCLY_GAME_IAA", // 合不过我吧通过1关：finishTask 返回 400000040，不支持rpc调用
         "ncflzhrw51", // 去游戏中心抢金条：不支持rpc调用
         "babafarm_cjmk_xdujdd15", // 去游戏中心玩游戏：不支持rpc调用
         "LINGHUOTIAOKONG", // 逛一逛新浪微博
@@ -135,14 +136,12 @@ private val orchardDefaultBlacklist =
         "ORCHARD_NORMAL_BAIDU_DUO", // 去百度浏览资讯
         "ORCHARD_NORMAL_XIANXIAZHIFU100", // 到店支付1笔得100肥
         "ANTFARM_ORCHARD_P2P_SHARER", // 分享给好友
-        "ANTFARM_ORCHARD_NORMAL_GONGGEFANGWEN", // 从支付宝首页访问农场：400000040，不支持rpc调用
         "ORCHARD_TEAM_SPREAD_PERSON", // 合种/帮帮种多人施肥
         "ORCHARD_HELP_TEAM_MEMBER_COUNT", // 帮帮种组队
         "NTFARM_ORCHARD_NORMAL_FQHB_NEW1", // 去天猫攒福气兑红包
         "龙迹之城击杀10只怪物",
         "寻道大千砍树20次",
         "点击立得，最高3500肥",
-        "试玩农场乐园火爆新游",
         "分享给好友",
         "合种/帮帮种多人施肥",
         "帮帮种组队",
@@ -165,7 +164,6 @@ private val farmDefaultBlacklist =
         "OFFLINE_PAY", // 到店付款
         "ONLINE_PAY", // 线上支付
         "HUABEI_MAP_180", // 用花呗完成一笔支付
-        "wdhysj_30srw2026|试玩庄园火爆小游戏", // 最新庄园游戏任务，先默认跳过避免持续触发风控
         "【限时】玩游戏得新机会", // 庄园装扮抽抽乐等活动中可能出现
         "限时玩游戏得新机会", // 同上（部分任务标题不带【】）
         "茉莉雪梨卷任务",
@@ -179,6 +177,10 @@ private val oceanDefaultBlacklist =
     setOf(
         // 神奇海洋
         "玩一玩生存33天",
+        "SYH_XCHY_shichang202607", // 2026-07-23 finishTask 返回 400000040，无稳定完成RPC闭环
+        "SYH_XCMY_shichang202607", // 2026-07-23 aiFishFinishTask 返回 400000040，无稳定完成RPC闭环
+        "SYH_XCMY_zhuanhua202607", // 2026-07-23 aiFishFinishTask 返回 400000040，无稳定完成RPC闭环
+        "XWDSH_QDRW_HAIYANG_new", // 玩一玩向往的生活：finishTask 返回 400000040，不支持rpc调用
         "AIFISH_ZHUANHUA_XJSKP|玩一玩向僵尸开炮", // finishTask 返回 400000040，不支持rpc调用
         "AIFISH_ZHUANHUA_BWXRK", // finishTask 返回 400000040，不支持rpc调用，缺少稳定完成闭环
         "AIFISH_ZHUANHUA_SGBHSD_new", // finishTask 返回 400000040，不支持rpc调用，缺少稳定完成闭环
@@ -257,6 +259,8 @@ private val forestDefaultBlacklist =
         "FOREST_ACTIVITY_DRAW_SHARE", // 森林抽抽乐活动分享任务
         "FOREST_ACTIVITY_DRAW_SGBHSD", // 森林抽抽乐游戏任务
         "FOREST_ACTIVITY_DRAW_XS", // 森林抽抽乐玩游戏得新机会
+        "FOREST_ACTIVITY_DRAW_LHY_ZHWUFU", // 玩游戏得2次机会：finishTaskopengreen 返回 400000040
+        "FOREST_ACTIVITY_DRAW_LJZC_ZHWUFU", // 玩游戏得2次机会：finishTaskopengreen 返回 400000040
         "MHXCZ_RYCZ_HDCCL|玩梦幻消除战充值任意金额", // 森林抽抽乐充值任务，缺少稳定完成RPC闭环
         "FOREST_ACTIVITY_DRAW_TBQD|去淘宝签到领红包", // 森林抽抽乐淘宝外跳任务，缺少稳定完成RPC闭环
         "RYCZ", // 森林抽抽乐充值类任务前缀，缺少稳定完成RPC闭环

@@ -5129,6 +5129,7 @@ class AntMember : ModelTask() {
             var p2eTaskResult = DailyTaskProcessResult.UNKNOWN_FAILURE
             var p2eSignInResult = DailyTaskProcessResult.UNKNOWN_FAILURE
             var p2eDrawGoldResult = DailyTaskProcessResult.UNKNOWN_FAILURE
+            var p2eCashExchangeResult = DailyTaskProcessResult.UNKNOWN_FAILURE
 
             // 1. 查询签到状态并尝试签到
             try {
@@ -5273,13 +5274,21 @@ class AntMember : ModelTask() {
                 Log.printStackTrace(TAG, "enableGameCenter.p2eDrawGold err:", th)
             }
 
+            // 7. 仅在服务端返回当前选中的固定10元档时自动提现。
+            try {
+                p2eCashExchangeResult = doGameCenterP2eCashExchange()
+            } catch (th: Throwable) {
+                Log.printStackTrace(TAG, "enableGameCenter.p2eCashExchange err:", th)
+            }
+
             if (listOf(
                     signInResult,
                     platformTaskResult,
                     pointBallResult,
                     p2eTaskResult,
                     p2eSignInResult,
-                    p2eDrawGoldResult
+                    p2eDrawGoldResult,
+                    p2eCashExchangeResult
                 ).all { it == DailyTaskProcessResult.HANDLED }
             ) {
                 setFlagToday(StatusFlags.FLAG_ANTMEMBER_GAME_CENTER_DONE)
@@ -6470,6 +6479,125 @@ class AntMember : ModelTask() {
             "游戏中心🎮[赚现金抽金币回查未确认]#status=$refreshedStatus"
         )
         return DailyTaskProcessResult.UNKNOWN_FAILURE
+    }
+
+    private fun doGameCenterP2eCashExchange(): DailyTaskProcessResult {
+        val homeResponse = AntMemberRpcCall.queryGameCenterP2eHomePage(AntMemberRpcCall.GAME_CENTER_SOURCE)
+        val home = JSONObject(homeResponse)
+        if (!ResChecker.checkRes(TAG, home)) {
+            return logGameCenterP2eFailure("赚现金提现前状态查询", home, homeResponse)
+        }
+        val homeData = home.optJSONObject("data") ?: return DailyTaskProcessResult.HANDLED
+        if (homeData.optBoolean("hitRiskControl", false) || homeData.optBoolean("hitFourControlLimit", false)) {
+            Log.member("游戏中心🎮[赚现金提现]#服务端业务受限，本轮不提交")
+            return DailyTaskProcessResult.HANDLED
+        }
+
+        val prizePageResponse = AntMemberRpcCall.queryGameCenterP2eGoldExchangePrizePage()
+        val prizePage = JSONObject(prizePageResponse)
+        if (!ResChecker.checkRes(TAG, prizePage)) {
+            return logGameCenterP2eFailure("赚现金提现档位查询", prizePage, prizePageResponse)
+        }
+        val prizePageData = prizePage.optJSONObject("data") ?: run {
+            Log.member("游戏中心🎮[赚现金提现]#服务端未返回现金档位")
+            return DailyTaskProcessResult.HANDLED
+        }
+        val cashModule = prizePageData.optJSONObject("cashExchangeModule") ?: run {
+            Log.member("游戏中心🎮[赚现金提现]#当前无现金兑换模块")
+            return DailyTaskProcessResult.HANDLED
+        }
+        val targetPrize = findSelectedFixedTenYuanPrize(cashModule.optJSONArray("prizes")) ?: run {
+            Log.member("游戏中心🎮[赚现金提现]#当前无服务端选中的固定10元档")
+            return DailyTaskProcessResult.HANDLED
+        }
+        if (targetPrize.optString("prizeStatus") != "CAN_EXG") {
+            Log.member("游戏中心🎮[赚现金提现]#固定10元档当前状态=${targetPrize.optString("prizeStatus").ifBlank { "UNKNOWN" }}")
+            return DailyTaskProcessResult.HANDLED
+        }
+
+        val goldBalance = prizePageData.optJSONObject("assetModuleVO")?.optString("goldAmount")?.toLongOrNull()
+        val consumeGold = targetPrize.optJSONObject("confirmPopup")?.optString("consumeGold")?.toLongOrNull()
+        if (goldBalance == null || consumeGold == null) {
+            Log.error("$TAG.enableGameCenter.p2eCashExchange", "游戏中心🎮[赚现金提现]#服务端余额或门槛字段缺失")
+            return DailyTaskProcessResult.UNKNOWN_FAILURE
+        }
+        if (goldBalance < consumeGold) {
+            Log.member("游戏中心🎮[赚现金提现]#金币未达门槛[当前=$goldBalance,需要=$consumeGold]")
+            return DailyTaskProcessResult.HANDLED
+        }
+        if (!hasGoldExchangeSubmitContract(targetPrize)) {
+            Log.error("$TAG.enableGameCenter.p2eCashExchange", "游戏中心🎮[赚现金提现]#服务端缺少动态提交参数")
+            return DailyTaskProcessResult.UNKNOWN_FAILURE
+        }
+
+        val exchangeResponse = AntMemberRpcCall.doGameCenterP2eGoldExchangePrize(targetPrize)
+        val exchangeResult = JSONObject(exchangeResponse)
+        val exchangeData = exchangeResult.optJSONObject("data")
+        if (!ResChecker.checkRes(TAG, exchangeResult) || exchangeData?.optString("exgStatus") != "SUCCESS") {
+            if (exchangeResult.optBoolean("retryable", false)) {
+                Log.error("$TAG.enableGameCenter.p2eCashExchange", "游戏中心🎮[赚现金提现]#可重试失败:${buildGameCenterRpcMessage(exchangeResult, exchangeResponse)}")
+                return DailyTaskProcessResult.RETRYABLE_FAILURE
+            }
+            Log.error("$TAG.enableGameCenter.p2eCashExchange", "游戏中心🎮[赚现金提现]#提交未确认:${buildGameCenterRpcMessage(exchangeResult, exchangeResponse)}")
+            return DailyTaskProcessResult.UNKNOWN_FAILURE
+        }
+
+        val amount = exchangeData.optString("amount").ifBlank { targetPrize.optString("prizeAmount") }
+        val arrivalTips = exchangeData.optString("arrivalTips")
+        Log.member("游戏中心🎮[赚现金提现提交成功]#${amount}元${if (arrivalTips.isBlank()) "" else "#$arrivalTips"}")
+
+        val refreshedResponse = AntMemberRpcCall.queryGameCenterP2eGoldExchangePrizePage()
+        val refreshedPage = JSONObject(refreshedResponse)
+        if (!ResChecker.checkRes(TAG, refreshedPage)) {
+            Log.error("$TAG.enableGameCenter.p2eCashExchange", "游戏中心🎮[赚现金提现]#提交成功但回查失败")
+            return DailyTaskProcessResult.UNKNOWN_FAILURE
+        }
+        if (isGoldExchangeConfirmed(prizePageData, refreshedPage.optJSONObject("data"), targetPrize)) {
+            Log.member("游戏中心🎮[赚现金提现已确认]#${amount}元")
+            return DailyTaskProcessResult.HANDLED
+        }
+
+        Log.error("$TAG.enableGameCenter.p2eCashExchange", "游戏中心🎮[赚现金提现]#提交成功但回查未确认，本轮不重复提交")
+        return DailyTaskProcessResult.UNKNOWN_FAILURE
+    }
+
+    private fun findSelectedFixedTenYuanPrize(prizes: JSONArray?): JSONObject? {
+        if (prizes == null) return null
+        for (i in 0 until prizes.length()) {
+            val prize = prizes.optJSONObject(i) ?: continue
+            if (prize.optBoolean("selected", false) &&
+                prize.optString("withdrawalTierType") == "FIXED_TIER" &&
+                prize.optString("prizeUnit") == "元" &&
+                prize.optString("prizeAmount").toDoubleOrNull() == 10.0
+            ) {
+                return prize
+            }
+        }
+        return null
+    }
+
+    private fun hasGoldExchangeSubmitContract(prize: JSONObject): Boolean =
+        listOf("outBizNo", "prizeConfigId", "sendSign", "sendSignNew", "withdrawalTierType")
+            .all { prize.optString(it).isNotBlank() }
+
+    private fun isGoldExchangeConfirmed(
+        previousPageData: JSONObject,
+        refreshedPageData: JSONObject?,
+        targetPrize: JSONObject,
+    ): Boolean {
+        if (refreshedPageData == null) return false
+        val targetPrizeConfigId = targetPrize.optString("prizeConfigId")
+        val refreshedPrizes = refreshedPageData.optJSONObject("cashExchangeModule")?.optJSONArray("prizes")
+        val refreshedPrize =
+            (0 until (refreshedPrizes?.length() ?: 0))
+                .mapNotNull { refreshedPrizes?.optJSONObject(it) }
+                .firstOrNull { it.optString("prizeConfigId") == targetPrizeConfigId }
+        if (refreshedPrize == null || refreshedPrize.optString("prizeStatus") != "CAN_EXG") {
+            return true
+        }
+        val previousBalance = previousPageData.optJSONObject("assetModuleVO")?.optString("goldAmount")?.toLongOrNull()
+        val refreshedBalance = refreshedPageData.optJSONObject("assetModuleVO")?.optString("goldAmount")?.toLongOrNull()
+        return previousBalance != null && refreshedBalance != null && refreshedBalance < previousBalance
     }
 
     private fun findGameCenterP2eTodaySignRecord(signUpModule: JSONObject?): JSONObject? {

@@ -6206,6 +6206,66 @@ class AntSports : ModelTask() {
         }
     }
 
+    /**
+     * 使用主页快照中的动态价格买回被其他 boss 雇佣的自身成员。
+     * buyBackMember 不需要 roomId、currentBossId 或 originBossId，不能沿用抢购参数。
+     */
+    internal fun buyBackSoldSelfMember() {
+        try {
+            val home = queryClubHomeForBattle() ?: return
+            if (!isClubHomeEnabled(home)) return
+            val memberList = home.optJSONObject("mainRoom")?.optJSONArray("memberList") ?: return
+            val soldMember = (0 until memberList.length())
+                .mapNotNull { memberList.optJSONObject(it) }
+                .firstOrNull { member ->
+                    member.optString("memberStatus").equals("SOLD", ignoreCase = true) &&
+                        member.optString("memberId").isNotBlank()
+                } ?: return
+            val memberId = soldMember.optString("memberId")
+            val priceInfo = soldMember.optJSONObject("priceInfo") ?: run {
+                Log.error(TAG, "抢好友大战🧑‍🤝‍🧑买回成员缺少priceInfo[memberId=$memberId] raw=$soldMember")
+                return
+            }
+            val price = priceInfo.optInt("price", -1)
+            val energyBalance = home.optJSONObject("assetsInfo")?.optInt("energyBalance", 0) ?: 0
+            if (price < 0 || price > energyBalance) {
+                Log.sports("抢好友大战🧑‍🤝‍🧑买回成员能量不足或价格无效[price=$price,balance=$energyBalance]")
+                return
+            }
+
+            val response = JSONObject(AntSportsRpcCall.buyBackMember(memberId, JSONObject(priceInfo.toString())))
+            GlobalThreadPools.sleepCompat(500)
+            if (!isSportsRpcSuccess(response)) {
+                Log.error(
+                    TAG,
+                    "抢好友大战🧑‍🤝‍🧑买回成员失败[memberId=$memberId]" +
+                        "[code=${extractSportsRpcErrorCode(response).ifEmpty { "UNKNOWN" }}]" +
+                        "[msg=${extractSportsRpcErrorMessage(response)}] raw=$response",
+                )
+                return
+            }
+
+            val refreshedHome = queryClubHomeForBattle() ?: return
+            val stillSold = refreshedHome.optJSONObject("mainRoom")
+                ?.optJSONArray("memberList")
+                ?.let { refreshedMembers ->
+                    (0 until refreshedMembers.length())
+                        .mapNotNull { refreshedMembers.optJSONObject(it) }
+                        .any { member ->
+                            member.optString("memberId") == memberId &&
+                                member.optString("memberStatus").equals("SOLD", ignoreCase = true)
+                        }
+                } == true
+            if (stillSold) {
+                Log.error(TAG, "抢好友大战🧑‍🤝‍🧑买回成员提交成功但主页仍显示SOLD[memberId=$memberId]")
+            } else {
+                Log.sports("抢好友大战🧑‍🤝‍🧑买回自身成员成功[消耗${price}能量]")
+            }
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "buyBackSoldSelfMember err:", t)
+        }
+    }
+
     private fun queryClubHomeForBattle(): JSONObject? {
         val clubHomeJson = JSONObject(AntSportsRpcCall.queryClubHome())
         GlobalThreadPools.sleepCompat(500)
@@ -6579,8 +6639,7 @@ class AntSports : ModelTask() {
             while (!Thread.currentThread().isInterrupted) {
                 try {
                     if (errorCount >= MAX_ERROR_COUNT) {
-                        Log.error(TAG, "任务处理失败次数达到上限，停止循环")
-                        Status.setFlagToday(StatusFlags.FLAG_ANTSPORTS_TASK_CENTER_DONE)
+                        Log.error(TAG, "任务处理失败次数达到上限，停止当前轮并保留后续任务中心复核")
                         break
                     }
 
@@ -6594,8 +6653,12 @@ class AntSports : ModelTask() {
                         continue
                     }
 
-                    val taskList = taskCenterResp.getJSONObject("data").optJSONArray("taskCenterTaskVOS")
-                    if (taskList == null || taskList.length() == 0) {
+                    val taskList = extractNeverlandTaskCenterTasks(taskCenterResp.getJSONObject("data"), source)
+                    if (taskList == null) {
+                        Log.sports("健康岛任务中心响应缺少已知任务容器，保留后续复核")
+                        break
+                    }
+                    if (taskList.isEmpty()) {
                         Log.sports("任务中心为空，无任务可处理")
                         Status.setFlagToday(StatusFlags.FLAG_ANTSPORTS_TASK_CENTER_DONE)
                         break
@@ -6604,9 +6667,9 @@ class AntSports : ModelTask() {
                     val pendingTasks = mutableListOf<JSONObject>()
                     val pendingPromoKernelAwaitingConfirmation = mutableListOf<String>()
                     val deferredPromoKernelTasks = mutableListOf<String>()
-                    for (i in 0 until taskList.length()) {
-                        val rawTask = taskList.optJSONObject(i) ?: continue
-                        val task = normalizeNeverlandCenterTask(rawTask, source)
+                    val deferredManualSignupTasks = mutableListOf<String>()
+                    val unresolvedTaskStates = mutableListOf<String>()
+                    for (task in taskList) {
 
                         val title = task.optString("title", task.optString("taskName", "未知任务"))
                         val type = task.optString("taskType", "")
@@ -6614,20 +6677,12 @@ class AntSports : ModelTask() {
                         val taskId = task.optString("id", task.optString("taskId", ""))
 
                         if ("NOT_SIGNUP" == status) {
-                            Log.sports(
-                                "任务[$title] classification=UNSUPPORTED_NO_CLOSURE decision=BLACKLIST " +
-                                    "module=$SPORTS_TASK_BLACKLIST_MODULE taskId=$taskId taskName=$title " +
-                                    "action=signup rpc=<none> reason=需要手动报名 status=$status raw=$task"
-                            )
-                            if (taskId.isNotEmpty()) {
-                                TaskBlacklist.addToBlacklist(SPORTS_TASK_BLACKLIST_MODULE, taskId, title)
-                            }
+                            deferredManualSignupTasks.add("$title[taskId=$taskId]")
+                            Log.sports("健康岛任务需要真实报名，保留待服务端状态刷新，不加入自动跳过列表")
                             continue
                         }
 
-                        if (TaskBlacklist.isTaskInBlacklist(SPORTS_TASK_BLACKLIST_MODULE, taskId) ||
-                            TaskBlacklist.isTaskInBlacklist(SPORTS_TASK_BLACKLIST_MODULE, title)
-                        ) {
+                        if (taskId.isNotBlank() && TaskBlacklist.isTaskInBlacklist(SPORTS_TASK_BLACKLIST_MODULE, taskId)) {
                             continue
                         }
 
@@ -6647,10 +6702,20 @@ class AntSports : ModelTask() {
                             "FINISHED" != status
                         ) {
                             pendingTasks.add(task)
+                        } else if (status in setOf("INIT", "SIGNUP_COMPLETE", "TO_RECEIVE")) {
+                            unresolvedTaskStates.add("$title[taskId=$taskId,type=$type,status=$status]")
                         }
                     }
 
                     if (pendingTasks.isEmpty()) {
+                        if (deferredManualSignupTasks.isNotEmpty()) {
+                            Log.sports("健康岛任务中心存在需真实报名任务：${deferredManualSignupTasks.joinToString("；")}，等待后续服务端刷新")
+                            break
+                        }
+                        if (unresolvedTaskStates.isNotEmpty()) {
+                            Log.sports("健康岛任务中心存在未支持的待处理状态：${unresolvedTaskStates.joinToString("；")}，保留后续复核")
+                            break
+                        }
                         if (deferredPromoKernelTasks.isNotEmpty()) {
                             Log.sports(
                                 "健康岛任务中心明确延后：" +
@@ -6701,6 +6766,46 @@ class AntSports : ModelTask() {
         }
 
         /**
+         * 从服务端已知任务容器提取任务。容器缺失与空容器语义不同：前者只能等待后续刷新。
+         */
+        private fun extractNeverlandTaskCenterTasks(data: JSONObject, source: String): List<JSONObject>? {
+            var hasTaskContainer = false
+            val tasksByKey = linkedMapOf<String, JSONObject>()
+
+            fun appendTasks(taskArray: JSONArray?) {
+                if (taskArray == null) {
+                    return
+                }
+                hasTaskContainer = true
+                for (index in 0 until taskArray.length()) {
+                    val rawTask = taskArray.optJSONObject(index) ?: continue
+                    val task = normalizeNeverlandCenterTask(rawTask, source)
+                    val key = neverlandTaskKey(task).ifBlank { "raw:${rawTask}" }
+                    tasksByKey.putIfAbsent(key, task)
+                }
+            }
+
+            listOf("taskCenterTaskVOS", "taskCenterTaskList", "taskList").forEach { key ->
+                if (data.has(key)) {
+                    appendTasks(data.optJSONArray(key))
+                }
+            }
+            listOf("taskCenterTaskGroups", "taskGroupList", "taskCenterTaskGroupVOS").forEach { groupKey ->
+                val groups = data.optJSONArray(groupKey) ?: return@forEach
+                hasTaskContainer = true
+                for (index in 0 until groups.length()) {
+                    val group = groups.optJSONObject(index) ?: continue
+                    listOf("taskCenterTaskVOS", "taskCenterTaskList", "taskList").forEach { taskKey ->
+                        if (group.has(taskKey)) {
+                            appendTasks(group.optJSONArray(taskKey))
+                        }
+                    }
+                }
+            }
+            return if (hasTaskContainer) tasksByKey.values.toList() else null
+        }
+
+        /**
          * @brief 处理单个大厅任务
          */
         private fun normalizeNeverlandCenterTask(
@@ -6710,7 +6815,15 @@ class AntSports : ModelTask() {
             fallbackTitle: String = ""
         ): JSONObject {
             return JSONObject(task.toString()).apply {
-                val normalizedTaskId = optString("taskId").ifBlank { fallbackTaskId }
+                val normalizedTaskId = sequenceOf(
+                    optString("taskId"),
+                    optString("id"),
+                    optString("taskCenterTaskId"),
+                    optString("taskRecordId"),
+                    optString("bizId"),
+                    optString("bizNo"),
+                    fallbackTaskId,
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
                 if (normalizedTaskId.isNotBlank() && optString("taskId").isBlank()) {
                     put("taskId", normalizedTaskId)
                 }
@@ -6913,14 +7026,22 @@ class AntSports : ModelTask() {
             }
         }
 
+        private fun neverlandTaskIdAliases(task: JSONObject): Set<String> =
+            listOf("id", "taskId", "taskCenterTaskId", "taskRecordId", "bizId", "bizNo", "outBizNo")
+                .map { key -> task.optString(key).trim() }
+                .filter { it.isNotBlank() }
+                .toSet()
+
         private fun neverlandTaskKey(task: JSONObject): String {
-            val taskId = task.optString("id").ifBlank { task.optString("taskId") }
-            if (taskId.isNotBlank()) {
+            val taskId = neverlandTaskIdAliases(task).firstOrNull()
+            if (!taskId.isNullOrBlank()) {
                 return taskId
             }
-            val taskType = task.optString("taskType")
-            val taskTitle = task.optString("title", task.optString("taskName", ""))
-            return listOf(taskType, taskTitle).filter { it.isNotBlank() }.joinToString("::")
+            return listOf(
+                task.optString("taskType"),
+                task.optString("taskAction"),
+                task.optString("source"),
+            ).filter { it.isNotBlank() }.joinToString("::")
         }
 
         private fun queryNeverlandTaskCenterTask(targetTask: JSONObject): JSONObject? {
@@ -6931,10 +7052,8 @@ class AntSports : ModelTask() {
                 Log.error(TAG, "活动任务状态复查失败：$title 响应：$response")
                 return null
             }
-            val taskList = response.optJSONObject("data")?.optJSONArray("taskCenterTaskVOS") ?: return null
-            for (i in 0 until taskList.length()) {
-                val rawCandidate = taskList.optJSONObject(i) ?: continue
-                val candidate = normalizeNeverlandCenterTask(rawCandidate, source)
+            val taskList = response.optJSONObject("data")?.let { extractNeverlandTaskCenterTasks(it, source) } ?: return null
+            for (candidate in taskList) {
                 if (isSameNeverlandTask(candidate, targetTask)) {
                     return candidate
                 }
@@ -6943,16 +7062,15 @@ class AntSports : ModelTask() {
         }
 
         private fun isSameNeverlandTask(candidate: JSONObject, targetTask: JSONObject): Boolean {
-            val candidateTaskId = candidate.optString("id").ifBlank { candidate.optString("taskId") }
-            val targetTaskId = targetTask.optString("id").ifBlank { targetTask.optString("taskId") }
-            if (candidateTaskId.isNotBlank() && candidateTaskId == targetTaskId) {
+            if (neverlandTaskIdAliases(candidate).intersect(neverlandTaskIdAliases(targetTask)).isNotEmpty()) {
                 return true
             }
             val candidateType = candidate.optString("taskType")
             val targetType = targetTask.optString("taskType")
-            val candidateTitle = candidate.optString("title", candidate.optString("taskName", ""))
-            val targetTitle = targetTask.optString("title", targetTask.optString("taskName", ""))
-            return candidateType == targetType && candidateTitle.isNotBlank() && candidateTitle == targetTitle
+            val candidateAction = candidate.optString("taskAction")
+            val targetAction = targetTask.optString("taskAction")
+            return candidateType.isNotBlank() && candidateType == targetType &&
+                candidateAction.isNotBlank() && candidateAction == targetAction
         }
 
         private fun isNeverlandTaskRewardReadyStatus(status: String): Boolean {

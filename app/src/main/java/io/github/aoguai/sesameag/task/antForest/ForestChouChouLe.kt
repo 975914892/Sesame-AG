@@ -51,6 +51,12 @@ class ForestChouChouLe {
             val taskCode get() = "${code}_TASK"
         }
 
+        private enum class CompletionFlagCheck {
+            ACTIONABLE,
+            NO_ACTIONABLE,
+            UNKNOWN,
+        }
+
         // 扩展函数：简化 JSON 解析和检查
         private fun String.toJson(): JSONObject? = runCatching { JSONObject(this) }.getOrNull()
 
@@ -108,67 +114,52 @@ class ForestChouChouLe {
                 val response =
                     AntForestRpcCall.enterDrawActivityopengreen("", SCENE_NORMAL, SOURCE).toJson() ?: return@runCatching defaultScenes
 
-                if (response.optBoolean("success", false)) {
-                    val drawSceneGroups = response.optJSONArray("drawSceneGroups") ?: return@runCatching defaultScenes
-
-                    for (i in 0 until drawSceneGroups.length()) {
-                        val sceneGroup = drawSceneGroups.optJSONObject(i) ?: continue
-                        val drawActivity = sceneGroup.optJSONObject("drawActivity") ?: continue
-
-                        val sceneCode = drawActivity.optString("sceneCode")
-                        if (sceneCode.isBlank()) {
-                            continue
-                        }
-                        val activityId =
-                            drawActivity
-                                .optString("activityId")
-                                .ifBlank { fallbackActivityId(sceneCode) }
-                        if (activityId.isBlank()) {
-                            continue
-                        }
-                        val name = sceneGroup.optString("name", "未知活动")
-
-                        val flag =
-                            when (sceneCode) {
-                                SCENE_NORMAL -> {
-                                    StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_NORMAL_COMPLETED
-                                }
-
-                                SCENE_ACTIVITY -> {
-                                    StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_ACTIVITY_COMPLETED
-                                }
-
-                                else -> {
-                                    StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_COMPLETED_PREFIX +
-                                        sceneCode.lowercase(Locale.getDefault()) +
-                                        StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_COMPLETED_SUFFIX
-                                }
-                            }
-                        scenes.add(Scene(activityId, sceneCode, name, flag))
-                    }
+                if (!response.optBoolean("success", false)) {
+                    return@runCatching defaultScenes
                 }
-                mergeDefaultScenes(scenes, defaultScenes)
+                val drawSceneGroups = response.optJSONArray("drawSceneGroups") ?: return@runCatching emptyList()
+
+                for (i in 0 until drawSceneGroups.length()) {
+                    val sceneGroup = drawSceneGroups.optJSONObject(i) ?: continue
+                    val drawActivity = sceneGroup.optJSONObject("drawActivity") ?: continue
+
+                    val sceneCode = drawActivity.optString("sceneCode")
+                    if (sceneCode.isBlank()) {
+                        continue
+                    }
+                    val activityId =
+                        drawActivity
+                            .optString("activityId")
+                            .ifBlank { fallbackActivityId(sceneCode) }
+                    if (activityId.isBlank()) {
+                        continue
+                    }
+                    val name = sceneGroup.optString("name", "未知活动")
+
+                    val flag =
+                        when (sceneCode) {
+                            SCENE_NORMAL -> {
+                                StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_NORMAL_COMPLETED
+                            }
+
+                            SCENE_ACTIVITY -> {
+                                StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_ACTIVITY_COMPLETED
+                            }
+
+                            else -> {
+                                StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_COMPLETED_PREFIX +
+                                    sceneCode.lowercase(Locale.getDefault()) +
+                                    StatusFlags.FLAG_ANTFOREST_CHOUCHOULE_COMPLETED_SUFFIX
+                            }
+                        }
+                    scenes.add(Scene(activityId, sceneCode, name, flag))
+                }
+                // 发现成功时仅处理服务端当前声明的场景；默认场景只作为发现请求失败时的兼容兜底。
+                scenes.distinctBy { scene -> "${scene.code}#${scene.id}" }
             }.getOrElse {
                 Log.printStackTrace(TAG, "获取抽奖场景配置失败, 使用默认配置", it)
                 defaultScenes
             }
-        }
-
-        private fun mergeDefaultScenes(
-            scenes: List<Scene>,
-            defaultScenes: List<Scene>,
-        ): List<Scene> {
-            if (scenes.isEmpty()) {
-                return defaultScenes
-            }
-            val merged = linkedMapOf<String, Scene>()
-            for (scene in defaultScenes) {
-                merged[scene.code] = scene
-            }
-            for (scene in scenes) {
-                merged[scene.code] = scene
-            }
-            return merged.values.toList()
         }
 
         private fun fallbackActivityId(sceneCode: String): String =
@@ -212,11 +203,21 @@ class ForestChouChouLe {
     private fun processScene(s: Scene) =
         runCatching {
             if (Status.hasFlagToday(s.flag)) {
-                if (!hasActionableTaskAfterCompletionFlag(s)) {
-                    Log.forest("⏭️ ${s.name} 今天已完成, 跳过")
-                    return@runCatching
+                when (hasActionableTaskAfterCompletionFlag(s)) {
+                    CompletionFlagCheck.NO_ACTIONABLE -> {
+                        Log.forest("⏭️ ${s.name} 今天已完成, 跳过")
+                        return@runCatching
+                    }
+
+                    CompletionFlagCheck.UNKNOWN -> {
+                        Log.forest("⏭️ ${s.name} 完成标记复核失败，保留后续重试机会")
+                        return@runCatching
+                    }
+
+                    CompletionFlagCheck.ACTIONABLE -> {
+                        Status.removeFlag(s.flag)
+                    }
                 }
-                Status.removeFlag(s.flag)
             }
 
             Log.forest("👉 开始处理: ${s.name}")
@@ -237,10 +238,15 @@ class ForestChouChouLe {
             }
 
             // 2. 查询、完成与领奖统一交给公共任务闭环处理。
-            TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 100L).run()
+            val taskResult = TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 500L).run()
 
-            // 3. 执行抽奖
-            processLottery(s)
+            // 3. 只有任务闭环和抽奖余额均经服务端确认时，才能写入场景完成标记。
+            if (taskResult.completed && processLottery(s)) {
+                Status.setFlagToday(s.flag)
+            } else {
+                Status.removeFlag(s.flag)
+                Log.forest("${s.name} 仍有待确认任务或抽奖次数，保留后续重试")
+            }
         }.onFailure { Log.printStackTrace(TAG, "${s.name} 处理异常", it) }
 
     private fun fetchFreshTaskList(s: Scene): JSONObject? {
@@ -277,41 +283,43 @@ class ForestChouChouLe {
         return taskTypes.toList()
     }
 
-    private fun hasActionableTaskAfterCompletionFlag(s: Scene): Boolean {
-        val resp = fetchFreshTaskList(s) ?: return false
-        if (!resp.check()) return false
+    private fun hasActionableTaskAfterCompletionFlag(s: Scene): CompletionFlagCheck {
+        val resp = fetchFreshTaskList(s) ?: return CompletionFlagCheck.UNKNOWN
+        if (!resp.check()) return CompletionFlagCheck.UNKNOWN
 
-        val taskList = resp.optJSONArray("taskInfoList") ?: return false
+        val taskList = resp.optJSONArray("taskInfoList") ?: return CompletionFlagCheck.UNKNOWN
         for (i in 0 until taskList.length()) {
             val task = taskList.optJSONObject(i) ?: continue
             val baseInfo = task.optJSONObject("taskBaseInfo") ?: continue
             val taskType = baseInfo.optString("taskType")
-            val taskStatus = baseInfo.optString("taskStatus")
-            if (taskStatus != TaskStatus.TODO.name &&
-                taskStatus != TaskStatus.FINISHED.name &&
-                taskStatus != "COMPLETE"
-            ) {
+            val taskStatus = baseInfo.optString("taskStatus").uppercase(Locale.ROOT)
+            if (taskStatus !in setOf(TaskStatus.TODO.name, TaskStatus.FINISHED.name, "COMPLETE", "WAIT_RECEIVE", "TO_RECEIVE")) {
                 continue
             }
-            val bizInfo = baseInfo.optString("bizInfo").toJson() ?: JSONObject()
-            val taskName = extractTaskName(bizInfo, taskType.ifBlank { "未知任务" })
-            if (!isBlockedTask(taskType, taskName)) {
+            if (!isBlockedTask(taskType)) {
+                val bizInfo = baseInfo.optString("bizInfo").toJson() ?: JSONObject()
+                val taskName = extractTaskName(bizInfo, taskType.ifBlank { "未知任务" })
                 Log.forest("${s.name} 已有完成标记但发现待处理任务: $taskName [$taskStatus]")
-                return true
+                return CompletionFlagCheck.ACTIONABLE
             }
         }
-        return false
+        val activityResponse =
+            AntForestRpcCall.enterDrawActivityopengreen(s.id, s.code, SOURCE).toJson()
+                ?: return CompletionFlagCheck.UNKNOWN
+        if (!activityResponse.check()) return CompletionFlagCheck.UNKNOWN
+        val drawBalance = activityResponse.optJSONObject("drawAsset")?.optInt("blance", -1) ?: return CompletionFlagCheck.UNKNOWN
+        return if (drawBalance > 0) CompletionFlagCheck.ACTIONABLE else CompletionFlagCheck.NO_ACTIONABLE
     }
 
     /**
      * 执行抽奖逻辑
      */
-    private fun processLottery(s: Scene) {
-        val currentUid = UserMap.currentUid ?: return
-        val enterResp = AntForestRpcCall.enterDrawActivityopengreen(s.id, s.code, SOURCE).toJson() ?: return
-        if (!enterResp.check()) return
+    private fun processLottery(s: Scene): Boolean {
+        val currentUid = UserMap.currentUid ?: return false
+        val enterResp = AntForestRpcCall.enterDrawActivityopengreen(s.id, s.code, SOURCE).toJson() ?: return false
+        if (!enterResp.check()) return false
 
-        val drawAsset = enterResp.optJSONObject("drawAsset") ?: return
+        val drawAsset = enterResp.optJSONObject("drawAsset") ?: return false
         var balance = drawAsset.optInt("blance", 0)
         val total = drawAsset.optInt("totalTimes", 0)
 
@@ -325,7 +333,7 @@ class ForestChouChouLe {
 
             val drawResp = AntForestRpcCall.drawopengreen(s.id, s.code, SOURCE, currentUid).toJson()
             if (drawResp == null || !drawResp.check()) {
-                break
+                return false
             }
 
             balance = drawResp.optJSONObject("drawAsset")?.optInt("blance", 0) ?: 0
@@ -336,8 +344,13 @@ class ForestChouChouLe {
                 Log.forest("${s.name} 🎁 [获得: $name * $num] 剩余次数: $balance")
             }
 
-            if (balance > 0) sleepCompat(100L)
+            if (balance > 0) sleepCompat(500L)
         }
+
+        val refreshed = AntForestRpcCall.enterDrawActivityopengreen(s.id, s.code, SOURCE).toJson() ?: return false
+        if (!refreshed.check()) return false
+        val remainingBalance = refreshed.optJSONObject("drawAsset")?.optInt("blance", -1) ?: return false
+        return remainingBalance == 0
     }
 
     /**
@@ -374,7 +387,7 @@ class ForestChouChouLe {
                         status = taskBaseInfo.optString("taskStatus"),
                         type = taskType,
                         sceneCode = sceneCode,
-                        blacklistKeys = listOf(taskType, title).filter { it.isNotBlank() },
+                        blacklistKeys = listOf(taskType).filter { it.isNotBlank() },
                         raw =
                             JSONObject()
                                 .put("taskInfo", taskInfo)
@@ -387,11 +400,26 @@ class ForestChouChouLe {
         }
 
         override fun mapPhase(item: TaskFlowItem): TaskFlowPhase =
-            when (item.status) {
-                TaskStatus.FINISHED.name, "COMPLETE" -> TaskFlowPhase.REWARD_READY
-                TaskStatus.TODO.name -> TaskFlowPhase.READY_TO_COMPLETE
-                TaskStatus.RECEIVED.name, "HAS_RECEIVED", "DONE", "COMPLETED" -> TaskFlowPhase.TERMINAL
-                else -> TaskFlowPhase.UNKNOWN
+            when (item.status.uppercase(Locale.ROOT)) {
+                TaskStatus.FINISHED.name, "COMPLETE", "WAIT_RECEIVE", "TO_RECEIVE" -> {
+                    TaskFlowPhase.REWARD_READY
+                }
+
+                TaskStatus.TODO.name, "WAIT_COMPLETE" -> {
+                    if (requiresExternalGameCompletion(item.type)) {
+                        TaskFlowPhase.BUSINESS_ACTION
+                    } else {
+                        TaskFlowPhase.READY_TO_COMPLETE
+                    }
+                }
+
+                TaskStatus.RECEIVED.name, "HAS_RECEIVED", "DONE", "COMPLETED" -> {
+                    TaskFlowPhase.TERMINAL
+                }
+
+                else -> {
+                    TaskFlowPhase.UNKNOWN
+                }
             }
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
@@ -459,7 +487,6 @@ class ForestChouChouLe {
         }
 
         override fun onAllTasksDone(snapshot: TaskFlowSnapshot) {
-            Status.setFlagToday(scene.flag)
             val summary = if (snapshot.totalTasks == 0) "无有效任务" else "全部完成"
             Log.forest("✅ ${scene.name} $summary (${snapshot.completedTasks}/${snapshot.totalTasks})")
         }
@@ -528,7 +555,7 @@ class ForestChouChouLe {
                 response.check() -> {
                     val actionName = if (action == TaskFlowAction.RECEIVE) "奖励领取成功" else "任务已提交"
                     Log.forest("${scene.name} $actionName: ${item.title}")
-                    return TaskFlowActionResult.success()
+                    return TaskFlowActionResult.success(refreshAfterAction = true)
                 }
 
                 (response.has("retriable") && !response.optBoolean("retriable")) ||
@@ -567,6 +594,13 @@ class ForestChouChouLe {
             }
         }
 
+        /**
+         * 这类活动任务只暴露了游戏入口；最新回包证明 finishTaskopengreen 不支持直接完成。
+         * 不伪造游戏完成，也不把临时协议缺口升级为自动黑名单。
+         */
+        private fun requiresExternalGameCompletion(taskType: String): Boolean =
+            taskType.startsWith("FOREST_ACTIVITY_DRAW_") && taskType.endsWith("_ZHWUFU")
+
         private fun missingTaskData(
             item: TaskFlowItem,
             action: String,
@@ -587,12 +621,8 @@ class ForestChouChouLe {
     /**
      * 判断任务是否在屏蔽列表中
      */
-    private fun isBlockedTask(
-        taskType: String,
-        taskName: String,
-    ): Boolean =
-        TaskBlacklist.isTaskInBlacklist(FOREST_BLACKLIST_MODULE, taskType) ||
-            TaskBlacklist.isTaskInBlacklist(FOREST_BLACKLIST_MODULE, taskName)
+    private fun isBlockedTask(taskType: String): Boolean =
+        taskType.isNotBlank() && TaskBlacklist.isTaskInBlacklist(FOREST_BLACKLIST_MODULE, taskType)
 
     private fun syncDrawAssetAfterTaskAward(s: Scene) {
         runCatching {

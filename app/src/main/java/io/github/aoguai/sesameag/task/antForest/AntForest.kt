@@ -4487,10 +4487,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             taskBaseInfo.optString("taskNode").equals("CHILD", true)
     }
 
-    private fun isGreenPracticeChildBlacklisted(taskType: String, taskTitle: String): Boolean {
-        return TaskBlacklist.isTaskInBlacklist(forestTaskBlacklistModule, taskType) ||
-            TaskBlacklist.isTaskInBlacklist(forestTaskBlacklistModule, taskTitle)
-    }
+    private fun isGreenPracticeChildBlacklisted(taskType: String): Boolean =
+        taskType.isNotBlank() && TaskBlacklist.isTaskInBlacklist(forestTaskBlacklistModule, taskType)
 
     private fun hasActionableGreenPracticeChild(taskInfo: JSONObject): Boolean {
         val taskBaseInfo = taskInfo.optJSONObject("taskBaseInfo") ?: return false
@@ -4510,8 +4508,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 continue
             }
 
-            val childTaskTitle = getForestTaskTitle(childBaseInfo, childTaskType)
-            if (!isGreenPracticeChildBlacklisted(childTaskType, childTaskTitle)) {
+            if (!isGreenPracticeChildBlacklisted(childTaskType)) {
                 return true
             }
         }
@@ -4567,7 +4564,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
 
             val childTaskTitle = getForestTaskTitle(childBaseInfo, childTaskType)
-            if (isGreenPracticeChildBlacklisted(childTaskType, childTaskTitle)) {
+            if (isGreenPracticeChildBlacklisted(childTaskType)) {
                 continue
             }
 

@@ -1028,6 +1028,12 @@ class AntFarm : ModelTask() {
         return useSpecialFood?.value == true
     }
 
+    /**
+     * 返回已由 useFarmFood 回查学习到的单份产蛋进度；未知时不猜测。
+     */
+    internal fun getKnownSpecialFoodProduce(cuisineId: String): Double? =
+        specialFoodUnitProduce[cuisineId]
+
     private fun rememberSpecialFoodCuisineSnapshot(cuisineList: JSONArray?) {
         if (cuisineList == null) {
             return
@@ -3850,6 +3856,15 @@ class AntFarm : ModelTask() {
 
         override fun receive(item: TaskFlowItem): TaskFlowActionResult {
             val task = item.raw ?: return missingMultiStageRawResult(item, "receive")
+            val accumulatedAward = getMultiStageAccumulatedAward(task)
+            if (accumulatedAward > 0 && !prepareFarmAwardCapacity(accumulatedAward)) {
+                return TaskFlowActionResult.defer(
+                    deferredReason = DeferredReason.CAPACITY_LIMIT,
+                    message = "容量协调后仍不足，当前轮次暂不领取多阶段奖励",
+                    rpc = "AntFarmRpcCall.receiveFarmTaskAward",
+                    detail = "taskId=${item.id} taskName=${item.title} award=${accumulatedAward}",
+                )
+            }
             if (!canReceiveMultiStageAward(task)) {
                 return TaskFlowActionResult.defer(
                     deferredReason = DeferredReason.CAPACITY_LIMIT,
@@ -3868,7 +3883,6 @@ class AntFarm : ModelTask() {
                     detail = "taskName=${item.title}"
                 )
             }
-            val accumulatedAward = getMultiStageAccumulatedAward(task)
             val receiveRes = JSONObject(AntFarmRpcCall.receiveFarmTaskAward(taskId))
             return if (ResChecker.checkRes(TAG, receiveRes)) {
                 add2FoodStock(accumulatedAward)
@@ -4289,6 +4303,43 @@ class AntFarm : ModelTask() {
         TaskBlacklist.addToBlacklist(farmTaskBlacklistModule, taskId, title)
     }
 
+    /**
+     * 在领取饲料前只执行用户已开启且服务端状态允许的消耗动作。
+     * 不强制投喂、不丢弃奖励；无法腾出最小奖励空间时由领奖流程延期处理。
+     */
+    internal fun prepareFarmAwardCapacity(requiredFoodSpace: Int = 90): Boolean {
+        val requiredSpace = requiredFoodSpace.coerceAtLeast(1)
+        if (ownerFarmId.isNullOrBlank()) {
+            return false
+        }
+        syncAnimalStatus(ownerFarmId)
+        if (foodStockLimit - foodStock >= requiredSpace) {
+            return true
+        }
+
+        val stockBefore = foodStock
+        val specialFoodUsed = useDailySpecialFoodIfNeeded()
+        if (foodStockLimit - foodStock < requiredSpace &&
+            AnimalFeedStatus.HUNGRY.name == ownerAnimal.animalFeedStatus &&
+            feedAnimal?.value == true
+        ) {
+            // 仅当小鸡本就处于饥饿状态且用户开启自动投喂时，投喂才会安全释放饲料空间。
+            CoroutineUtils.runBlockingSafe {
+                handleAutoFeedAnimal()
+            }
+        }
+        syncAnimalStatus(ownerFarmId)
+        val foodSpace = foodStockLimit - foodStock
+        if (foodSpace < requiredSpace) {
+            Log.farm(
+                "领奖前容量协调未释放${requiredSpace}g空间[当前=$foodStock/$foodStockLimit,特殊食品已用=$specialFoodUsed]，保留待领奖励",
+            )
+        } else if (foodStock < stockBefore) {
+            Log.farm("领奖前容量协调已释放${stockBefore - foodStock}g饲料空间")
+        }
+        return foodSpace >= requiredSpace
+    }
+
     internal suspend fun receiveFarmAwards() {
         try {
             var doubleCheck: Boolean
@@ -4303,6 +4354,7 @@ class AntFarm : ModelTask() {
                 }
                 val jo = JSONObject(response)
                 if (ResChecker.checkRes(TAG, "查询庄园任务失败:", jo)) {
+                    prepareFarmAwardCapacity()
                     val farmTaskList = jo.getJSONArray("farmTaskList")
                     val signList = jo.getJSONObject("signList")
                     val needFarmGame = recordFarmGame!!.value == true && !Status.hasFlagToday(StatusFlags.FLAG_FARM_GAME_FINISHED)
@@ -7821,10 +7873,22 @@ class AntFarm : ModelTask() {
                 }
             }
             val jo = JSONObject(AntFarmRpcCall.inviteFriendVisitFamily(userIdArray))
-            if ("SUCCESS" == jo.getString("memo")) {
-                Log.farm("亲密家庭🏠提交任务[分享好友]")
-                Status.setFlagToday(StatusFlags.FLAG_FARM_INVITE_FRIEND_VISIT_FAMILY)
-                syncFamilyStatusIntimacy(familyGroupId)
+            when (AntFarmRpcCall.confirmFamilyInviteVisitOutcome(jo)) {
+                AntFarmRpcCall.FamilyInviteVisitOutcome.SUBMITTED -> {
+                    Log.farm("亲密家庭🏠提交任务[分享好友]")
+                    Status.setFlagToday(StatusFlags.FLAG_FARM_INVITE_FRIEND_VISIT_FAMILY)
+                    syncFamilyStatusIntimacy(familyGroupId)
+                }
+
+                AntFarmRpcCall.FamilyInviteVisitOutcome.ALREADY_COMPLETED_CONFIRMED -> {
+                    Log.farm("亲密家庭🏠分享好友已完成，家庭任务快照已确认")
+                    Status.setFlagToday(StatusFlags.FLAG_FARM_INVITE_FRIEND_VISIT_FAMILY)
+                    syncFamilyStatusIntimacy(familyGroupId)
+                }
+
+                AntFarmRpcCall.FamilyInviteVisitOutcome.RETRY_LATER -> {
+                    Log.farm("亲密家庭🏠分享好友未确认完成，保留后续重试: $jo")
+                }
             }
         } catch (e: CancellationException) {
             // 协程取消异常必须重新抛出，不能吞掉

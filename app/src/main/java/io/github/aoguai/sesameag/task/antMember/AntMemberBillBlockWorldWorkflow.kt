@@ -54,6 +54,7 @@ private data class BlockWorldActionResult(
 
 private class BillBlockWorldWorkflow {
     private val createdBlockIds = linkedSetOf<String>()
+    private val syncedCreatedBlockIds = linkedSetOf<String>()
     private val reclaimedBlocks = linkedMapOf<String, BlockWorldBlock>()
 
     fun run() {
@@ -64,23 +65,40 @@ private class BillBlockWorldWorkflow {
                 Log.member("账单拼贴世界⏭️未找到当前章节，停止处理")
                 return
             }
-            if (isRewarded(chapter)) {
-                Log.member("账单拼贴世界✅当前章节已领奖，暂无可推进内容")
-                return
-            }
 
+            // 章节奖励和画布资源是独立状态：已领奖章节仍可能有待领取贴纸或可合成方块。
             val actionName =
-                if (isCompleted(chapter)) {
-                    if (!advanceChapter(chapter.id)) {
+                when {
+                    snapshot.pendingBlocks.isNotEmpty() -> {
+                        if (!performPlace(snapshot).performed) return
+                        "放置待领取贴纸"
+                    }
+
+                    createdBlockIds.any { it !in syncedCreatedBlockIds } -> {
+                        if (!performCanvasSync(snapshot).performed) return
+                        "同步完整画布"
+                    }
+
+                    findSafeMergePair(snapshot) != null -> {
+                        if (!performMerge(snapshot).performed) return
+                        "合成贴纸"
+                    }
+
+                    isRewarded(chapter) -> {
+                        Log.member("账单拼贴世界✅当前章节已领奖且画布资源已收敛")
                         return
                     }
-                    "推进章节"
-                } else {
-                    val action = performChapterAction(snapshot, chapter)
-                    if (!action.performed) {
-                        return
+
+                    isCompleted(chapter) -> {
+                        if (!advanceChapter(chapter.id)) return
+                        "推进章节"
                     }
-                    chapter.targetType
+
+                    else -> {
+                        val action = performChapterAction(snapshot, chapter)
+                        if (!action.performed) return
+                        chapter.targetType
+                    }
                 }
             val refreshed = queryHome() ?: return
             if (snapshotStateKey(refreshed) == snapshotStateKey(snapshot)) {
@@ -315,13 +333,7 @@ private class BillBlockWorldWorkflow {
             return BlockWorldActionResult(performed = false)
         }
         val plannedBlocks = planCompactCreatedBlocks(snapshot) ?: return BlockWorldActionResult(performed = false)
-        if (plannedBlocks.zip(snapshot.placedBlocks).all { (planned, current) ->
-                planned.posX == current.posX && planned.posY == current.posY
-            }
-        ) {
-            Log.member("账单拼贴世界⏭️本轮贴纸已是最紧凑安全布局，停止当前链路")
-            return BlockWorldActionResult(performed = false)
-        }
+        // collectBlock 成功后也提交一次服务端要求的全量布局；不能因本地位置恰好相同而跳过闭环。
         val positions =
             JSONArray().apply {
                 plannedBlocks.forEach { block ->
@@ -336,7 +348,8 @@ private class BillBlockWorldWorkflow {
         callAction("优化同步画布") {
             AntMemberRpcCall.syncBillBlockWorldCanvas(snapshot.canvas.seasonId, positions)
         } ?: return BlockWorldActionResult(performed = false)
-        Log.member("账单拼贴世界🧩优化本轮新贴纸布局")
+        syncedCreatedBlockIds.addAll(createdBlockIds)
+        Log.member("账单拼贴世界🧩已同步完整贴纸画布")
         return BlockWorldActionResult(performed = true)
     }
 
@@ -421,14 +434,20 @@ private class BillBlockWorldWorkflow {
                 mergedBlock.posX ?: return BlockWorldActionResult(false),
                 mergedBlock.posY ?: return BlockWorldActionResult(false),
             )
-        callAction("合成贴纸") {
-            AntMemberRpcCall.mergeBillBlockWorldBlocks(
-                mainBlock.recordId,
-                listOf(mergedBlock.recordId),
-                position.x,
-                position.y,
-            )
-        } ?: return BlockWorldActionResult(performed = false)
+        val mergeResponse =
+            callAction("合成贴纸") {
+                AntMemberRpcCall.mergeBillBlockWorldBlocks(
+                    mainBlock.recordId,
+                    listOf(mergedBlock.recordId),
+                    position.x,
+                    position.y,
+                )
+            }
+        if (mergeResponse == null) {
+            queryHome()
+            Log.member("账单拼贴世界⏭️合成未获服务端确认，已回查画布后停止当前链路")
+            return BlockWorldActionResult(performed = false)
+        }
         createdBlockIds.remove(mergedBlock.recordId)
         Log.member("账单拼贴世界🧩合成贴纸#${mainBlock.configId}")
         return BlockWorldActionResult(performed = true)
@@ -480,17 +499,17 @@ private class BillBlockWorldWorkflow {
     }
 
     private fun findSafeMergePair(snapshot: BlockWorldSnapshot): Pair<BlockWorldBlock, BlockWorldBlock>? {
-        val createdBlocks =
+        val placedBlocks =
             snapshot.placedBlocks.filter { block ->
                 block.recordId in createdBlockIds &&
                     isValidBlock(block) &&
                     block.posX != null &&
                     block.posY != null
             }
-        for (index in createdBlocks.indices) {
-            val mainBlock = createdBlocks[index]
-            for (nextIndex in index + 1 until createdBlocks.size) {
-                val mergedBlock = createdBlocks[nextIndex]
+        for (index in placedBlocks.indices) {
+            val mainBlock = placedBlocks[index]
+            for (nextIndex in index + 1 until placedBlocks.size) {
+                val mergedBlock = placedBlocks[nextIndex]
                 if (canMerge(mainBlock, mergedBlock)) {
                     return mainBlock to mergedBlock
                 }
