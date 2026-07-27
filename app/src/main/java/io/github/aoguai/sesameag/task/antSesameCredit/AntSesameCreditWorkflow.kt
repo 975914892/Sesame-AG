@@ -3,6 +3,8 @@ package io.github.aoguai.sesameag.task.antSesameCredit
 import io.github.aoguai.sesameag.data.Status.Companion.hasFlagToday
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.model.Model
+import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -11,25 +13,29 @@ import kotlinx.coroutines.async
 
 internal data class AntSesameCreditWorkflowPlan(
     val claimSesame: Boolean,
-    val claimProgress: Boolean
+    val claimProgress: Boolean,
+    val claimPendingZhimaPigeonReward: Boolean,
 )
 
 internal suspend fun AntSesameCredit.prepareSesameWorkflows(
     scope: CoroutineScope,
     deferredTasks: MutableList<Deferred<Unit>>
 ): AntSesameCreditWorkflowPlan {
+    val antFarm = Model.getModel(AntFarm::class.java)
+    val claimPendingZhimaPigeonReward = antFarm?.hasPendingZhimaPigeonRewardReceipt() == true
     val needSesameWorkflow =
         sesameGrainExchange?.value == true ||
             sesameTask?.value == true ||
             collectSesame?.value == true ||
             sesameAlchemy?.value == true ||
-            enableZhimaTree?.value == true
+            enableZhimaTree?.value == true ||
+            claimPendingZhimaPigeonReward
     if (!needSesameWorkflow) {
-        return AntSesameCreditWorkflowPlan(false, false)
+        return AntSesameCreditWorkflowPlan(false, false, false)
     }
 
     if (!AntSesameCredit.checkSesameCanRun()) {
-        return AntSesameCreditWorkflowPlan(false, false)
+        return AntSesameCreditWorkflowPlan(false, false, false)
     }
 
     resetSesamePushModelTaskSnapshots()
@@ -92,11 +98,25 @@ internal suspend fun AntSesameCredit.prepareSesameWorkflows(
 
     return AntSesameCreditWorkflowPlan(
         claimSesame = claimSesame,
-        claimProgress = claimProgress
+        claimProgress = claimProgress,
+        claimPendingZhimaPigeonReward = claimPendingZhimaPigeonReward,
     )
 }
 
 internal suspend fun AntSesameCredit.finishSesameWorkflows(plan: AntSesameCreditWorkflowPlan) {
+    if (plan.claimPendingZhimaPigeonReward) {
+        if (ApplicationHookConstants.isOffline()) {
+            Log.sesame("⏭️ 当前处于离线模式，保留芝麻大表鸽待收奖励")
+        } else {
+            val antFarm = Model.getModel(AntFarm::class.java)
+            if (antFarm == null) {
+                Log.error("AntSesameCreditWorkflow", "芝麻大表鸽待收奖励缺少庄园实例，保留后续重试")
+            } else {
+                collectPendingZhimaPigeonReward(antFarm)
+            }
+        }
+    }
+
     if (plan.claimSesame) {
         if (ApplicationHookConstants.isOffline()) {
             Log.sesame("⏭️ 当前处于离线模式，跳过统一领取芝麻粒")

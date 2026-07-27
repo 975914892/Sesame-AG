@@ -22,6 +22,8 @@ internal suspend fun AntFarm.runFarmLifecycleWorkflow(tc: TimeCounter): Boolean 
     }
 
     if (shouldHireAnimalNow()) {
+        runHireAnimalFeedTaskFlow()
+        tc.countDebug("雇佣小鸡饲料任务")
         hireAnimal()
     }
 

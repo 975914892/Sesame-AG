@@ -9,6 +9,7 @@ enum class LogModuleDomain(val displayName: String) {
     OCEAN("神奇海洋"),
     DODO("神奇物种"),
     MEMBER("会员"),
+    YOUTH_PRIVILEGE("青春特权"),
     MYBANK("网商银行"),
     FISHPOND("福气鱼池"),
     SPORTS("运动"),
@@ -162,6 +163,17 @@ enum class LogChannel(
         mirrorToRecord = true,
         visibleInViewer = true,
         logTag = "会员"
+    ),
+    YOUTH_PRIVILEGE(
+        loggerName = "youth_privilege",
+        displayName = "青春特权日志",
+        moduleDomain = LogModuleDomain.YOUTH_PRIVILEGE,
+        techKind = LogTechKind.BUSINESS,
+        description = "青春特权签到、森林道具与青春任务相关日志",
+        viewerGroup = LogViewerGroup.MODULES,
+        mirrorToRecord = true,
+        visibleInViewer = true,
+        logTag = "青春特权"
     ),
     MYBANK(
         loggerName = "mybank",
@@ -322,6 +334,10 @@ object LogCatalog {
         ),
         LogChannel.MEMBER to setOf(
             "AntMember"
+        ),
+        LogChannel.YOUTH_PRIVILEGE to setOf(
+            "YouthPrivilege",
+            "YouthPrivilegeRpcCall"
         ),
         LogChannel.MYBANK to setOf(
             "MyBankWelfare"

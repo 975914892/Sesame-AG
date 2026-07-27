@@ -1087,6 +1087,37 @@ object AntFarmRpcCall {
         )
 
     /**
+     * 查询“雇佣小鸡拿饲料”任务限定的服务端候选。
+     * 该任务的候选和普通好友雇佣并非同一契约，不能复用 friendFarmId/hireAnimalId 请求。
+     */
+    @JvmStatic
+    fun hireAnimalTaskList(): String {
+        val args = JSONObject()
+        args.put("requestType", "NORMAL")
+        args.put("sceneCode", "ANTFARMWORKSHOP")
+        args.put("source", "H5")
+        return requestString("com.alipay.antfarm.hireAnimalTaskList", JSONArray().put(args).toString())
+    }
+
+    /**
+     * 雇佣“雇佣小鸡拿饲料”任务下发的候选。
+     * 最新闭环使用 friendUserId 和任务标识字段，不携带普通好友雇佣的 farmId/animalId/version。
+     */
+    @JvmStatic
+    fun hireAnimalFromTaskList(friendUserId: String): String {
+        val args = JSONObject()
+        args.put("friendUserId", friendUserId)
+        args.put("hireActionType", "HIRE_IN_FRIEND_FARM")
+        args.put("isDoubleReward", true)
+        args.put("isFromHireTaskList", true)
+        args.put("requestType", "NORMAL")
+        args.put("sceneCode", "ANTFARMWORKSHOP")
+        args.put("sendCardChat", true)
+        args.put("source", "H5")
+        return requestString("com.alipay.antfarm.hireAnimal", JSONArray().put(args).toString())
+    }
+
+    /**
      * 雇佣NPC小鸡（支持传入source）
      *
      * @param animalId 动物ID

@@ -73,17 +73,16 @@ class ForestChouChouLe {
             ).firstOrNull { it.isNotBlank() }.orEmpty()
 
         private fun JSONObject.isTaskAwardAlreadyFinished(): Boolean =
-            taskResultCode() == TASK_AWARD_ALREADY_FINISHED_CODE || taskResultDesc().contains("任务已完结")
+            taskResultCode() == TASK_AWARD_ALREADY_FINISHED_CODE
 
         private fun JSONObject.isTaskAlreadyFinished(): Boolean =
-            taskResultCode() == TASK_ALREADY_FINISHED_CODE ||
-                taskResultDesc().contains("任务已完成") || taskResultDesc().contains("任务已完结")
+            taskResultCode() == TASK_ALREADY_FINISHED_CODE
 
         private fun JSONObject.isTaskRightsLimitReached(): Boolean =
-            taskResultCode() == TASK_RIGHTS_LIMIT_CODE || taskResultDesc().contains("权益获取次数超过上限")
+            taskResultCode() == TASK_RIGHTS_LIMIT_CODE
 
         private fun JSONObject.isRpcUnsupported(): Boolean =
-            taskResultCode() == RPC_UNSUPPORTED_CODE || taskResultDesc().contains("不支持rpc调用", ignoreCase = true)
+            taskResultCode() == RPC_UNSUPPORTED_CODE
 
         private fun extractTaskName(
             bizInfo: JSONObject,
@@ -240,8 +239,9 @@ class ForestChouChouLe {
             // 2. 查询、完成与领奖统一交给公共任务闭环处理。
             val taskResult = TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 500L).run()
 
-            // 3. 只有任务闭环和抽奖余额均经服务端确认时，才能写入场景完成标记。
-            if (taskResult.completed && processLottery(s)) {
+            // 3. 先消化服务端已发放的抽奖次数；外部手动任务未完成时不能阻断已确认余额。
+            val lotteryHandled = !taskResult.stopped && processLottery(s)
+            if (taskResult.completed && lotteryHandled) {
                 Status.setFlagToday(s.flag)
             } else {
                 Status.removeFlag(s.flag)
@@ -249,39 +249,15 @@ class ForestChouChouLe {
             }
         }.onFailure { Log.printStackTrace(TAG, "${s.name} 处理异常", it) }
 
-    private fun fetchFreshTaskList(s: Scene): JSONObject? {
-        val legacyResp =
-            AntForestRpcCall
-                .listTaskopengreen(s.taskCode, SOURCE)
-                .toJson()
-                ?.let { normalizeTaskInfoList(it) } ?: return null
-        val taskTypes = extractTaskTypes(legacyResp.optJSONArray("taskInfoList"))
-        if (taskTypes.isEmpty()) {
-            return legacyResp
-        }
-        val byIdsResp =
-            AntForestRpcCall
-                .listTaskByIdsopengreen(s.taskCode, SOURCE, taskTypes)
-                .toJson()
-                ?.let { normalizeTaskInfoList(it) }
-        if (byIdsResp != null && byIdsResp.check() && byIdsResp.optJSONArray("taskInfoList") != null) {
-            return byIdsResp
-        }
-        return legacyResp
-    }
-
-    private fun extractTaskTypes(taskList: JSONArray?): List<String> {
-        if (taskList == null) return emptyList()
-        val taskTypes = linkedSetOf<String>()
-        for (i in 0 until taskList.length()) {
-            val task = taskList.optJSONObject(i) ?: continue
-            val taskType = task.optJSONObject("taskBaseInfo")?.optString("taskType").orEmpty()
-            if (taskType.isNotBlank()) {
-                taskTypes.add(taskType)
-            }
-        }
-        return taskTypes.toList()
-    }
+    private fun fetchFreshTaskList(s: Scene): JSONObject? =
+        AntForestRpcCall
+            .listTaskopengreen(
+                sceneCode = s.taskCode,
+                source = SOURCE,
+                extend = JSONObject().put("appMode", "normal"),
+            )
+            .toJson()
+            ?.let { normalizeTaskInfoList(it) }
 
     private fun hasActionableTaskAfterCompletionFlag(s: Scene): CompletionFlagCheck {
         val resp = fetchFreshTaskList(s) ?: return CompletionFlagCheck.UNKNOWN
@@ -322,35 +298,67 @@ class ForestChouChouLe {
         val drawAsset = enterResp.optJSONObject("drawAsset") ?: return false
         var balance = drawAsset.optInt("blance", 0)
         val total = drawAsset.optInt("totalTimes", 0)
+        val batchDrawEnabled =
+            enterResp
+                .optJSONObject("drawScene")
+                ?.optJSONObject("extInfo")
+                ?.optString("openBatchDraw") == "Y"
 
         Log.forest("${s.name} 剩余抽奖次数: $balance / $total")
 
-        var retry = 0
-        // 最多抽50次，防止死循环
-        while (balance > 0 && retry < 50) {
-            retry++
-            Log.forest("${s.name} 第 $retry 次抽奖")
+        if (balance > 0 && batchDrawEnabled) {
+            val batchResp =
+                AntForestRpcCall.batchDrawopengreen(s.id, s.code, SOURCE, balance, currentUid).toJson()
+                    ?: return false
+            if (!batchResp.check()) return false
+            balance = batchResp.optJSONObject("drawAsset")?.optInt("blance", -1) ?: return false
+            logBatchDrawResults(s, batchResp.optJSONArray("drawResultList"), balance)
+        } else {
+            var retry = 0
+            // 未声明批量能力的场景保留既有逐次抽奖闭环。
+            while (balance > 0 && retry < 50) {
+                retry++
+                Log.forest("${s.name} 第 $retry 次抽奖")
 
-            val drawResp = AntForestRpcCall.drawopengreen(s.id, s.code, SOURCE, currentUid).toJson()
-            if (drawResp == null || !drawResp.check()) {
-                return false
+                val drawResp = AntForestRpcCall.drawopengreen(s.id, s.code, SOURCE, currentUid).toJson()
+                if (drawResp == null || !drawResp.check()) {
+                    return false
+                }
+
+                balance = drawResp.optJSONObject("drawAsset")?.optInt("blance", 0) ?: 0
+                val prize = drawResp.optJSONObject("prizeVO")
+                if (prize != null) {
+                    val name = prize.optString("prizeName", "未知奖品")
+                    val num = prize.optInt("prizeNum", 1)
+                    Log.forest("${s.name} 🎁 [获得: $name * $num] 剩余次数: $balance")
+                }
+
+                if (balance > 0) sleepCompat(500L)
             }
-
-            balance = drawResp.optJSONObject("drawAsset")?.optInt("blance", 0) ?: 0
-            val prize = drawResp.optJSONObject("prizeVO")
-            if (prize != null) {
-                val name = prize.optString("prizeName", "未知奖品")
-                val num = prize.optInt("prizeNum", 1)
-                Log.forest("${s.name} 🎁 [获得: $name * $num] 剩余次数: $balance")
-            }
-
-            if (balance > 0) sleepCompat(500L)
         }
 
         val refreshed = AntForestRpcCall.enterDrawActivityopengreen(s.id, s.code, SOURCE).toJson() ?: return false
         if (!refreshed.check()) return false
         val remainingBalance = refreshed.optJSONObject("drawAsset")?.optInt("blance", -1) ?: return false
         return remainingBalance == 0
+    }
+
+    private fun logBatchDrawResults(
+        scene: Scene,
+        results: JSONArray?,
+        balance: Int,
+    ) {
+        if (results == null) {
+            Log.forest("${scene.name} 批量抽奖完成，剩余次数: $balance")
+            return
+        }
+        for (index in 0 until results.length()) {
+            val prize = results.optJSONObject(index)?.optJSONObject("prizeVO") ?: continue
+            val name = prize.optString("prizeName", "未知奖品")
+            val num = prize.optInt("prizeNum", 1)
+            Log.forest("${scene.name} 🎁 [批量获得: $name * $num]")
+        }
+        Log.forest("${scene.name} 批量抽奖完成，剩余次数: $balance")
     }
 
     /**
@@ -379,6 +387,9 @@ class ForestChouChouLe {
                     continue
                 }
                 val bizInfo = taskBaseInfo.optString("bizInfo").toJson() ?: JSONObject()
+                val taskRights = taskInfo.optJSONObject("taskRights") ?: JSONObject()
+                val rightsTimes = taskRights.optInt("rightsTimes", 0)
+                val rightsTimesLimit = taskRights.optInt("rightsTimesLimit", 0)
                 val title = extractTaskName(bizInfo, taskType)
                 items.add(
                     TaskFlowItem(
@@ -388,6 +399,9 @@ class ForestChouChouLe {
                         type = taskType,
                         sceneCode = sceneCode,
                         blacklistKeys = listOf(taskType).filter { it.isNotBlank() },
+                        progress = "$rightsTimes/$rightsTimesLimit",
+                        current = rightsTimes,
+                        limit = rightsTimesLimit.takeIf { it > 0 },
                         raw =
                             JSONObject()
                                 .put("taskInfo", taskInfo)
@@ -406,7 +420,7 @@ class ForestChouChouLe {
                 }
 
                 TaskStatus.TODO.name, "WAIT_COMPLETE" -> {
-                    if (requiresExternalGameCompletion(item.type)) {
+                    if (requiresExternalBusinessAction(item)) {
                         TaskFlowPhase.BUSINESS_ACTION
                     } else {
                         TaskFlowPhase.READY_TO_COMPLETE
@@ -423,11 +437,12 @@ class ForestChouChouLe {
             }
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
-            val taskBaseInfo =
-                item.raw?.optJSONObject("taskBaseInfo")
-                    ?: return missingTaskData(item, "complete")
+            val taskBaseInfo = taskBaseInfo(item) ?: return missingTaskData(item, "complete")
+            val exchangeDrawTask = isExchangeDrawTask(item)
             val response =
-                if (item.type == "NORMAL_DRAW_EXCHANGE_VITALITY") {
+                if (exchangeDrawTask) {
+                    val useAssetsCount = taskProdPlayParam(item).optInt("useAssetsCount", 0)
+                    Log.forest("${scene.name} 准备兑换抽奖机会[活力值:$useAssetsCount][次数:${item.current ?: 0}/${item.limit ?: 0}]")
                     AntForestRpcCall
                         .exchangeTimesFromTaskopengreen(
                             scene.id,
@@ -445,7 +460,7 @@ class ForestChouChouLe {
                 response = response,
                 action = TaskFlowAction.COMPLETE,
                 rpc =
-                    if (item.type == "NORMAL_DRAW_EXCHANGE_VITALITY") {
+                    if (exchangeDrawTask) {
                         "AntForestRpcCall.exchangeTimesFromTaskopengreen"
                     } else {
                         "AntForestRpcCall.finishTaskopengreen"
@@ -474,14 +489,16 @@ class ForestChouChouLe {
         override fun actionKey(
             item: TaskFlowItem,
             action: TaskFlowAction,
-        ): String = "${action.logName}:${item.sceneCode}#${item.type}"
+        ): String = "${action.logName}:${item.sceneCode}#${item.type}:${item.current ?: 0}"
 
         override fun afterSuccess(
             item: TaskFlowItem,
             action: TaskFlowAction,
             result: TaskFlowActionResult,
         ) {
-            if (action == TaskFlowAction.RECEIVE) {
+            if (action == TaskFlowAction.RECEIVE ||
+                (action == TaskFlowAction.COMPLETE && isExchangeDrawTask(item))
+            ) {
                 syncDrawAssetAfterTaskAward(scene)
             }
         }
@@ -594,12 +611,44 @@ class ForestChouChouLe {
             }
         }
 
+        private fun taskBaseInfo(item: TaskFlowItem): JSONObject? =
+            item.raw?.optJSONObject("taskBaseInfo")
+
+        private fun taskBizInfo(item: TaskFlowItem): JSONObject =
+            item.raw?.optJSONObject("bizInfo") ?: JSONObject()
+
+        private fun taskProdPlayParam(item: TaskFlowItem): JSONObject =
+            taskBaseInfo(item)?.optString("prodPlayParam")?.toJson() ?: JSONObject()
+
+        private fun isExchangeDrawTask(item: TaskFlowItem): Boolean {
+            val taskBaseInfo = taskBaseInfo(item) ?: return false
+            return taskBaseInfo.optString("taskProdPlayType") == "EXCHANGE_ASSET" &&
+                taskBizInfo(item).optJSONObject("exchangeAssetsInfo") != null &&
+                taskProdPlayParam(item).optString("acwSceneCode") == "VITALITY_EXCHANGE_DRAW"
+        }
+
         /**
-         * 这类活动任务只暴露了游戏入口；最新回包证明 finishTaskopengreen 不支持直接完成。
-         * 不伪造游戏完成，也不把临时协议缺口升级为自动黑名单。
+         * 服务端明确标记为外部业务的任务不伪造完成；保留任务状态以等待服务端自行推进。
          */
-        private fun requiresExternalGameCompletion(taskType: String): Boolean =
-            taskType.startsWith("FOREST_ACTIVITY_DRAW_") && taskType.endsWith("_ZHWUFU")
+        private fun requiresExternalBusinessAction(item: TaskFlowItem): Boolean {
+            if (isExchangeDrawTask(item)) {
+                return false
+            }
+            val taskBaseInfo = taskBaseInfo(item) ?: return false
+            when (taskBaseInfo.optString("taskProdPlayType")) {
+                "VISIT_FLOAT_BALL", "CALL_APP_OUT_TASK" -> return true
+            }
+            val bizInfo = taskBizInfo(item)
+            if (bizInfo.has("autoCompleteTask") && !bizInfo.optBoolean("autoCompleteTask")) {
+                return true
+            }
+            if (taskBaseInfo.optString("taskMode") != "ACC_ANTIEP") {
+                return false
+            }
+            return taskProdPlayParam(item)
+                .optJSONObject("taskCategorization")
+                ?.optString("categorizationSecondLevel") == "Game"
+        }
 
         private fun missingTaskData(
             item: TaskFlowItem,

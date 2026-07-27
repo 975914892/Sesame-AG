@@ -1464,8 +1464,10 @@ class AntStall : ModelTask() {
                 return true
             }
             if (phase == TaskFlowPhase.UNSUPPORTED) {
+                val taskId = item.id.ifBlank { item.title }
+                TaskBlacklist.addToBlacklist(moduleName, taskId, item.title)
                 logStallTaskOnce(
-                    "新村任务⛪[${item.title}]暂不支持自动闭环，跳过 " +
+                    "新村任务⛪[${item.title}]暂不支持自动闭环，已加入自动跳过列表(黑名单) " +
                         "taskType=${item.type} actionType=${item.actionType.ifBlank { "UNKNOWN" }} status=${item.status}",
                 )
                 return true

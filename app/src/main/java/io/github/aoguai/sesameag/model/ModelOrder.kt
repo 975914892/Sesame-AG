@@ -18,6 +18,7 @@ import io.github.aoguai.sesameag.task.greenFinance.GreenFinance
 import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
 import io.github.aoguai.sesameag.task.other.OtherTask
 import io.github.aoguai.sesameag.task.reserve.Reserve
+import io.github.aoguai.sesameag.task.youthPrivilege.YouthPrivilege
 
 object ModelOrder {
     private val array = arrayOf(
@@ -29,6 +30,7 @@ object ModelOrder {
         AntDodo::class.java,       // 神奇物种
         AntCooperate::class.java,    // 合种
         AntMember::class.java,     // 会员
+        YouthPrivilege::class.java, // 青春特权
         AntSesameCredit::class.java, // 芝麻信用
         AntOrchard::class.java,    // 农场
         AntFishPond::class.java,   // 福气鱼池

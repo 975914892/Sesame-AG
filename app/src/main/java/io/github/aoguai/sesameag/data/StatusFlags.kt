@@ -82,9 +82,6 @@ object StatusFlags {
     /** 森林：保护地巡护机会兑换今日已达上限 */
     const val FLAG_ANTFOREST_PATROL_CHANCE_EXCHANGE_LIMIT = "AntForest::exchangePatrolChanceLimit"
 
-    /** 森林：累计奖励按 sceneCode/taskType 维度记录今日已处理前缀 */
-    const val FLAG_ANTFOREST_DEFERRED_RIGHTS_HANDLED_PREFIX = "AntForest::deferredRightsHandled::"
-
     /** 森林：双击卡时间槽已消费到的索引 */
     const val FLAG_ANTFOREST_DOUBLE_CARD_TRIGGER_INDEX = "antForest::doubleCard::triggerIndex"
 
@@ -109,11 +106,15 @@ object StatusFlags {
     /** 森林抽抽乐：动态场景完成标记后缀 */
     const val FLAG_ANTFOREST_CHOUCHOULE_COMPLETED_SUFFIX = "::completed"
 
-    /** 青春特权：今日已领取完成 */
-    const val FLAG_ANTFOREST_PRIVILEGE_RECEIVED = "youth_privilege_forest_received"
+    // ============================================================
+    // YouthPrivilege（青春特权）
+    // ============================================================
 
-    /** 青春特权：学生签到今日已处理 */
-    const val FLAG_ANTFOREST_PRIVILEGE_STUDENT_TASK = "youth_privilege_student_task"
+    /** 青春特权：森林道具已由服务端回查确认。 */
+    const val FLAG_YOUTH_PRIVILEGE_FOREST_PROPS_DONE = "YouthPrivilege::forestPropsDone"
+
+    /** 青春特权：签到已由服务端回查确认。 */
+    const val FLAG_YOUTH_PRIVILEGE_CHECK_IN_DONE = "YouthPrivilege::checkInDone"
 
     // ============================================================
     // AntMember（会员频道 / 积分）
@@ -242,6 +243,27 @@ object StatusFlags {
 
     /** 运动首页气泡任务：按 taskId 维度的当日冷却前缀 */
     const val FLAG_ANTSPORTS_HOME_BUBBLE_COOLDOWN_PREFIX = "AntSports::homeBubbleCooldown::"
+
+    /** 运动首页气泡任务：完成动作已提交、等待服务端状态推进 */
+    const val FLAG_ANTSPORTS_HOME_BUBBLE_SUBMITTED_PREFIX = "AntSports::homeBubbleSubmitted::"
+
+    /** 运动首页气泡任务：已确认完成 */
+    const val FLAG_ANTSPORTS_HOME_BUBBLE_DONE_PREFIX = "AntSports::homeBubbleDone::"
+
+    /** 运动首页气泡奖励：按服务端记录 ID 确认已领取 */
+    const val FLAG_ANTSPORTS_HOME_BUBBLE_REWARD_RECEIVED_PREFIX = "AntSports::homeBubbleRewardReceived::"
+
+    /** 健康岛泡泡奖励：按服务端记录 ID 确认已领取 */
+    const val FLAG_NEVERLAND_BUBBLE_REWARD_RECEIVED_PREFIX = "AntSports::neverlandBubbleRewardReceived::"
+
+    /** 健康岛浏览任务或浏览泡泡：按 encryptValue 确认已领取 */
+    const val FLAG_NEVERLAND_BUBBLE_ENCRYPT_RECEIVED_PREFIX = "AntSports::neverlandBubbleEncryptReceived::"
+
+    /** 健康岛任务中心：任务动作已提交、等待服务端状态推进 */
+    const val FLAG_NEVERLAND_TASK_SUBMITTED_PREFIX = "AntSports::neverlandTaskSubmitted::"
+
+    /** 健康岛任务中心：按 taskId 确认已完成 */
+    const val FLAG_NEVERLAND_TASK_DONE_PREFIX = "AntSports::neverlandTaskDone::"
 
     /** 走路挑战赛线上赛报名：今日报名不可继续，停止重复报名 */
     const val FLAG_ANTSPORTS_WALK_CHALLENGE_SIGNUP_BLOCKED_TODAY =

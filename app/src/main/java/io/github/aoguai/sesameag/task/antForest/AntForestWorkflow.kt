@@ -253,13 +253,6 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
         }
     }
 
-    if (youthPrivilege?.value == true) {
-        Privilege.youthPrivilege()
-    }
-
-    if (dailyCheckIn?.value == true) {
-        Privilege.studentSignInRedEnvelope()
-    }
 
     if (forestChouChouLe?.value == true) {
         ForestChouChouLe().chouChouLe()

@@ -45,8 +45,6 @@ class Status {
     var doubleTimes: Int = 0
     var exchangeCollectHistoryAnimal7Days: Boolean = false
     var exchangeCollectToFriendTimes7Days: Boolean = false
-    var youthPrivilege: Boolean = true
-    var studentTask: Boolean = true
     var vitalityStoreList: MutableMap<String, Int> = HashMap() // 注意命名规范首字母小写
 
     // =========================== farm

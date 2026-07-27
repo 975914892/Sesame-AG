@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object AntOrchardRpcCall {
-    private const val VERSION = "20260703.01"
+    private const val VERSION = "20260721.01"
     private const val CHARITY_GAME_CENTER_VERSION = "10.8.20"
     private const val ENTRY_SOURCE = "ch_appcenter__chsub_9patch"
     private const val ACTION_SOURCE = "gonggexiguan"
@@ -41,9 +41,11 @@ object AntOrchardRpcCall {
                         .put("unifiedVoucher")
                         .put("indexFeedsAB")
                         .put("goldenBeanSwiper")
+                        .put("goldenBeanEventBubble")
                         .put("quickWaterOptimize")
                         .put("hideLeafCollectAniAB")
-                        .put("farmButlerRouteBubble"),
+                        .put("farmButlerRouteBubble")
+                        .put("useLowFrameRate"),
                 )
                 put("growthExtInfo", "")
                 put("growthTask", "")
@@ -184,7 +186,7 @@ object AntOrchardRpcCall {
                 put("playTypeList", JSONArray().put("TOP_UP_COUPON").put("TASK_TRIGGER"))
                 put("requestType", "RPC")
                 put("sceneCode", "ORCHARD")
-                put("source", ACTION_SOURCE)
+                put("source", "H5")
                 put("version", CHARITY_GAME_CENTER_VERSION)
             }
         return RequestManager.requestString(
@@ -193,7 +195,7 @@ object AntOrchardRpcCall {
         )
     }
 
-    fun receiveTaskAwardAntFarm(
+    fun receiveTaskAwardAntOrchard(
         sceneCode: String,
         taskType: String,
         awardCountForReceive: Int,
@@ -204,12 +206,12 @@ object AntOrchardRpcCall {
                 put("ignoreLimit", true)
                 put("requestType", "RPC")
                 put("sceneCode", sceneCode)
-                put("source", "antfarm")
+                put("source", "antorchard")
                 put("taskType", taskType)
                 put("version", VERSION)
             }
         return RequestManager.requestString(
-            "com.alipay.antieptask.receiveTaskAwardantfarm",
+            "com.alipay.antieptask.receiveTaskAwardantorchard",
             JSONArray().put(requestData).toString(),
         )
     }
@@ -276,7 +278,7 @@ object AntOrchardRpcCall {
 
     fun orchardSimple(
         source: String,
-        version: String = VERSION,
+        version: String = "",
     ): String {
         val requestData =
             JSONObject().apply {
@@ -313,27 +315,28 @@ object AntOrchardRpcCall {
     }
 
     /**
-     * 收取果园回访奖励
-     * @param diversionSource 引流来源（如：widget、tmall）
-     * @param source 具体来源（如：widget_shoufei、upgrade_tmall_exchange_task）
-     * @return 请求结果字符串
+     * 查询或确认收取果园回访奖励。
+     * 首次调用不携带 manualReceive；服务端明确要求时才进入确认领取。
      */
     fun receiveOrchardVisitAward(
         diversionSource: String,
         source: String,
+        manualReceive: Boolean = false,
     ): String {
-        val requestParams =
-            """
-            [{"diversionSource":"$diversionSource",
-              "requestType":"NORMAL",
-              "sceneCode":"ORCHARD",
-              "source":"$source",
-              "version":"$VERSION"}]
-            """.trimIndent()
-
+        val requestData =
+            JSONObject().apply {
+                put("diversionSource", diversionSource)
+                if (manualReceive) {
+                    put("manualReceive", true)
+                }
+                put("requestType", "NORMAL")
+                put("sceneCode", "ORCHARD")
+                put("source", source)
+                put("version", VERSION)
+            }
         return RequestManager.requestString(
             "com.alipay.antorchard.receiveOrchardVisitAward",
-            requestParams,
+            JSONArray().put(requestData).toString(),
         )
     }
 

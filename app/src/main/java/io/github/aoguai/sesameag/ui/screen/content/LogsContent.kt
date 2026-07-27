@@ -97,7 +97,7 @@ private fun iconFor(channel: LogChannel): ImageVector {
         LogChannel.FOREST -> Icons.Rounded.Forest
         LogChannel.DODO -> Icons.Rounded.Description
         LogChannel.ORCHARD, LogChannel.FISHPOND, LogChannel.FARM, LogChannel.STALL -> Icons.Rounded.Agriculture
-        LogChannel.MEMBER, LogChannel.SESAME_CREDIT -> Icons.Rounded.CardMembership
+        LogChannel.MEMBER, LogChannel.YOUTH_PRIVILEGE, LogChannel.SESAME_CREDIT -> Icons.Rounded.CardMembership
         LogChannel.SPORTS -> Icons.AutoMirrored.Rounded.DirectionsRun
         LogChannel.DEBUG, LogChannel.RUNTIME -> Icons.Rounded.BugReport
         LogChannel.ERROR -> Icons.Rounded.ErrorOutline

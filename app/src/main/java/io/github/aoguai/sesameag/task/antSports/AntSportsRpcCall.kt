@@ -1,7 +1,6 @@
 package io.github.aoguai.sesameag.task.antSports
 
 import io.github.aoguai.sesameag.entity.RpcEntity
-import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.RequestManager
 import org.json.JSONArray
 import org.json.JSONException
@@ -52,11 +51,6 @@ object AntSportsRpcCall {
     private const val VERSION = "3.0.1.2"
 
     /**
-     * @brief 支付宝应用版本 - 动态获取
-     */
-    private val ALIPAY_APP_VERSION = ApplicationHook.alipayVersion
-
-    /**
      * @brief 城市代码 - 杭州
      */
     private const val CITY_CODE = "330100"
@@ -65,6 +59,10 @@ object AntSportsRpcCall {
      * @brief 应用ID - 蚂蚁运动小程序ID
      */
     private const val APP_ID = "2021002116659397"
+
+    /** 最新路线页面抓包中的宿主应用与来源。 */
+    private const val SPORTS_WALK_APP_ID = "2019072565980504"
+    private const val SPORTS_WALK_SOURCE = "ch_othertinyapp"
 
     /**
      * @brief 功能特性列表 - JSON 格式字符串
@@ -511,112 +509,6 @@ object AntSportsRpcCall {
         return RequestManager.requestString("com.alipay.sportshealth.biz.rpc.SportsHealthItemCenterRpc.queryExchangeRecordPage", arg)
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // 旧版行走路线模块（已过时，保留兼容性）
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /**
-     * @brief 查询个人首页 - 旧版运动路线
-     *
-     * @details 获取用户在旧版蚂蚁行走中的个人主页信息。
-     *
-     * @return RPC调用结果的 JSON 字符串
-     *
-     * @deprecated 该为旧版接口，新版应使用新API
-     * @remark 对应API：alipay.antsports.walk.map.queryMyHomePage
-     */
-    fun queryMyHomePage(): String =
-        RequestManager.requestString(
-            "alipay.antsports.walk.map.queryMyHomePage",
-            """[{"alipayAppVersion":"$ALIPAY_APP_VERSION","chInfo":"$CH_INFO","clientOS":"android","features":["DAILY_STEPS_RANK_V2","STEP_BATTLE","CLUB_HOME_CARD","NEW_HOME_PAGE_STATIC","CLOUD_SDK_AUTH","STAY_ON_COMPLETE","EXTRA_TREASURE_BOX","NEW_HOME_PAGE_STATIC","SUPPORT_TAB3","SUPPORT_FLYRABBIT","PROP","PROPV2","ASIAN_GAMES"],"pathListUsePage":true,"timeZone":"$TIME_ZONE"}]""",
-        )
-
-    /**
-     * @brief 加入旧版运动路线
-     *
-     * @param pathId 路线ID
-     *
-     * @return RPC调用结果的 JSON 字符串
-     *
-     * @deprecated 该为旧版接口
-     * @remark 对应API：alipay.antsports.walk.map.join
-     */
-    fun join(pathId: String): String =
-        RequestManager.requestString(
-            "alipay.antsports.walk.map.join",
-            """[{"chInfo":"$CH_INFO","clientOS":"android","features":["DAILY_STEPS_RANK_V2","STEP_BATTLE","CLUB_HOME_CARD","NEW_HOME_PAGE_STATIC","CLOUD_SDK_AUTH","STAY_ON_COMPLETE","EXTRA_TREASURE_BOX","NEW_HOME_PAGE_STATIC","SUPPORT_TAB3","SUPPORT_FLYRABBIT","PROP","PROPV2","ASIAN_GAMES"],"pathId":"$pathId"}]""",
-        )
-
-    /**
-     * @brief 首次开启并加入旧版运动路线
-     *
-     * @return RPC调用结果的 JSON 字符串
-     *
-     * @deprecated 该为旧版接口
-     * @remark 对应API：alipay.antsports.walk.user.openAndJoinFirst
-     */
-    fun openAndJoinFirst(): String =
-        RequestManager.requestString(
-            "alipay.antsports.walk.user.openAndJoinFirst",
-            """[{"chInfo":"$CH_INFO","clientOS":"android","features":["DAILY_STEPS_RANK_V2","STEP_BATTLE","CLUB_HOME_CARD","NEW_HOME_PAGE_STATIC","CLOUD_SDK_AUTH","STAY_ON_COMPLETE","EXTRA_TREASURE_BOX","NEW_HOME_PAGE_STATIC","SUPPORT_TAB3","SUPPORT_FLYRABBIT","PROP","PROPV2","ASIAN_GAMES"]}]""",
-        )
-
-    /**
-     * @brief 行走旧版运动路线
-     *
-     * @param day 日期字符串，格式如 "yyyy-MM-dd"
-     * @param rankCacheKey 排行榜缓存键
-     * @param stepCount 使用的步数
-     *
-     * @return RPC调用结果的 JSON 字符串
-     *
-     * @deprecated 该为旧版接口
-     * @remark 对应API：alipay.antsports.walk.map.go
-     */
-    fun go(
-        day: String,
-        rankCacheKey: String,
-        stepCount: Int,
-    ): String =
-        RequestManager.requestString(
-            "alipay.antsports.walk.map.go",
-            """[{"chInfo":"$CH_INFO","clientOS":"android","day":"$day","features":["DAILY_STEPS_RANK_V2","STEP_BATTLE","CLUB_HOME_CARD","NEW_HOME_PAGE_STATIC","CLOUD_SDK_AUTH","STAY_ON_COMPLETE","EXTRA_TREASURE_BOX","NEW_HOME_PAGE_STATIC","SUPPORT_TAB3","SUPPORT_FLYRABBIT","PROP","PROPV2","ASIAN_GAMES"],"needAllBox":true,"rankCacheKey":"$rankCacheKey","timeZone":"$TIME_ZONE","useStepCount":$stepCount}]""",
-        )
-
-    /**
-     * @brief 开启旧版运动宝箱
-     *
-     * @param boxNo 宝箱编号
-     * @param userId 用户ID
-     *
-     * @return RPC调用结果的 JSON 字符串
-     *
-     * @deprecated 该为旧版接口
-     * @remark 对应API：alipay.antsports.walk.treasureBox.openTreasureBox
-     */
-    fun openTreasureBox(
-        boxNo: String,
-        userId: String,
-    ): String =
-        RequestManager.requestString(
-            "alipay.antsports.walk.treasureBox.openTreasureBox",
-            """[{"boxNo":"$boxNo","chInfo":"$CH_INFO","clientOS":"android","features":["DAILY_STEPS_RANK_V2","STEP_BATTLE","CLUB_HOME_CARD","NEW_HOME_PAGE_STATIC","CLOUD_SDK_AUTH","STAY_ON_COMPLETE","EXTRA_TREASURE_BOX","NEW_HOME_PAGE_STATIC","SUPPORT_TAB3","SUPPORT_FLYRABBIT","PROP","PROPV2","ASIAN_GAMES"],"userId":"$userId"}]""",
-        )
-
-    /**
-     * @brief 查询路线基础列表
-     *
-     * @return RPC调用结果的 JSON 字符串
-     *
-     * @deprecated 该为旧版接口
-     * @remark 对应API：alipay.antsports.walk.path.queryBaseList
-     */
-    fun queryBaseList(): String =
-        RequestManager.requestString(
-            "alipay.antsports.walk.path.queryBaseList",
-            """[{"chInfo":"$CH_INFO","clientOS":"android","features":["DAILY_STEPS_RANK_V2","STEP_BATTLE","CLUB_HOME_CARD","NEW_HOME_PAGE_STATIC","CLOUD_SDK_AUTH","STAY_ON_COMPLETE","EXTRA_TREASURE_BOX","NEW_HOME_PAGE_STATIC","SUPPORT_TAB3","SUPPORT_FLYRABBIT","PROP","PROPV2","ASIAN_GAMES"]}]""",
-        )
-
     /**
      * @brief 查询项目列表
      *
@@ -768,9 +660,7 @@ object AntSportsRpcCall {
      */
 
     fun queryUser(): String {
-        // 补齐 mainPage 和 timeZone，直接一行搞定
-        val data = """[{"apiVersion":"energy","chInfo":"ch_othertinyapp","clientOS":"android","features":$FEATURES,"mainPage":true,"timeZone":"$TIME_ZONE"}]"""
-
+        val data = """[{"apiVersion":"energy","mainPage":true,"source":"$SPORTS_WALK_SOURCE","timeZone":"$TIME_ZONE"}]"""
         return RequestManager.requestString("com.alipay.sportsplay.biz.rpc.walk.queryUser", data)
     }
 
@@ -849,7 +739,7 @@ object AntSportsRpcCall {
     fun queryMedalDetail(): String =
         RequestManager.requestString(
             "com.alipay.sportsplay.biz.rpc.walk.queryMedalDetail",
-            """[{"chInfo":"medical_health","clientOS":"android","features":$FEATURES}]""",
+            """[{"chInfo":"$SPORTS_WALK_SOURCE","clientOS":"android","features":$FEATURES}]""",
         )
 
     /**
@@ -881,7 +771,7 @@ object AntSportsRpcCall {
     ): String =
         RequestManager.requestString(
             "com.alipay.sportsplay.biz.rpc.walk.queryPath",
-            """[{"apiVersion":"energy","chInfo":"ch_othertinyapp","clientOS":"android","date":"$date","enableNewVersion":true,"features":$FEATURES,"pathId":"$pathId","timeZone":"$TIME_ZONE"}]""",
+            """[{"apiVersion":"energy","appId":"$SPORTS_WALK_APP_ID","chInfo":"$SPORTS_WALK_SOURCE","date":"$date","pathId":"$pathId","source":"$SPORTS_WALK_SOURCE","timeZone":"$TIME_ZONE"}]""",
         )
 
     /**
@@ -894,7 +784,7 @@ object AntSportsRpcCall {
      * @remark 对应API：com.alipay.sportsplay.biz.rpc.walk.joinPath
      */
     fun joinPath(pathId: String): String {
-        val requestBody = """[{"apiVersion":"energy","chInfo":"ch_othertinyapp","clientOS":"android","features":$FEATURES,"pathId":"$pathId"}]"""
+        val requestBody = """[{"apiVersion":"energy","pathId":"$pathId","source":"$SPORTS_WALK_SOURCE"}]"""
         return RequestManager.requestString("com.alipay.sportsplay.biz.rpc.walk.joinPath", requestBody)
     }
 
@@ -1023,7 +913,7 @@ object AntSportsRpcCall {
     ): String =
         RequestManager.requestString(
             "com.alipay.sportsplay.biz.rpc.walk.queryPathReward",
-            """[{"appId":"$appId","pathId":"$pathId","source":"ch_appcenter__chsub_9patch"}]""",
+            """[{"appId":"$appId","pathId":"$pathId","source":"$SPORTS_WALK_SOURCE"}]""",
         )
 
     /**

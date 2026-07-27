@@ -73,12 +73,12 @@ object ModelFieldTodayStateResolver {
                 whackMoleState(modelFields)
             }
 
-            "AntForest.youthPrivilege" -> {
-                flag(StatusFlags.FLAG_ANTFOREST_PRIVILEGE_RECEIVED, "今日青春特权森林道具已处理")
+            "YouthPrivilege.youthPrivilegeForestProps" -> {
+                flag(StatusFlags.FLAG_YOUTH_PRIVILEGE_FOREST_PROPS_DONE, "今日青春特权森林道具已处理")
             }
 
-            "AntForest.studentCheckIn" -> {
-                flag(StatusFlags.FLAG_ANTFOREST_PRIVILEGE_STUDENT_TASK, "今日青春特权签到红包已处理")
+            "YouthPrivilege.youthPrivilegeCheckIn" -> {
+                flag(StatusFlags.FLAG_YOUTH_PRIVILEGE_CHECK_IN_DONE, "今日青春特权签到已处理")
             }
 
             "AntForest.ecoLife",

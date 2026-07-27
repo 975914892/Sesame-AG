@@ -141,7 +141,8 @@ object AntSesameCreditRpcCall {
         taskTemplateId: String,
         bizType: String? = null,
         sceneCode: String? = null,
-        version: String? = null
+        version: String? = null,
+        changeRewardType: String? = null,
     ): String {
         val args = JSONObject().apply {
             put("actionType", "TO_COMPLETE")
@@ -154,6 +155,9 @@ object AntSesameCreditRpcCall {
             put("templateId", taskTemplateId)
             if (!version.isNullOrBlank()) {
                 put("version", version)
+            }
+            if (!changeRewardType.isNullOrBlank()) {
+                put("changeRewardType", changeRewardType)
             }
         }
         val resp = RequestManager.requestString(
@@ -659,6 +663,49 @@ object AntSesameCreditRpcCall {
                 return RequestManager.requestString(
                     METHOD_ALCHEMY_QUERY_HOME,
                     "[{}]"
+                )
+            }
+
+            @JvmStatic
+            fun alchemyWithdrawPreConsult(): String {
+                return RequestManager.requestString(
+                    "com.antgroup.zmxy.zmmemberop.biz.rpc.AlchemyRpcManager.withdrawPreConsult",
+                    "[null]",
+                )
+            }
+
+            @JvmStatic
+            fun alchemyWithdraw(newUser: Boolean = false): String {
+                val requestData = JSONArray().put(JSONObject().put("newUser", newUser)).toString()
+                return RequestManager.requestString(
+                    "com.antgroup.zmxy.zmmemberop.biz.rpc.AlchemyRpcManager.withdraw",
+                    requestData,
+                )
+            }
+
+            @JvmStatic
+            fun alchemyQueryAvailableItems(): String {
+                val requestData = JSONArray().put(JSONObject().put("bizScene", "ALCHEMY")).toString()
+                return RequestManager.requestString(
+                    "com.antgroup.zmxy.zmmemberop.biz.rpc.ItemRpcManager.queryAvailableItems",
+                    requestData,
+                )
+            }
+
+            @JvmStatic
+            fun alchemyUseItem(
+                itemId: String,
+                itemType: String,
+            ): String {
+                val requestData =
+                    JSONArray().put(
+                        JSONObject()
+                            .put("itemId", itemId)
+                            .put("itemType", itemType),
+                    ).toString()
+                return RequestManager.requestString(
+                    "com.antgroup.zmxy.zmmemberop.biz.rpc.ItemRpcManager.useItem",
+                    requestData,
                 )
             }
 

@@ -326,6 +326,8 @@ class TaskFlowEngine(
     fun run(): TaskFlowRunResult {
         val failedActionKeys = mutableSetOf<String>()
         val deferredActionKeys = mutableSetOf<String>()
+        // 动作 RPC 成功但未宣称状态变化时，只允许一次确认查询，避免同一任务重复撞接口。
+        val noProgressConfirmationActionKeys = mutableSetOf<String>()
         var round = 1
         var roundLimit = 1
         var hardRoundLimit = 1
@@ -436,6 +438,7 @@ class TaskFlowEngine(
             var progressed = false
             var stopCurrentRound = false
             var refreshRequested = false
+            var noProgressConfirmationRefreshRequested = false
             val roundActions = mutableListOf<TaskFlowRoundAction>()
             val roundDeferredReasonCounts = linkedMapOf<DeferredReason, Int>()
             val candidates = buildActionCandidates(items)
@@ -461,6 +464,11 @@ class TaskFlowEngine(
                 if (actionKey in deferredActionKeys) {
                     adapter.logInfo("${adapter.flowName}[本轮已跳过明确延后任务：${item.title}]")
                     roundActions.add(TaskFlowRoundAction("跳过已延后${action.logName}", item.title))
+                    continue
+                }
+                if (actionKey in noProgressConfirmationActionKeys) {
+                    adapter.logInfo("${adapter.flowName}[回查后未确认进展，跳过重复${action.logName}：${item.title}]")
+                    roundActions.add(TaskFlowRoundAction("跳过未确认进展${action.logName}", item.title))
                     continue
                 }
 
@@ -513,6 +521,10 @@ class TaskFlowEngine(
                     roundActions.add(TaskFlowRoundAction(successActionText(action), item.title))
                     if (result.refreshAfterAction) {
                         refreshRequested = true
+                        if (!result.progressChanged) {
+                            noProgressConfirmationActionKeys.add(actionKey)
+                            noProgressConfirmationRefreshRequested = true
+                        }
                         break
                     }
                     continue
@@ -581,6 +593,20 @@ class TaskFlowEngine(
                     deferredReasonCounts = deferredReasonCountsAny,
                     failureCount = failureCountAny,
                 )
+            }
+
+            if (noProgressConfirmationRefreshRequested &&
+                !stopCurrentRound &&
+                !ApplicationHookConstants.isOffline()
+            ) {
+                val requiredRound = (round + 1).coerceAtMost(hardRoundLimit)
+                if (requiredRound > roundLimit) {
+                    roundLimit = requiredRound
+                }
+                adapter.logInfo("${adapter.flowName}[动作成功但未确认进展，执行一次服务端回查]")
+                GlobalThreadPools.sleepCompat(roundSleepMs)
+                round++
+                continue
             }
 
             if (stopCurrentRound || !progressed) {
@@ -942,6 +968,7 @@ class TaskFlowEngine(
                 append(adapter.flowName)
                 when {
                     completed -> append("[本轮完成]")
+                    noProgressSuccess && !progressed -> append("[本轮成功但未确认进展]")
                     !interrupted && failureCount == 0 -> append("[本轮明确延后]")
                     else -> append("[本轮真实失败]")
                 }

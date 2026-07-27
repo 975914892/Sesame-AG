@@ -19,6 +19,7 @@ import io.github.aoguai.sesameag.task.antOrchard.AntOrchard
 import io.github.aoguai.sesameag.task.antSesameCredit.AntSesameCredit
 import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.customTasks.ManualTask
+import io.github.aoguai.sesameag.task.youthPrivilege.YouthPrivilege
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.Notify.updateRunningTaskOrder
 import io.github.aoguai.sesameag.util.Notify.updateRunningNextExec
@@ -293,32 +294,37 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 2) 森林 作为联动前置批次。
+            // 2) 青春特权先领取可供森林消费的道具。
+            takeBatch { it is YouthPrivilege }
+                .takeIf { it.isNotEmpty() }
+                ?.let(::add)
+
+            // 3) 森林承接青春特权已确认的道具状态。
             takeBatch { it is AntForest }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 3) 海洋尽量承接前面模块已完成的联动任务状态，减少碎片奖励漏领。
+            // 4) 海洋尽量承接前面模块已完成的联动任务状态，减少碎片奖励漏领。
             takeBatch { it is AntOcean }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 4) 芭芭农场先跑：施肥会先产出庄园做美食所需食材。
+            // 5) 芭芭农场先跑：施肥会先产出庄园做美食所需食材。
             takeBatch { it is AntOrchard }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 5) 福气鱼池放在农场之后，保持独立玩法批次。
+            // 6) 福气鱼池放在农场之后，保持独立玩法批次。
             takeBatch { it is AntFishPond }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 6) 庄园尽量承接前面模块已完成的联动任务状态，减少碎片奖励漏领。
+            // 7) 庄园尽量承接前面模块已完成的联动任务状态，减少碎片奖励漏领。
             takeBatch { it is AntFarm }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 7) 会员与芝麻信用放在联动行为之后。
+            // 8) 会员与芝麻信用放在联动行为之后。
             takeBatch { it is AntMember || it is AntSesameCredit }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
