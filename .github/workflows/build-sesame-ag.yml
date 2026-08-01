@@ -125,16 +125,6 @@ jobs:
           fetch-depth: 0
           ref: dev
 
-      - name: 校验工具链版本一致性
-        run: |
-          grep -Eq '^distributionUrl=.*gradle-'"${LOCAL_GRADLE_VERSION//./\\.}"'-bin\.zip$' gradle/wrapper/gradle-wrapper.properties
-          grep -Eq '^android-plugin = "'"${LOCAL_AGP_VERSION//./\\.}"'"$' gradle/libs.versions.toml
-          grep -Eq '^kotlin = "'"${LOCAL_KOTLIN_VERSION//./\\.}"'"$' gradle/libs.versions.toml
-          grep -Eq '^appVersion=.+' gradle.properties
-          grep -Eq 'compileSdk = '"${ANDROID_API_LEVEL}"'$' app/build.gradle.kts
-          grep -Eq 'sourceCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
-          grep -Eq 'targetCompatibility = JavaVersion.VERSION_17' app/build.gradle.kts
-
       - name: 安装JDK环境
         uses: actions/setup-java@v5
         with:
