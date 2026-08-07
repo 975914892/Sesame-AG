@@ -3,21 +3,26 @@
 package io.github.aoguai.sesameag.util
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.os.Environment
 import com.fasterxml.jackson.core.type.TypeReference
 import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.UserEntity
-import java.io.Closeable
 import java.io.File
 import java.io.FileWriter
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 
 object Files {
     private val TAG = Files::class.java.simpleName
+
+    data class ClearAllResult(
+        val failedPaths: List<String>
+    ) {
+        val success: Boolean
+            get() = failedPaths.isEmpty()
+    }
 
     const val CONFIG_DIR_NAME = "sesame-AG"
 
@@ -33,8 +38,7 @@ object Files {
     /**
      * 确保指定的目录存在且不是一个文件。
      */
-    @JvmStatic
-    fun ensureDir(directory: File?) {
+    private fun ensureDir(directory: File?) {
         try {
             if (directory == null) {
                 android.util.Log.e(TAG, "Directory cannot be null")
@@ -205,11 +209,6 @@ object Files {
     @JvmStatic
     fun getStatusFile(userId: String?): File? {
         return getTargetFileofUser(userId, "status.json")
-    }
-
-    @JvmStatic
-    fun getFriendWatchFile(userId: String): File? {
-        return getTargetFileofUser(userId, "friendWatch.json")
     }
 
     @JvmStatic
@@ -419,24 +418,6 @@ object Files {
     fun getLogFile(channel: LogChannel): File = ensureLogFile(channel.fileName)
 
     @JvmStatic
-    fun getLogFileByLoggerName(loggerName: String?): File? {
-        val channel = LogCatalog.findByLoggerName(loggerName) ?: return null
-        return getLogFile(channel)
-    }
-
-    @JvmStatic
-    fun getVisibleLogChannels(): List<LogChannel> = LogCatalog.visibleChannels()
-
-    @JvmStatic
-    fun close(c: Closeable?) {
-        try {
-            c?.close()
-        } catch (e: IOException) {
-            Log.printStackTrace(TAG, e)
-        }
-    }
-
-    @JvmStatic
     fun readFromFile(f: File): String {
         if (!f.exists()) return ""
         if (!f.canRead()) {
@@ -452,8 +433,7 @@ object Files {
         }
     }
 
-    @JvmStatic
-    fun beforWrite(f: File): Boolean {
+    private fun beforeWrite(f: File): Boolean {
         if (f.exists()) {
             if (!f.canWrite()) {
                 ToastUtil.showToast("${f.absoluteFile}没有写入权限！")
@@ -478,7 +458,7 @@ object Files {
     @JvmStatic
     @Synchronized
     fun write2File(s: String, f: File): Boolean {
-        if (beforWrite(f)) return false
+        if (beforeWrite(f)) return false
         var fw: FileWriter? = null
         try {
             fw = FileWriter(f, false)
@@ -499,8 +479,7 @@ object Files {
         }
     }
 
-    @JvmStatic
-    fun copy(source: File, dest: File): Boolean {
+    private fun copy(source: File, dest: File): Boolean {
         // Kotlin 扩展方法，内部使用了 FileChannel 或 Files.copy
         return try {
             createFile(dest)?.let { target ->
@@ -513,23 +492,7 @@ object Files {
         }
     }
 
-    @JvmStatic
-    fun streamTo(source: InputStream, dest: OutputStream): Boolean {
-        return try {
-            source.use { input ->
-                dest.use { output ->
-                    input.copyTo(output)
-                }
-            }
-            true
-        } catch (e: IOException) {
-            Log.printStackTrace(e)
-            false
-        }
-    }
-
-    @JvmStatic
-    fun createFile(file: File): File? {
+    private fun createFile(file: File): File? {
         if (file.exists() && file.isDirectory) {
             if (!file.delete()) return null
         }
@@ -581,6 +544,52 @@ object Files {
             }
         }
         return allSuccess && deleteFileWithRetry(file)
+    }
+
+    /**
+     * 清理模块自有的全部持久化文件，但保留静态目录对象及其根目录本身。
+     * 用户主动导出的备份位于 Downloads，不属于这里的模块存储范围。
+     */
+    @JvmStatic
+    @Synchronized
+    fun clearAllModuleData(context: Context): ClearAllResult {
+        val failedPaths = linkedSetOf<String>()
+        val targets = linkedSetOf<File>()
+
+        targets += MAIN_DIR
+        context.getExternalFilesDir("logs")?.let { targets += it }
+        targets += File(context.filesDir, "logs")
+
+        targets.forEach { directory ->
+            clearDirectoryContents(directory, failedPaths)
+        }
+
+        ensureDir(MAIN_DIR)
+        ensureDir(CONFIG_DIR)
+        ensureDir(LOG_DIR)
+
+        return ClearAllResult(failedPaths.toList())
+    }
+
+    private fun clearDirectoryContents(directory: File, failedPaths: MutableSet<String>) {
+        if (!directory.exists()) return
+        if (!directory.isDirectory) {
+            if (!deleteFileWithRetry(directory)) {
+                failedPaths += directory.absolutePath
+            }
+            return
+        }
+
+        val children = directory.listFiles()
+        if (children == null) {
+            failedPaths += directory.absolutePath
+            return
+        }
+        children.forEach { child ->
+            if (!delFile(child)) {
+                failedPaths += child.absolutePath
+            }
+        }
     }
 
     private fun deleteFileWithRetry(file: File): Boolean {

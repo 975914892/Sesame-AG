@@ -84,7 +84,6 @@ import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.lang.AutoCloseable
 import java.lang.reflect.Method
 import java.util.Calendar
@@ -492,7 +491,7 @@ class ApplicationHook {
                 val s = chain.getThisObject() as? Service ?: return@intercept result
                 if (General.CURRENT_USING_SERVICE == s.javaClass.getCanonicalName()) {
                     // TODO: 目前观察到用户手动划掉目标应用后台时，也会走到这里。
-                    // 如果直接 restartByBroadcast()/reOpenApp()，会把“用户主动退出”误判成“异常退出需要恢复”，
+                    // 如果直接 reOpenApp()，会把“用户主动退出”误判成“异常退出需要恢复”，
                     // 进而出现目标应用/模块后台被反复复活的问题。后续可增加独立配置开关，
                     // 由用户决定“宿主前台服务销毁后是否自动恢复目标应用/执行链路”。
                     updateRunningStatus("目标应用前台服务被销毁")
@@ -1214,9 +1213,9 @@ class ApplicationHook {
                 pendingInit = false
                 pendingInitReason = null
                 EnergyWaitingManager.restoreForCurrentSession("init_ready")
-                handlePersistentLaunchAfterInit(appContext!!)
+                val deferGenericStartupTrigger = handlePersistentLaunchAfterInit(appContext!!)
                 ModuleStatusReporter.requestUpdate(reason = "ready")
-                ApplicationHookEntry.onInitCompleted(reason)
+                ApplicationHookEntry.onInitCompleted(reason, deferGenericStartupTrigger)
                 return true
             } catch (th: Throwable) {
                 if (sessionApplied) {
@@ -1230,14 +1229,17 @@ class ApplicationHook {
             }
         }
 
-        private fun handlePersistentLaunchAfterInit(context: Context) {
+        private fun handlePersistentLaunchAfterInit(context: Context): Boolean {
             val launchScheduleId = pendingPersistentLaunchScheduleId
             if (launchScheduleId.isNullOrBlank()) {
                 UnifiedScheduler.reconcilePersistentSchedules(
                     context,
                     mode = PersistentReconcileMode.FIRE_ALARM_DUE,
                 )
-                return
+                return PersistentScheduleRegistry.hasActiveModuleChild(
+                    AccountSessionCoordinator.currentUserId(),
+                    AccountSessionCoordinator.currentSessionEpoch(),
+                )
             }
             record(TAG, "初始化完成，处理持久调度唤醒任务[$launchScheduleId]")
             val schedule = PersistentScheduleRegistry.get(launchScheduleId)
@@ -1249,6 +1251,10 @@ class ApplicationHook {
                 record(TAG, "初始化完成但持久调度任务不存在[$launchScheduleId]")
                 pendingPersistentLaunchScheduleId = null
             }
+            return PersistentScheduleRegistry.hasActiveModuleChild(
+                AccountSessionCoordinator.currentUserId(),
+                AccountSessionCoordinator.currentSessionEpoch(),
+            )
         }
 
         private fun checkBatteryPermission() {
@@ -1435,29 +1441,6 @@ class ApplicationHook {
                 save(now)
             } catch (_: Exception) {
             }
-        }
-
-        fun sendBroadcast(action: String?) {
-            if (appContext != null) appContext!!.sendBroadcast(Intent(action))
-        }
-
-        fun sendBroadcastShell(
-            api: String?,
-            message: String?,
-        ) {
-            if (appContext == null) return
-            val intent = Intent("io.github.aoguai.sesameag.SHELL")
-            intent.putExtra(api, message)
-            appContext!!.sendBroadcast(intent, null)
-        }
-
-        @JvmStatic
-        fun reLoginByBroadcast() {
-            sendBroadcast(ApplicationHookConstants.BroadcastActions.RE_LOGIN)
-        }
-
-        fun restartByBroadcast() {
-            sendBroadcast(ApplicationHookConstants.BroadcastActions.RESTART)
         }
 
         fun reOpenApp() {
