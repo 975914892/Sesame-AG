@@ -15,7 +15,7 @@ import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 
-const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 2
+const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 10
 
 enum class AccountSlotMigrationState {
     READY,
