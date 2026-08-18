@@ -96,7 +96,6 @@ jobs:
 
       # ========== 自动应用自定义补丁 ==========
       - name: 应用自定义补丁（账号池上限改为10）
-        if: steps.check_update.outputs.has_update == 'true'
         id: apply_patches
         run: |
           echo "## 🔧 自定义补丁应用状态" >> $GITHUB_STEP_SUMMARY
@@ -184,7 +183,7 @@ jobs:
           fi
 
       - name: 推送补丁修改到本地仓库
-        if: steps.check_update.outputs.has_update == 'true' && steps.apply_patches.outputs.has_patches == 'true'
+        if: steps.apply_patches.outputs.has_patches == 'true'
         run: git push origin dev
 
   # 任务2：构建APK、签名、发布Release、清理旧版本
