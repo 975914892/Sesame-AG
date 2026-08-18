@@ -1,0 +1,11 @@
+diff --git a/app/src/main/java/io/github/aoguai/sesameag/hook/AccountSlotRegistry.kt b/app/src/main/java/io/github/aoguai/sesameag/hook/AccountSlotRegistry.kt
+--- a/app/src/main/java/io/github/aoguai/sesameag/hook/AccountSlotRegistry.kt
++++ b/app/src/main/java/io/github/aoguai/sesameag/hook/AccountSlotRegistry.kt
+@@ -15,7 +15,7 @@ import java.security.MessageDigest
+ 
+ 
+ 
+-const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 2
++const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 10
+ 
+ enum class AccountSlotMigrationState {
