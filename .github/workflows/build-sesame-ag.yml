@@ -94,6 +94,99 @@ jobs:
         if: steps.check_update.outputs.has_update == 'true'
         run: git push origin dev
 
+      # ========== 自动应用自定义补丁 ==========
+      - name: 应用自定义补丁（账号池上限改为10）
+        if: steps.check_update.outputs.has_update == 'true'
+        id: apply_patches
+        run: |
+          echo "## 🔧 自定义补丁应用状态" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          PATCH_DIR="patches"
+          APPLIED_COUNT=0
+          FAILED_COUNT=0
+          
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "ℹ️ 未找到 patches 目录，跳过补丁应用" >> $GITHUB_STEP_SUMMARY
+            echo "has_patches=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          
+          for patch_file in "$PATCH_DIR"/*.patch; do
+            [ -f "$patch_file" ] || continue
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📄 补丁: $(basename "$patch_file")" >> $GITHUB_STEP_SUMMARY
+            
+            # 检查目标文件是否存在
+            TARGET_FILE=$(grep -m1 '^+++ b/' "$patch_file" | sed 's/^+++ b\///')
+            if [ -z "$TARGET_FILE" ]; then
+              echo "❌ 无法解析补丁目标文件" >> $GITHUB_STEP_SUMMARY
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              continue
+            fi
+            
+            if [ ! -f "$TARGET_FILE" ]; then
+              echo "❌ 目标文件不存在: \`$TARGET_FILE\`" >> $GITHUB_STEP_SUMMARY
+              echo "   原因：原仓库可能已重构或删除该文件，补丁需要更新" >> $GITHUB_STEP_SUMMARY
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              continue
+            fi
+            
+            # 检查补丁是否已经应用过
+            if git apply --reverse --check "$patch_file" 2>/dev/null; then
+              echo "ℹ️ 补丁已应用过，跳过" >> $GITHUB_STEP_SUMMARY
+              APPLIED_COUNT=$((APPLIED_COUNT + 1))
+              continue
+            fi
+            
+            # 尝试应用补丁
+            APPLY_OUTPUT=$(git apply --verbose "$patch_file" 2>&1)
+            APPLY_EXIT=$?
+            
+            if [ $APPLY_EXIT -eq 0 ]; then
+              echo "✅ 补丁应用成功" >> $GITHUB_STEP_SUMMARY
+              APPLIED_COUNT=$((APPLIED_COUNT + 1))
+              git add "$TARGET_FILE"
+            else
+              echo "❌ 补丁应用失败" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**错误详情：**" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "$APPLY_OUTPUT" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**可能原因：**" >> $GITHUB_STEP_SUMMARY
+              echo "1. 原仓库已修改该文件的对应行，上下文不匹配" >> $GITHUB_STEP_SUMMARY
+              echo "2. 原仓库已重构该文件，行号或内容变化" >> $GITHUB_STEP_SUMMARY
+              echo "3. 补丁格式不正确" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**当前目标文件相关内容：**" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              grep -n "MAX_EXECUTABLE_ACCOUNT_SLOTS" "$TARGET_FILE" >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "未找到常量定义" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 汇总" >> $GITHUB_STEP_SUMMARY
+          echo "- 成功: $APPLIED_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- 失败: $FAILED_COUNT" >> $GITHUB_STEP_SUMMARY
+          
+          echo "applied_count=$APPLIED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "failed_count=$FAILED_COUNT" >> "$GITHUB_OUTPUT"
+          
+          if [ $APPLIED_COUNT -gt 0 ]; then
+            git commit -m "chore: 应用自定义补丁（账号池上限调整）" || echo "无变更需提交"
+            echo "has_patches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_patches=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 推送补丁修改到本地仓库
+        if: steps.check_update.outputs.has_update == 'true' && steps.apply_patches.outputs.has_patches == 'true'
+        run: git push origin dev
+
   # 任务2：构建APK、签名、发布Release、清理旧版本
   build-and-sign:
     runs-on: ubuntu-latest
