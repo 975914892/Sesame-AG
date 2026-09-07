@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.RemoteException
+import io.github.aoguai.sesameag.BuildConfig
 import io.github.aoguai.sesameag.ICallback
 import io.github.aoguai.sesameag.ICommandService
 import io.github.aoguai.sesameag.IStatusListener
@@ -48,6 +49,7 @@ object CommandUtil {
     val serviceStatus = _serviceStatus.asStateFlow()
 
     // AIDL 接口实例
+    @Volatile
     private var commandService: ICommandService? = null
 
     // 连接状态管理
@@ -132,8 +134,9 @@ object CommandUtil {
         }
     }
 
-    private fun buildServiceIntent(context: Context): Intent {
-        return Intent(context.applicationContext, CommandService::class.java).apply {
+    private fun buildServiceIntent(): Intent {
+        return Intent().apply {
+            component = ComponentName(BuildConfig.APPLICATION_ID, CommandService::class.java.name)
             action = ACTION_BIND
         }
     }
@@ -181,7 +184,7 @@ object CommandUtil {
             connectionDeferred = CompletableDeferred()
             val appContext = context.applicationContext
             boundContext = appContext
-            val intent = buildServiceIntent(appContext)
+            val intent = buildServiceIntent()
 
             try {
                 repeat(BIND_RETRY_COUNT) { attempt ->
@@ -266,6 +269,19 @@ object CommandUtil {
         }
     }
 
+    fun isExecutionAllowed(userId: String): Boolean {
+        val service = commandService ?: return false
+        return try {
+            service.isExecutionAllowed(userId)
+        } catch (e: RemoteException) {
+            handleServiceLost()
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "执行条件查询失败", e)
+            false
+        }
+    }
+
     /**
      * 等待服务状态从 Loading 落定，供宿主进程复用与首页一致的执行器状态。
      */
@@ -273,6 +289,7 @@ object CommandUtil {
         context: Context,
         timeoutMs: Long = BIND_TIMEOUT_MS + 1500L
     ): ServiceStatus = withContext(Dispatchers.IO) {
+        bindRequested = true
         if (!ensureServiceBound(context)) {
             return@withContext _serviceStatus.value
         }
