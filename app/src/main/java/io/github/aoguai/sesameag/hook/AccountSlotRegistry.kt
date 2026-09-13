@@ -217,10 +217,12 @@ object AccountSlotRegistry {
 
                 AccountSlotRuntimeConfirmation.PendingPersistence -> {
                     Log.record(TAG, "account_slot_provision_unconfirmed: account=${shortHash(userId)}")
+                    Log.w(TAG, "account_slot_provision_unconfirmed: account=${shortHash(userId)}")
                 }
 
                 AccountSlotRuntimeConfirmation.Expired -> {
                     Log.record(TAG, "account_slot_provision_expired: account=${shortHash(userId)}")
+                    Log.w(TAG, "account_slot_provision_expired: account=${shortHash(userId)}")
                 }
 
                 AccountSlotRuntimeConfirmation.RegistryUnavailable -> Unit
@@ -424,6 +426,7 @@ object AccountSlotRegistry {
         }
         if (expiredPendingUserId != null) {
             Log.record(TAG, "account_slot_provision_expired: account=${shortHash(expiredPendingUserId)}")
+            Log.w(TAG, "account_slot_provision_expired: account=${shortHash(expiredPendingUserId)}")
         }
         if (recovered != record) {
             Log.record(
@@ -515,6 +518,7 @@ object AccountSlotRegistry {
             TAG,
             "account_slot_registry_unavailable: ${error.javaClass.simpleName}:${error.message.orEmpty().take(200)}",
         )
+        Log.w(TAG, "account_slot_registry_unavailable: error=${error.javaClass.simpleName}")
     }
 
     private fun readLockedRecord(
@@ -549,12 +553,13 @@ object AccountSlotRegistry {
         }.getOrDefault(false).also { success ->
             if (!success) {
                 Log.record(TAG, "account_slot_registry_write_failed")
+                Log.w(TAG, "account_slot_registry_write_failed")
             }
             temporaryFile?.takeIf { it.exists() }?.delete()
         }
     }
 
-    private fun shortHash(value: String): String =
+    internal fun shortHash(value: String): String =
         MessageDigest
             .getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))

@@ -112,8 +112,8 @@ class ShellManager(context: Context) {
     /**
      * 执行命令
      */
-    suspend fun exec(command: String): ShellResult {
-        selectExecutor()
+    suspend fun exec(command: String, refreshExecutor: Boolean = true): ShellResult {
+        if (refreshExecutor) selectExecutor()
         val shell = selectedShell ?: return ShellResult( "", "No valid Root/Shizuku shell found.",-1)
         Log.d(TAG, "执行命令: $command (via $selectedName)")
         return shell.exec(command, 5_000L)

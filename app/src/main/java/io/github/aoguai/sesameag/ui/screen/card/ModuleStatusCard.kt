@@ -50,6 +50,8 @@ fun ModuleStatusCard(
     status: MainViewModel.ModuleStatus,
     permissionHealth: PermissionHealthSnapshot,
     hasActiveUser: Boolean,
+    onExternalNavigation: () -> Unit,
+    onDialogVisibilityChange: (Boolean) -> Unit,
     isLegalAccepted: Boolean,
     isSavingLegalAcceptance: Boolean,
     onRefresh: () -> Unit,
@@ -57,8 +59,8 @@ fun ModuleStatusCard(
 ) {
     val context = LocalContext.current
     var showActivationSteps by rememberSaveable { mutableStateOf(false) }
-    val canConfirmLegal = hasActiveUser &&
-        permissionHealth.item(PermissionRequirement.MODULE_FILE)?.isGranted == true &&
+    val canConfirmLegal = (!hasActiveUser ||
+        permissionHealth.item(PermissionRequirement.MODULE_FILE)?.isGranted == true) &&
         !isSavingLegalAcceptance
     val title = when (status) {
         MainViewModel.ModuleStatus.Loading -> "正在检查模块"
@@ -135,8 +137,10 @@ fun ModuleStatusCard(
                 Button(
                     onClick = {
                         if (status is MainViewModel.ModuleStatus.Unsupported) {
+                            onExternalNavigation()
                             context.openUrl(General.PROJECT_HOMEPAGE_URL)
                         } else {
+                            onDialogVisibilityChange(true)
                             showActivationSteps = true
                         }
                     },
@@ -169,11 +173,11 @@ fun ModuleStatusCard(
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(
-                        onClick = { context.openUrl("https://github.com/Sesame-AG/Sesame-AG/blob/dev/LICENSE") },
+                        onClick = { onExternalNavigation(); context.openUrl("https://github.com/Sesame-AG/Sesame-AG/blob/dev/LICENSE") },
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text("LICENSE") }
                     TextButton(
-                        onClick = { context.openUrl("https://github.com/Sesame-AG/Sesame-AG/blob/dev/LEGAL.md") },
+                        onClick = { onExternalNavigation(); context.openUrl("https://github.com/Sesame-AG/Sesame-AG/blob/dev/LEGAL.md") },
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text("LEGAL") }
                 }
@@ -182,7 +186,10 @@ fun ModuleStatusCard(
     }
     CommonAlertDialog(
         showDialog = showActivationSteps,
-        onDismissRequest = { showActivationSteps = false },
+        onDismissRequest = {
+            showActivationSteps = false
+            onDialogVisibilityChange(false)
+        },
         onConfirm = onRefresh,
         title = "启用模块",
         text = "LSPosed → 模块 → 芝麻粒 → 启用<br>作用域 → 目标应用",

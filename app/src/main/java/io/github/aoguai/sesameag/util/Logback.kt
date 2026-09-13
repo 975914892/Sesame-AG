@@ -32,6 +32,9 @@ object Logback {
     private var isRollingOwnerProcess = false
     private var processLogSuffix: String? = null
 
+    var systemLogFile: File? = null
+        private set
+
     // 捕获 Hook 在账户配置加载前已可能写入日志，首轮文件初始化必须直接创建 capture Appender。
     private var isCaptureFileAppenderEnabled = true
 
@@ -100,15 +103,22 @@ object Logback {
             initLogcatOnly() // 内部执行 lc.reset()
         }
 
-        val logDir = resolveLogDir(context)
-
         try {
             val lc = LoggerFactory.getILoggerFactory() as LoggerContext
+            // 首次使用尚未获得共享文件权限时，诊断仍必须可以落盘。
+            if (processName == General.MODULE_PACKAGE_NAME) {
+                val directory = File(context.filesDir, "logs/diagnostics")
+                check(File(directory, "bak").isDirectory || File(directory, "bak").mkdirs())
+                systemLogFile = File(directory, LogChannel.SYSTEM.fileName)
+                addFileAppender(lc, LogChannel.SYSTEM.loggerName, directory.absolutePath + File.separator, LogChannel.SYSTEM.fileName)
+            }
+            val logDir = resolveLogDir(context)
 
             val fullTimestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date())
             val allLogNames = (LogCatalog.loggerNames() + listOf("other", "captcha")).distinct()
 
             allLogNames.forEach { logName ->
+                if (logName == LogChannel.SYSTEM.loggerName) return@forEach
                 if (logName == LogChannel.CAPTURE.loggerName && !isCaptureFileAppenderEnabled) {
                     return@forEach
                 }
@@ -141,7 +151,7 @@ object Logback {
      * 只有滚动所有者进程跨天时，才会触发 initFileLogging 重新建立滚动 Appender。
      */
     fun refreshIfCrossDay() {
-        if (!isRollingOwnerProcess) return
+        if (!isRollingOwnerProcess && systemLogFile == null) return
         val now = System.currentTimeMillis()
         if (isFileInitialized && now >= nextMidnightMillis) {
             appContext?.let { initFileLogging(it) }
@@ -153,6 +163,22 @@ object Logback {
         isCaptureFileAppenderEnabled = enableCaptureAppender
         val context = appContext ?: return
         initFileLogging(context, force = true)
+    }
+
+    @Synchronized
+    fun clearSystemLog(): Boolean {
+        val file = systemLogFile ?: return false
+        val lc = LoggerFactory.getILoggerFactory() as LoggerContext
+        lc.getLogger(LogChannel.SYSTEM.loggerName).detachAndStopAllAppenders()
+        return try {
+            val children = file.parentFile?.listFiles() ?: return false
+            children.map { it.deleteRecursively() }.all { it }
+        } finally {
+            file.parentFile?.let { directory ->
+                File(directory, "bak").mkdirs()
+                addFileAppender(lc, LogChannel.SYSTEM.loggerName, directory.absolutePath + File.separator, file.name)
+            }
+        }
     }
 
     private fun calculateNextMidnight(now: Long): Long =
@@ -207,7 +233,8 @@ object Logback {
         fileName: String,
     ) {
         val isCaptureAppender = logName == LogChannel.CAPTURE.loggerName
-        val usesRollingFileAppender = isRollingOwnerProcess && !isCaptureAppender
+        val isSystemAppender = logName == LogChannel.SYSTEM.loggerName
+        val usesRollingFileAppender = isSystemAppender || (isRollingOwnerProcess && !isCaptureAppender)
         val logger = lc.getLogger(logName)
         listOf("FILE-$logName", "APPEND-$fileName", "ASYNC-$logName").forEach { appenderName ->
             logger.getAppender(appenderName)?.let { existing ->
@@ -262,7 +289,8 @@ object Logback {
         logger.apply {
             level = Level.ALL
             isAdditive = true
-            if (isCaptureAppender) {
+            if (isCaptureAppender || isSystemAppender) {
+                // 诊断同步写入，保证初始化失败与用户清理操作不会丢失在异步队列中。
                 // Captured RPC traffic must remain one JSON event per physical line.
                 addAppender(fileAppender)
             } else {

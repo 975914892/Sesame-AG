@@ -88,8 +88,11 @@ object Files {
 
     /** Lists existing account configuration directories without creating or migrating files. */
     @JvmStatic
-    fun listExistingUserConfigIds(): List<String> =
-        CONFIG_DIR.listFiles()
+    @JvmOverloads
+    fun listExistingUserConfigIds(requireReadable: Boolean = false): List<String> =
+        (CONFIG_DIR.listFiles() ?: if (requireReadable) {
+            throw IOException("account_config_directory_unreadable")
+        } else null)
             ?.asSequence()
             ?.filter { directory ->
                 directory.isDirectory && File(directory, "config_v2.json").isFile
@@ -301,7 +304,7 @@ object Files {
         }
     }
 
-    private fun maskSensitiveText(text: String, sensitiveKeywords: List<String>): String {
+    internal fun maskSensitiveText(text: String, sensitiveKeywords: List<String>): String {
         var sanitized = text
         sensitiveKeywords.forEach { keyword ->
             sanitized = sanitized.replace(keyword, "***")
@@ -309,7 +312,7 @@ object Files {
         return sanitized
     }
 
-    private fun collectLogSensitiveKeywords(): List<String> {
+    internal fun collectLogSensitiveKeywords(): List<String> {
         val keywords = linkedSetOf<String>()
         CONFIG_DIR.listFiles()?.filter { it.isDirectory }?.forEach { userDir ->
             collectKeywordsFromSelfFile(File(userDir, "self.json"), keywords)
@@ -427,7 +430,10 @@ object Files {
     }
 
     @JvmStatic
-    fun getLogFile(channel: LogChannel): File = ensureLogFile(channel.fileName)
+    fun getLogFile(channel: LogChannel): File =
+        if (channel == LogChannel.SYSTEM) {
+            checkNotNull(Logback.systemLogFile) { "System diagnostics not initialized" }
+        } else ensureLogFile(channel.fileName)
 
     @JvmStatic
     fun readFromFile(f: File): String {

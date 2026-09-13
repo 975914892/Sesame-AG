@@ -26,6 +26,7 @@ class SesameApplication : Application() {
         appContext = applicationContext
         ToastUtil.init(this)
         Log.init(this)
+        io.github.aoguai.sesameag.util.ModuleDiagnostics.event("application", "created")
         ThemeManager.init(this)
     }
 }

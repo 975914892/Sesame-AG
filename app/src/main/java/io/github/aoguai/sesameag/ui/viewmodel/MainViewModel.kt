@@ -18,6 +18,9 @@ import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.service.ConnectionState
 import io.github.aoguai.sesameag.service.LsposedServiceManager
 import io.github.aoguai.sesameag.ui.permissions.PermissionHealthSnapshot
+import io.github.aoguai.sesameag.ui.permissions.PermissionRequirement
+import io.github.aoguai.sesameag.util.CommandUtil
+import io.github.aoguai.sesameag.util.PermissionUtil
 import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.DirectoryWatcher
 import io.github.aoguai.sesameag.util.SesameAgUtil
@@ -25,9 +28,16 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.IconManager
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.LogCatalog
+import io.github.aoguai.sesameag.util.LogChannel
+import io.github.aoguai.sesameag.util.ModuleDiagnostics
 import io.github.aoguai.sesameag.util.ToastUtil
 import io.github.aoguai.sesameag.util.maps.UserMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,6 +88,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "MainViewModel"
     }
+
+    sealed interface AccountConfigState {
+        data object Loading : AccountConfigState
+        data class Ready(val userIds: List<String>) : AccountConfigState
+        data object Unavailable : AccountConfigState
+    }
+
+    private val _accountConfigState = MutableStateFlow<AccountConfigState>(AccountConfigState.Loading)
+    private val _accountGuide = MutableStateFlow<String?>(null)
+    val accountGuide = _accountGuide.asStateFlow()
+    private var foregroundActive = false
+    private var homeVisible = false
+    private var guidanceShown = false
+    private var skipNextForegroundGuide = false
+    private var permissionQueueBusy = false
+    private var homeDialogVisible = false
+    private var configRefreshJob: Job? = null
+    private var legalRefreshJob: Job? = null
+    private var collectionJob: Job? = null
+    private var retriedCollection = false
 
     // 1. 定义状态
     private val _oneWord = MutableStateFlow("正在获取句子...")
@@ -165,19 +195,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 刷新模块框架激活状态
      */
     fun refreshModuleFrameworkStatus() {
-        val lspState = LsposedServiceManager.connectionState
-        if (lspState !is ConnectionState.Connected) {
-            _moduleStatus.value = ModuleStatus.NotActivated
-            return
-        }
-
+        val config = _accountConfigState.value
+        val userId = _activeUser.value?.userId
+        val slots = _accountSlots.value
         val frameworkStatus = LsposedServiceManager.connectedFrameworkStatus()
-        if (frameworkStatus == null) {
-            _moduleStatus.value = ModuleStatus.NotActivated
-            return
-        }
-
-        _moduleStatus.value = if (frameworkStatus.isSupportedLsposed) {
+        _moduleStatus.value = if (LsposedServiceManager.connectionState !is ConnectionState.Connected || frameworkStatus == null) {
+            ModuleStatus.NotActivated
+        } else if (frameworkStatus.isSupportedLsposed) {
             if (_permissionHealth.value.areRequiredPermissionsGranted &&
                 _isLegalAccepted.value && !_isSavingLegalAcceptance.value
             ) {
@@ -205,6 +229,118 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             )
         }
+        ModuleDiagnostics.state(_permissionHealth.value, config.javaClass.simpleName,
+            (config as? AccountConfigState.Ready)?.userIds?.size, userId, _isLegalAccepted.value, slots)
+        maybeShowAccountGuide()
+    }
+
+    fun onForegroundStarted() {
+        if (!foregroundActive) {
+            foregroundActive = true
+            guidanceShown = skipNextForegroundGuide
+            _accountConfigState.value = AccountConfigState.Loading
+            ModuleDiagnostics.event("foreground", "entered")
+        }
+        skipNextForegroundGuide = false
+        maybeShowAccountGuide()
+    }
+
+    fun onForegroundStopped() {
+        foregroundActive = false
+        _accountGuide.value = null
+    }
+
+    fun markExternalNavigation() {
+        skipNextForegroundGuide = true
+        guidanceShown = true
+        _accountGuide.value = null
+    }
+
+    fun cancelExternalNavigation() { skipNextForegroundGuide = false }
+
+    fun setPermissionQueueBusy(busy: Boolean) {
+        permissionQueueBusy = busy
+        maybeShowAccountGuide()
+    }
+
+    fun setHomeDialogVisible(visible: Boolean) {
+        homeDialogVisible = visible
+        maybeShowAccountGuide()
+    }
+
+    fun resetAccountGuide() {
+        guidanceShown = false
+        skipNextForegroundGuide = false
+        _accountGuide.value = null
+        _accountConfigState.value = AccountConfigState.Loading
+    }
+
+    fun setHomeVisible(visible: Boolean) {
+        if (homeVisible == visible) return
+        homeVisible = visible
+        if (!visible) {
+            collectionJob?.cancel()
+            _accountGuide.value = null
+            return
+        }
+        retriedCollection = CommandUtil.serviceStatus.value is CommandUtil.ServiceStatus.Active
+        collectHomeDiagnostics("home_enter")
+        maybeShowAccountGuide()
+    }
+
+    fun onExecutorStateChanged() {
+        if (homeVisible && !retriedCollection && CommandUtil.serviceStatus.value is CommandUtil.ServiceStatus.Active) {
+            retriedCollection = true
+            collectionJob?.cancel()
+            collectHomeDiagnostics("executor_ready")
+        }
+    }
+
+    private fun collectHomeDiagnostics(reason: String) {
+        val previous = collectionJob
+        collectionJob = viewModelScope.launch(Dispatchers.IO) {
+            previous?.cancelAndJoin()
+            try {
+                ModuleDiagnostics.environment(getApplication(), reason)
+                ModuleDiagnostics.collectLogcat(getApplication(), reason)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ModuleDiagnostics.event("home_diagnostics", "failed", "error=${e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    private fun maybeShowAccountGuide() {
+        val config = _accountConfigState.value as? AccountConfigState.Ready ?: return
+        if (config.userIds.isNotEmpty()) {
+            _accountGuide.value = null
+            return
+        }
+        if (!foregroundActive || !homeVisible || guidanceShown || permissionQueueBusy || homeDialogVisible) return
+        if (LsposedServiceManager.connectedFrameworkStatus()?.isSupportedLsposed != true) return
+        if (_permissionHealth.value.item(PermissionRequirement.MODULE_FILE)?.isGranted != true ||
+            _permissionHealth.value.item(PermissionRequirement.LSPOSED_TARGET_SCOPE)?.isGranted != true) return
+        guidanceShown = true
+        _accountGuide.value = "initial"
+        ModuleDiagnostics.event("account_guide", "shown", "trigger=foreground")
+    }
+
+    fun showAccountGuideForLegal() {
+        guidanceShown = true
+        val reason = when (_accountConfigState.value) {
+            AccountConfigState.Loading -> "loading"
+            AccountConfigState.Unavailable -> "unreadable"
+            is AccountConfigState.Ready -> "legal"
+        }
+        _accountGuide.value = reason
+        ModuleDiagnostics.event("legal_acceptance", "account_unavailable", "reason=$reason")
+    }
+
+    fun dismissAccountGuide() {
+        if (_accountGuide.value == null) return
+        _accountGuide.value = null
+        ModuleDiagnostics.event("account_guide", "dismissed")
     }
 
     /**
@@ -215,6 +351,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val activeUserEntity = DataStore.get("activedUser", UserEntity::class.java)
             val resolvedActiveUser = activeUserEntity ?: recoverActiveUserSnapshot()
+            if (_activeUser.value?.userId != resolvedActiveUser?.userId) _isLegalAccepted.value = false
             _activeUser.value = resolvedActiveUser
             UserMap.setCurrentUserId(resolvedActiveUser?.userId?.trim()?.takeIf { it.isNotEmpty() })
         } catch (e: Exception) {
@@ -299,20 +436,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 刷新用户配置
      */
     fun refreshUserConfigs() {
-        viewModelScope.launch(Dispatchers.IO) {
+        configRefreshJob?.cancel()
+        configRefreshJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                val latestUserIds = Files.listExistingUserConfigIds()
+                check(PermissionUtil.checkFilePermissions(getApplication()))
+                val latestUserIds = Files.listExistingUserConfigIds(requireReadable = true)
                 val newList = mutableListOf<UserEntity>()
                 for (userId in latestUserIds) {
                     UserMap.loadSelf(userId)
                     UserMap.get(userId)?.let { newList.add(it) }
                 }
+                currentCoroutineContext().ensureActive()
                 _userList.value = newList
                 _accountSlots.value = AccountSlotRegistry.snapshot()
                 refreshActiveUser()
+                _accountConfigState.value = AccountConfigState.Ready(latestUserIds)
                 refreshLegalAcceptanceState()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                _accountConfigState.value = AccountConfigState.Unavailable
+                _isLegalAccepted.value = false
+                ModuleDiagnostics.event("account_config", "unreadable", "error=${e.javaClass.simpleName}")
                 Log.e(TAG, "Error reloading user configs", e)
+            } finally {
+                refreshModuleFrameworkStatus()
             }
         }
     }
@@ -357,7 +505,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAllTodayFlags(userId: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            ModuleDiagnostics.event("clear_daily_flags", "requested", "account=${ModuleDiagnostics.account(userId)}")
             val result = Status.clearAllTodayFlagsForUser(userId)
+            ModuleDiagnostics.event("clear_daily_flags", if (result.isSuccess) "completed" else "failed",
+                "account=${ModuleDiagnostics.account(userId)} written=${result.written} removed=${result.removedCount}")
             if (result.isSuccess && result.written) {
                 getApplication<Application>().sendBroadcast(
                     Intent(ApplicationHookConstants.BroadcastActions.RESTART).apply {
@@ -378,11 +529,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setExecutableAccountSlot(userId: String?, enabled: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
+            ModuleDiagnostics.event("account_slot", "requested", "account=${ModuleDiagnostics.account(userId)} enabled=$enabled")
             val result = if (enabled) {
                 AccountSlotRegistry.addExecutableSlot(getApplication<Application>(), userId)
             } else {
                 AccountSlotRegistry.removeExecutableSlot(getApplication<Application>(), userId)
             }
+            ModuleDiagnostics.event("account_slot", if (result.replaced) "completed" else "rejected",
+                "account=${ModuleDiagnostics.account(userId)} enabled=$enabled reason=${result.reasonCode ?: "none"}")
             if (!result.replaced) {
                 val message = when (result.reasonCode) {
                     "registry_unavailable" -> "可执行账号配置暂不可读取，请稍后重试"
@@ -397,20 +551,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setLegalAccepted(accepted: Boolean) {
+        val targetUserId = _activeUser.value?.userId?.trim()?.takeIf { it.isNotEmpty() }
+        val config = _accountConfigState.value as? AccountConfigState.Ready
+        if (targetUserId == null || config == null || targetUserId !in config.userIds) {
+            showAccountGuideForLegal()
+            return
+        }
         if (!_isSavingLegalAcceptance.compareAndSet(false, true)) return
+        ModuleDiagnostics.event("legal_acceptance", "requested", "account=${ModuleDiagnostics.account(targetUserId)} accepted=$accepted")
         refreshModuleFrameworkStatus()
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val targetUserId = resolveActiveUserId()
-                val existingUserIds = resolveExistingUserConfigIds()
-                val saveSuccess = if (!targetUserId.isNullOrEmpty()) {
-                    Config.saveLegalAcceptedForCurrentVersion(targetUserId, accepted)
-                } else if (existingUserIds.isNotEmpty()) {
-                    Config.saveLegalAcceptedForUsers(existingUserIds, accepted)
-                } else {
-                    Log.e(TAG, "Cannot save legal acceptance: active user is unknown")
-                    false
-                }
+                val stillPresent = targetUserId in Files.listExistingUserConfigIds(requireReadable = true)
+                val saveSuccess = stillPresent && Config.saveLegalAcceptedForCurrentVersion(targetUserId, accepted)
+                ModuleDiagnostics.event("legal_acceptance", if (saveSuccess) "saved" else "failed",
+                    "account=${ModuleDiagnostics.account(targetUserId)} accepted=$accepted")
 
                 if (!saveSuccess) {
                     Log.e(TAG, "Save legal acceptance failed")
@@ -419,15 +574,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                val readUserId = targetUserId ?: existingUserIds.singleOrNull()
-                _isLegalAccepted.value = Config.readLegalAcceptedForCurrentVersion(readUserId)
-
-                if (!targetUserId.isNullOrEmpty()) {
-                    sendConfigReloadBroadcast(targetUserId)
-                } else {
-                    existingUserIds.forEach { sendConfigReloadBroadcast(it) }
-                }
+                refreshLegalAcceptanceState()
+                sendConfigReloadBroadcast(targetUserId)
             } catch (e: Exception) {
+                ModuleDiagnostics.event("legal_acceptance", "failed", "account=${ModuleDiagnostics.account(targetUserId)} error=${e.javaClass.simpleName}")
                 Log.e(TAG, "Update legal acceptance failed", e)
                 ToastUtil.showUiToast(getApplication(), "保存失败，请重试")
                 refreshLegalAcceptanceState()
@@ -439,10 +589,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshLegalAcceptanceState() {
-        viewModelScope.launch(Dispatchers.IO) {
+        legalRefreshJob?.cancel()
+        legalRefreshJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                val activeUserId = resolveActiveUserId()
-                _isLegalAccepted.value = Config.readLegalAcceptedForCurrentVersion(activeUserId)
+                val activeUserId = _activeUser.value?.userId
+                val config = _accountConfigState.value as? AccountConfigState.Ready
+                val accepted = !activeUserId.isNullOrBlank() && config != null && activeUserId in config.userIds &&
+                    Config.readLegalAcceptedForCurrentVersion(activeUserId)
+                currentCoroutineContext().ensureActive()
+                if (_activeUser.value?.userId == activeUserId) _isLegalAccepted.value = accepted
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Read legal acceptance failed", e)
                 _isLegalAccepted.value = false
@@ -472,18 +629,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updatePermissionHealth(snapshot: PermissionHealthSnapshot) {
         _permissionHealth.value = snapshot
+        if (snapshot.item(PermissionRequirement.MODULE_FILE)?.isGranted != true) {
+            _accountConfigState.value = AccountConfigState.Unavailable
+            _isLegalAccepted.value = false
+            _accountGuide.value = null
+        }
         refreshModuleFrameworkStatus()
     }
 
     fun clearAllLogs(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
             val logFiles = LogCatalog.loggerNames()
+                .filter { it != LogChannel.SYSTEM.loggerName }
                 .map { loggerName -> File(Files.LOG_DIR, LogCatalog.fileName(loggerName)) }
                 .distinctBy { it.absolutePath }
 
             val failedCount = logFiles.count { file ->
                 file.exists() && !Files.clearFile(file)
-            }
+            } + if (ModuleDiagnostics.clear(context)) 0 else 1
+            ModuleDiagnostics.event("clear_all_logs", if (failedCount == 0) "completed" else "failed", "failed=$failedCount")
             RpcTrafficCapture.resetCaptureSession()
 
             withContext(Dispatchers.Main) {
@@ -517,12 +681,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun sendConfigReloadBroadcast(userId: String) {
-        getApplication<Application>().sendBroadcast(
-            Intent(ApplicationHookConstants.BroadcastActions.RESTART).apply {
-                putExtra("userId", userId)
-                putExtra("configReload", true)
-            }
-        )
+        try {
+            getApplication<Application>().sendBroadcast(
+                Intent(ApplicationHookConstants.BroadcastActions.RESTART).apply {
+                    putExtra("userId", userId)
+                    putExtra("configReload", true)
+                }
+            )
+            ModuleDiagnostics.event("config_reload", "sent", "account=${ModuleDiagnostics.account(userId)}")
+        } catch (e: Exception) {
+            ModuleDiagnostics.event("config_reload", "failed", "account=${ModuleDiagnostics.account(userId)} error=${e.javaClass.simpleName}")
+            throw e
+        }
     }
 }
 

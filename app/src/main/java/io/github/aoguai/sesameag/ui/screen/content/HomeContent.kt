@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -49,12 +50,19 @@ fun HomeContent(
     isLegalAccepted: Boolean,
     isSavingLegalAcceptance: Boolean,
     onLegalAcceptedChange: (Boolean) -> Unit,
+    onDialogVisibilityChange: (Boolean) -> Unit,
+    onExternalNavigation: () -> Unit,
     onOneWordClick: () -> Unit,
     onEvent: (MainActivity.MainUiEvent) -> Unit,
 ) {
     val context = LocalContext.current
     var isServiceCardExpanded by rememberSaveable { mutableStateOf(false) }
     var showOfficialSignatureDialog by rememberSaveable { mutableStateOf(false) }
+    var showActivationDialog by rememberSaveable { mutableStateOf(false) }
+    DisposableEffect(showOfficialSignatureDialog, showActivationDialog) {
+        onDialogVisibilityChange(showOfficialSignatureDialog || showActivationDialog)
+        onDispose { }
+    }
 
     val isOfficiallySigned by produceState(
         initialValue = false,
@@ -108,6 +116,8 @@ fun HomeContent(
                 status = moduleStatus,
                 permissionHealth = permissionHealth,
                 hasActiveUser = !activeUser?.userId.isNullOrBlank(),
+                onExternalNavigation = onExternalNavigation,
+                onDialogVisibilityChange = { showActivationDialog = it },
                 isLegalAccepted = isLegalAccepted,
                 isSavingLegalAcceptance = isSavingLegalAcceptance,
                 onRefresh = { onEvent(MainActivity.MainUiEvent.RefreshEnvironment) },
