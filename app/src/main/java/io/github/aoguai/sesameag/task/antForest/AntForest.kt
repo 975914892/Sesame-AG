@@ -501,7 +501,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 "收好友N倍卡 | 额外能量领取阈值(g)",
                 1,
                 1,
-                20000
+                100000
             ).withDesc("当 N 倍卡产生的可领取额外能量达到该克数时才自动领取，避免零碎收益。").also { robMultiplierCollectLimit = it }
         )
 
@@ -3900,7 +3900,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                                 }
                             } else {
                                 if (overLimitToday) {
-                                    Log.forest("$propName 今日翻倍能量领取已达上限(20000g)")
+                                    Log.forest("$propName 今日翻倍能量领取已达上限(100000g)")
                                 } else if (leftEnergy > 0.0) {
                                     if (leftEnergy >= 1.0) {
                                         Log.forest("$propName 剩余${leftEnergy}g，未达到领取阈值(${robMultiplierLimit.toInt()}g)，跳过领取")
