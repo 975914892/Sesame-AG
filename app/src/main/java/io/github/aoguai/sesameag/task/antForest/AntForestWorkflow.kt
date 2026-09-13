@@ -11,13 +11,17 @@ private fun logVisibleEnergyCollectionDisabled() {
     Log.forest("收集能量开关关闭：仅跳过自己、好友和 PK 森友的可见绿色能量球收集相关链路；独立奖励任务仍按各自开关执行")
 }
 
-internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: TimeCounter): JSONObject? {
-    if (shouldRunWaterFriendsBeforeCollect()) {
-        Log.forest("🚿 【正常流程】执行预收能量浇水")
-        waterFriends()
-        markWaterFriendsBeforeCollectExecuted()
-        tc.countDebug("预收能量浇水")
+private fun AntForest.runForestWateringWorkflow(tc: TimeCounter, beforeCollect: Boolean) {
+    if (!tryStartWaterFriendsForStage(beforeCollect)) {
+        return
     }
+    Log.forest(if (beforeCollect) "🚿 【正常流程】执行预收能量浇水" else "🚿 【正常流程】执行收能量后浇水")
+    waterFriends()
+    tc.countDebug(if (beforeCollect) "预收能量浇水" else "给好友浇水")
+}
+
+internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: TimeCounter): JSONObject? {
+    runForestWateringWorkflow(tc, beforeCollect = true)
 
     Log.forest("🌳 【正常流程】查询森林主页数据...")
     val initialHome = querySelfHome()
@@ -90,6 +94,7 @@ internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: Tim
         Log.error(FOREST_TAG, "❌ 【正常流程】补充检查自己主页失败")
         tc.countDebug("跳过补充检查自己的能量（主页获取失败）")
     }
+    runForestWateringWorkflow(tc, beforeCollect = false)
     return selfHomeObj
 }
 
@@ -195,14 +200,6 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
         } else {
             Log.forest("绿色行动未到执行时间，跳过")
         }
-    }
-
-    if (hasWaterFriendsBeforeCollectExecuted()) {
-        Log.forest("浇水 | 本轮已在收能量前执行，跳过后置浇水")
-        tc.countDebug("跳过后置浇水（前置已执行）")
-    } else {
-        waterFriends()
-        tc.countDebug("给好友浇水")
     }
 
     if (giveProp?.value == true) {

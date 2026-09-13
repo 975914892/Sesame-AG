@@ -224,7 +224,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private var wateringEnabled: BooleanModelField? = null
     private var waterFriendEnergyFirst: BooleanModelField? = null
     @Volatile
-    private var preCollectWateringExecutedThisRound: Boolean = false
+    private var wateringExecutedThisRound: Boolean = false
     private var returnWater33: IntegerModelField? = null
     private var returnWater18: IntegerModelField? = null
     private var returnWater10: IntegerModelField? = null
@@ -250,7 +250,6 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private var robMultiplierCardReplaceRemainDays: IntegerModelField? = null // 高倍率替换剩余天数
     private var robMultiplierCardForceReplaceExpireDays: IntegerModelField? = null // 临期强制替换天数
 
-    private var cycleinterval: IntegerModelField? = null
     internal var energyRainChance: BooleanModelField? = null
     internal var energyRainTime: TimePointModelField? = null // 能量雨执行时间
 
@@ -402,18 +401,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         return wateringEnabled?.value != false
     }
 
-    internal fun shouldRunWaterFriendsBeforeCollect(): Boolean {
-        return isForestWateringEnabled() &&
-            waterFriendEnergyFirst?.value == true &&
-            !preCollectWateringExecutedThisRound
-    }
-
-    internal fun markWaterFriendsBeforeCollectExecuted() {
-        preCollectWateringExecutedThisRound = true
-    }
-
-    internal fun hasWaterFriendsBeforeCollectExecuted(): Boolean {
-        return preCollectWateringExecutedThisRound
+    internal fun tryStartWaterFriendsForStage(beforeCollect: Boolean): Boolean {
+        if (!isForestWateringEnabled() ||
+            (waterFriendEnergyFirst?.value == true) != beforeCollect ||
+            wateringExecutedThisRound
+        ) {
+            return false
+        }
+        // 开始执行即占用本轮，避免部分浇水后再次进入流程。
+        wateringExecutedThisRound = true
+        return true
     }
 
     internal fun hasFriendRankingWorkEnabled(): Boolean {
@@ -861,9 +858,6 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         modelFields.addField(IntegerModelField("retryInterval", "重试间隔(毫秒)", 1200, 0, 10000).withDesc(
             "单次收取失败后再次尝试的等待时间。"
         ).also { retryInterval = it })
-        modelFields.addField(IntegerModelField("cycleinterval", "循环间隔(毫秒)", 5000, 0, 10000).withDesc(
-            "只收能量时间段内，每轮循环查找与收取的间隔。"
-        ).also { cycleinterval = it })
         modelFields.addField(BooleanModelField("showBagList", "显示背包内容", false).withDesc(
             "任务开始时输出当前森林背包道具清单。"
         ).also { showBagList = it })
@@ -1069,7 +1063,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             GreenLife.resetForestMarketRound()
             if (showBagList?.value == true) showBag()
             initRebornWeeklyState()
-            preCollectWateringExecutedThisRound = false
+            wateringExecutedThisRound = false
             // 加载“今日统计”（按账号维度持久化），用于跨重启/多次运行累计
             selfId?.takeIf { it.isNotBlank() }?.let { uid ->
                 Statistics.load(uid)
@@ -1151,7 +1145,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         handledProtectUsers.clear()
         roundPropCheckState = null
         lastUsePropCheckTime = 0L
-        preCollectWateringExecutedThisRound = false
+        wateringExecutedThisRound = false
         forestGameCenterRecentAppRecords.clear()
         GreenLife.resetForestMarketRound()
     }
