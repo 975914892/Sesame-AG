@@ -11,6 +11,8 @@ body:
 
         **注意**：如果你要分享 RPC 配置，请前往 [RPC 分享讨论区](https://github.com/Sesame-AG/Sesame-AG/discussions/categories/rpc-%E5%88%86%E4%BA%AB)。
 
+        **模块无法加载或不执行**：请先阅读 [加载问题汇总 #99](https://github.com/Sesame-AG/Sesame-AG/issues/99)，按公告检查环境、账号槽位与应用可见性；同类问题请按公告要求在汇总 Issue 下集中补充，不要重复新建。
+
         提交前请先阅读：
         - [README](https://github.com/Sesame-AG/Sesame-AG/blob/dev/README.md)
         - [LEGAL](https://github.com/Sesame-AG/Sesame-AG/blob/dev/LEGAL.md)
@@ -40,7 +42,7 @@ body:
           required: true
         - label: 我已经在当前可获取的最新版本或最新提交环境中复现过这个问题
           required: true
-        - label: 我已将两组脱敏日志附件拖拽到下方指定字段；我理解勾选本项不能代替实际附件
+        - label: 我已在下方指定栏目上传两组脱敏日志附件，或说明无法获取的原因
           required: true
         - label: 我愿意在后续继续补充日志、截图、复现信息并配合排查
           required: true
@@ -60,9 +62,9 @@ body:
     id: error_logs
     attributes:
       label: 错误日志附件
-      description: 请从日志中心导出错误日志并脱敏后拖拽 `.txt`、`.log`、`.zip` 等文件到此处生成附件链接；不要粘贴日志正文或只上传截图。
+      description: 请从日志中心导出错误日志并脱敏后拖拽 `.txt`、`.log`、`.zip` 等文件到此处生成附件链接；不要粘贴日志正文或只上传截图，无法获取时说明原因。
       placeholder: |
-        请仅将脱敏后的错误日志文件拖拽到此处。
+        请将脱敏后的错误日志文件拖拽到此处；无法获取时请说明原因。
     validations:
       required: true
 
@@ -70,9 +72,9 @@ body:
     id: complete_and_module_logs
     attributes:
       label: 完整日志及相关模块日志附件
-      description: 请将全部日志和与问题相关的模块日志一并导出、脱敏并作为附件拖拽到此处；不要粘贴日志正文或只上传截图。
+      description: 请将全部日志和与问题相关的模块日志一并导出、脱敏并作为附件拖拽到此处；不要粘贴日志正文或只上传截图。无法获取时说明原因。
       placeholder: |
-        请仅将脱敏后的全部日志和相关模块日志文件拖拽到此处。
+        请将脱敏后的全部日志和相关模块日志文件拖拽到此处；无法获取时请说明原因。
     validations:
       required: true
 
@@ -80,7 +82,7 @@ body:
     id: bug_type
     attributes:
       label: 问题类型
-      description: 选择最接近的类别
+      description: 请根据实际现象手动选择最接近的类别。
       options:
         - 回归问题
         - 崩溃 / 卡死
@@ -176,7 +178,7 @@ body:
     id: privilege_mode
     attributes:
       label: Root / Shizuku 情况
-      description: 如果与当前问题无关，也请说明
+      description: 请按实际使用情况手动选择；未使用或不确定时选择对应选项。
       options:
         - 未使用
         - 使用 Root

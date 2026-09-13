@@ -2,9 +2,13 @@ name: Issue Intake
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, labeled, unlabeled]
   issue_comment:
-    types: [created, edited]
+    types: [created, edited, deleted]
+
+concurrency:
+  group: issue-intake-${{ github.event.issue.number }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -18,15 +22,29 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const issue = context.payload.issue;
-            if (!issue || issue.pull_request) {
+            const eventIssue = context.payload.issue;
+            if (!eventIssue || eventIssue.pull_request) {
               core.info('Skipping pull request or unsupported payload.');
               return;
             }
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const issueNumber = issue.number;
+            const issueNumber = eventIssue.number;
+            if (
+              context.eventName === 'issues' &&
+              ['labeled', 'unlabeled'].includes(context.payload.action) &&
+              !['bug', 'enhancement'].includes(context.payload.label?.name?.toLowerCase())
+            ) {
+              core.info('Skipping unrelated label event.');
+              return;
+            }
+
+            const { data: issue } = await github.rest.issues.get({
+              owner,
+              repo,
+              issue_number: issueNumber
+            });
             const issueBody = issue.body || '';
             const author = issue.user?.login || 'there';
             const isIssueCommentEvent = context.eventName === 'issue_comment';
@@ -34,7 +52,7 @@ jobs:
             const openedNow =
               context.eventName === 'issues' && context.payload.action === 'opened';
 
-            if (context.eventName === 'issues' && issue.state !== 'open') {
+            if (issue.state !== 'open' || issue.pull_request) {
               core.info('Skipping closed issue event.');
               return;
             }
@@ -42,10 +60,6 @@ jobs:
             if (isIssueCommentEvent) {
               if (context.payload.comment?.user?.type === 'Bot') {
                 core.info('Skipping bot comment.');
-                return;
-              }
-              if (issue.state !== 'open') {
-                core.info('Skipping comment on closed issue.');
                 return;
               }
               if (commentAuthor !== author) {
@@ -58,8 +72,8 @@ jobs:
             const lowerLabels = new Set(labels.map((label) => label.toLowerCase()));
             const isBug = lowerLabels.has('bug');
             const isFeature = lowerLabels.has('enhancement');
-            if (!isBug && !isFeature) {
-              core.info('Skipping issue without a supported Issue Form label.');
+            if (isBug === isFeature) {
+              core.info('Skipping issue without exactly one supported Issue Form label.');
               return;
             }
 
@@ -78,6 +92,12 @@ jobs:
               }
             };
             const scopeLabels = ['模块本体', '目标应用'];
+            const botLogin = 'github-actions[bot]';
+            const statusMarker = '<!-- sesame-ag:issue-intake -->';
+            const logHeadings = [
+              ['错误日志附件', '错误日志附件（必填）'],
+              ['完整日志及相关模块日志附件', '全部日志 / 对应模块日志附件（必填）']
+            ];
 
             function escapeRegExp(value) {
               return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -85,10 +105,11 @@ jobs:
 
             function extractSection(markdown, heading) {
               const pattern = new RegExp(
-                `(?:^|\\n)###\\s+${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n###\\s+|$)`,
+                `(?:^|\\n)###[\\t ]+${escapeRegExp(heading)}[\\t ]*(?=\\r?\\n|$)([\\s\\S]*?)(?=\\r?\\n###[\\t ]+|$)`,
                 'i'
               );
-              return markdown.match(pattern)?.[1]?.trim() || '';
+              const value = markdown.match(pattern)?.[1]?.trim() || '';
+              return value === '_No response_' ? '' : value;
             }
 
             function extractFirstSection(markdown, headings) {
@@ -103,25 +124,28 @@ jobs:
 
             function parseScope(markdown) {
               const scope = extractSection(markdown, '反馈对象');
-              if (scope.includes('模块本体')) {
-                return '模块本体';
-              }
-              if (scope.includes('目标应用')) {
-                return '目标应用';
-              }
-              return '';
+              return scopeLabels.includes(scope) ? scope : '';
             }
 
             function attachmentLinks(markdown) {
-              const urls = markdown.match(/https?:\/\/[^\s<>)\]]+/gi) || [];
+              const urls = markdown.match(/https?:\/\/[^\s<>)\]"']+/gi) || [];
               return urls
                 .map((url) => url.replace(/[.,;:!?]+$/, ''))
-                .filter((url) => (
-                  /^https:\/\/github\.com\/user-attachments\/(?:assets|files)\//i.test(url) ||
-                  /^https:\/\/user-images\.githubusercontent\.com\//i.test(url) ||
-                  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/files\/\d+\//i.test(url) ||
-                  /\.(?:txt|log|zip|gz|json)(?:[?#].*)?$/i.test(url)
-                ));
+                .filter((url) => {
+                  try {
+                    const parsed = new URL(url);
+                    return parsed.protocol === 'https:' &&
+                      parsed.host === 'github.com' &&
+                      !parsed.username && !parsed.password &&
+                      (
+                        /^\/user-attachments\/files\/\d+\/[^/]+$/i.test(parsed.pathname) ||
+                        /^\/[^/]+\/[^/]+\/files\/\d+\/[^/]+$/i.test(parsed.pathname)
+                      ) &&
+                      /\.(?:txt|log|zip|gz|json)$/i.test(parsed.pathname);
+                  } catch {
+                    return false;
+                  }
+                });
             }
 
             function hasMeaningfulTargetAppInfo(value) {
@@ -131,6 +155,54 @@ jobs:
               }
               return !/^(?:不涉及|不适用|无|none|n\/?a)(?:[，,。.;；:].*)?$/.test(compact);
             }
+
+            if (isIssueCommentEvent) {
+              const changedBodies = [
+                context.payload.comment?.body || '',
+                context.payload.changes?.body?.from || ''
+              ];
+              if (
+                !isBug ||
+                !changedBodies.some((body) => logHeadings.some(
+                  (headings) => extractFirstSection(body, headings)
+                ))
+              ) {
+                core.info('Skipping comment without log sections.');
+                return;
+              }
+            }
+
+            const events = await github.paginate(github.rest.issues.listEvents, {
+              owner,
+              repo,
+              issue_number: issueNumber,
+              per_page: 100
+            });
+            const latestLabelEvents = new Map();
+            for (const event of events) {
+              if (
+                !['labeled', 'unlabeled'].includes(event.event) ||
+                !Object.hasOwn(labelConfig, event.label?.name)
+              ) {
+                continue;
+              }
+              const previous = latestLabelEvents.get(event.label.name);
+              if (!previous || event.id > previous.id) {
+                latestLabelEvents.set(event.label.name, event);
+              }
+            }
+
+            const hasNeedInfo = labels.includes('need info');
+            const needInfoEvent = latestLabelEvents.get('need info');
+            const preserveNeedInfo = needInfoEvent
+              ? needInfoEvent.actor?.type !== 'Bot' ||
+                needInfoEvent.actor?.login !== botLogin ||
+                needInfoEvent.event !== (hasNeedInfo ? 'labeled' : 'unlabeled')
+              : hasNeedInfo;
+            const comments = preserveNeedInfo ? [] : await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: issueNumber, per_page: 100 }
+            );
 
             async function ensureLabel(name) {
               const config = labelConfig[name];
@@ -154,6 +226,12 @@ jobs:
               if (labels.includes(name)) {
                 return;
               }
+              const lastEvent = latestLabelEvents.get(name);
+              if (lastEvent && (
+                lastEvent.actor?.type !== 'Bot' || lastEvent.actor?.login !== botLogin
+              )) {
+                return;
+              }
               await ensureLabel(name);
               await github.rest.issues.addLabels({
                 owner,
@@ -167,6 +245,13 @@ jobs:
               if (!labels.includes(name)) {
                 return;
               }
+              const lastEvent = latestLabelEvents.get(name);
+              if (
+                lastEvent?.event !== 'labeled' ||
+                lastEvent.actor?.type !== 'Bot' || lastEvent.actor?.login !== botLogin
+              ) {
+                return;
+              }
               await github.rest.issues.removeLabel({
                 owner,
                 repo,
@@ -175,116 +260,119 @@ jobs:
               });
             }
 
-            const hasScopeField = /(?:^|\n)###\s+反馈对象\s*\n/i.test(issueBody);
             const scope = parseScope(issueBody);
             if (scope) {
               await addLabel(scope);
-              for (const label of scopeLabels) {
-                if (label !== scope) {
-                  await removeLabel(label);
+            }
+            for (const label of scopeLabels) {
+              if (label !== scope) {
+                await removeLabel(label);
+              }
+            }
+
+            if (preserveNeedInfo) {
+              core.info('Preserving manually managed or unattributed need info state.');
+              return;
+            }
+
+            const missing = [];
+            if (!scope) {
+              missing.push('反馈对象（请选择“模块本体”或“目标应用”）');
+            }
+
+            const requiredSections = isBug ? [
+              '提交前检查', '问题摘要', '复现步骤', '预期行为', '实际行为',
+              '模块版本 / 提交', 'Android 版本 / 手机系统版本',
+              'LSPosed 版本与 libxposed API',
+              '目标应用信息 / 受影响模块功能', '安装来源 / 构建方式'
+            ] : [
+              '提交前检查', '目标应用信息 / 模块功能上下文', '建议摘要',
+              '你要解决的问题', '期望的解决方案', '影响与价值'
+            ];
+            for (const heading of requiredSections) {
+              if (!extractSection(issueBody, heading)) {
+                missing.push(heading);
+              }
+            }
+
+            const dropdownOptions = isBug ? {
+              '问题类型': ['回归问题', '崩溃 / 卡死', '行为异常', 'UI / 文档问题'],
+              'Root / Shizuku 情况': ['未使用', '使用 Root', '使用 Shizuku', '两者都使用', '不确定']
+            } : {
+              '增强类型': ['功能型增强', '优化型增强', '工程 / 工具链改进', '文档改进', '强迫症增强'],
+              '主要影响范围': ['任务逻辑', 'Hook / RPC', 'UI / 设置页', '调试工具 / 日志', '构建 / 发布 / 元数据', '文档 / 协作流程', '其他']
+            };
+            for (const [heading, options] of Object.entries(dropdownOptions)) {
+              if (!options.includes(extractSection(issueBody, heading))) {
+                missing.push(`${heading}（请手动选择有效选项）`);
+              }
+            }
+
+            if (isBug) {
+              const logBodies = [issueBody, ...comments.filter(
+                (comment) => comment.user?.login === author && comment.user?.type !== 'Bot'
+              ).map((comment) => comment.body || '')];
+              for (const headings of logHeadings) {
+                if (!logBodies.some(
+                  (body) => attachmentLinks(extractFirstSection(body, headings)).length > 0
+                )) {
+                  missing.push(headings[0]);
                 }
               }
             }
 
-            const missing = [];
-            if (hasScopeField && !scope) {
-              missing.push('反馈对象（请选择“模块本体”或“目标应用”）');
+            const targetAppInfo = extractSection(issueBody, isBug
+              ? '目标应用信息 / 受影响模块功能'
+              : '目标应用信息 / 模块功能上下文');
+            if (
+              scope === '目标应用' && targetAppInfo &&
+              !hasMeaningfulTargetAppInfo(targetAppInfo)
+            ) {
+              missing.push('目标应用信息（请填写目标应用版本，不能填写“不涉及”）');
             }
 
-            if (isBug) {
-              let hasErrorLogs = attachmentLinks(
-                extractFirstSection(issueBody, ['错误日志附件', '错误日志附件（必填）'])
-              ).length > 0;
-              let hasCompleteAndModuleLogs = attachmentLinks(
-                extractFirstSection(issueBody, [
-                  '完整日志及相关模块日志附件',
-                  '全部日志 / 对应模块日志附件（必填）'
-                ])
-              ).length > 0;
-
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner,
-                repo,
-                issue_number: issueNumber,
-                per_page: 100
-              });
-              const commentAttachmentLinks = new Set(
-                comments.flatMap((comment) => attachmentLinks(comment.body || ''))
-              );
-              const missingLogGroups = Number(!hasErrorLogs) + Number(!hasCompleteAndModuleLogs);
-              if (missingLogGroups > 0 && commentAttachmentLinks.size >= missingLogGroups) {
-                hasErrorLogs = true;
-                hasCompleteAndModuleLogs = true;
-              }
-
-              if (!hasErrorLogs) {
-                missing.push('错误日志附件');
-              }
-              if (!hasCompleteAndModuleLogs) {
-                missing.push('完整日志及相关模块日志附件');
-              }
-
-              if (
-                scope === '目标应用' &&
-                !hasMeaningfulTargetAppInfo(
-                  extractSection(issueBody, '目标应用信息 / 受影响模块功能')
-                )
-              ) {
-                missing.push('目标应用信息（名称、包名和版本；不能填写“不涉及”）');
-              }
-            }
-
-            const hasNeedInfo = labels.includes('need info');
             const kind = isBug ? 'Bug' : '功能建议';
 
             function receivedMessage() {
-              if (isBug) {
-                return scope === '目标应用'
-                  ? `您好 @${author}，已收到「目标应用 Bug」。两组日志附件和诊断信息已齐全，我们会结合目标应用信息进行排查。`
-                  : `您好 @${author}，已收到「模块本体 Bug」。两组日志附件和诊断信息已齐全，我们会进一步排查。`;
-              }
-              return scope === '目标应用'
-                ? `您好 @${author}，已收到「目标应用功能建议」。感谢你补充使用场景和方案，合理建议我们将考虑完善。`
-                : `您好 @${author}，已收到「模块本体功能建议」。感谢你补充使用场景和方案，合理建议我们将考虑完善。`;
+              const details = isBug
+                ? '已检测到指定栏目和附件链接，内容仍需维护者确认。'
+                : '已检测到必填栏目，建议内容和是否受理仍需维护者确认。';
+              return `您好 @${author}，已收到${scope ? `「${scope}${kind}」` : kind}。${details}`;
             }
 
             function missingMessage() {
               const details = missing.map((item) => `- **${item}**`).join('\n');
               const logGuide = isBug
-                ? '\n\n请在日志中心打开对应卡片，导出错误日志、全部日志和相关模块日志；脱敏后在 `/Download/sesame-AG/` 找到文件并上传。请优先编辑原 Issue 的两个指定附件字段；如改在评论补充，请一次提供与缺失组数相同的日志附件。'
+                ? '\n\n请在日志中心导出错误日志、全部日志和相关模块日志，脱敏后从 `/Download/sesame-AG/` 上传到原 Issue 的对应栏目，截图和无栏目附件不能代替日志。无法获取日志时，请在原栏目说明原因。'
                 : '';
-              return `您好 @${author}，感谢提交${scope ? `「${scope}${kind}」` : kind}。当前仍缺少以下必要信息：\n${details}${logGuide}\n\n补充后会自动重新检查；3 天内未补齐时 Issue 将被自动关闭。`;
+              return `您好 @${author}，感谢提交${scope ? `「${scope}${kind}」` : kind}。当前仍缺少以下必要信息：\n${details}${logGuide}\n\n其他信息请编辑原 Issue 补充，随后会自动重新检查。由自动检查管理的 Issue 连续 3 天无更新且仍缺必要信息时将被自动关闭。`;
             }
 
             if (missing.length > 0) {
               await addLabel('need info');
-              if (!hasNeedInfo) {
-                await github.rest.issues.createComment({
+            } else if (hasNeedInfo) {
+              await removeLabel('need info');
+            }
+
+            const statusComment = comments.filter((comment) =>
+              comment.user?.type === 'Bot' && comment.user?.login === botLogin &&
+              (comment.body || '').startsWith(`${statusMarker}\n`)
+            ).sort((left, right) => right.id - left.id)[0];
+            const body = `${statusMarker}\n${missing.length > 0 ? missingMessage() : receivedMessage()}`;
+            if (statusComment) {
+              if (statusComment.body !== body) {
+                await github.rest.issues.updateComment({
                   owner,
                   repo,
-                  issue_number: issueNumber,
-                  body: missingMessage()
+                  comment_id: statusComment.id,
+                  body
                 });
               }
-              return;
-            }
-
-            if (hasNeedInfo) {
-              await removeLabel('need info');
+            } else if (missing.length > 0 || hasNeedInfo || openedNow) {
               await github.rest.issues.createComment({
                 owner,
                 repo,
                 issue_number: issueNumber,
-                body: `您好 @${author}，已检测到所需信息和附件链接，感谢补充。${isBug ? '后续将结合这些日志继续排查。' : '后续将结合这些信息评估建议。'}`
-              });
-              return;
-            }
-
-            if (openedNow) {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: issueNumber,
-                body: receivedMessage()
+                body
               });
             }
