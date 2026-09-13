@@ -663,12 +663,13 @@ class AntOrchard : ModelTask() {
                 OrchardDailyTaskFlowAdapter(),
                 roundSleepMs = executeIntervalInt.toLong(),
             ).run()
+            TaskFlowEngine(OrchardDailyTaskFlowAdapter(starTasks = true), roundSleepMs = 0L).run()
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "doOrchardDailyTask err:", t)
         }
     }
 
-    private inner class OrchardDailyTaskFlowAdapter : TaskFlowAdapter {
+    private inner class OrchardDailyTaskFlowAdapter(private val starTasks: Boolean = false) : TaskFlowAdapter {
         private val loggedSkipKeys = mutableSetOf<String>()
         private var latestListTaskResponse = JSONObject()
         private var listModeLogged = false
@@ -676,11 +677,11 @@ class AntOrchard : ModelTask() {
         private var linkedHintsLogged = false
 
         override val moduleName: String = ORCHARD_TASK_BLACKLIST_MODULE
-        override val flowName: String = "农场任务"
+        override val flowName: String = if (starTasks) "农场努力流星任务" else "农场任务"
         override val continueCurrentRoundOnRetryableFailure: Boolean = true
 
         override fun query(): JSONObject {
-            val response = AntOrchardRpcCall.orchardListTask()
+            val response = if (starTasks) AntOrchardRpcCall.listStarTasks() else AntOrchardRpcCall.orchardListTask()
             if (response.isBlank()) {
                 return JSONObject()
                     .put("resultCode", "")
@@ -689,15 +690,20 @@ class AntOrchard : ModelTask() {
             return JSONObject(response)
         }
 
-        override fun isQuerySuccess(response: JSONObject): Boolean = response.optString("resultCode") == "100"
+        override fun isQuerySuccess(response: JSONObject): Boolean = isOrchardRpcSuccessResponse(response)
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
             latestListTaskResponse = response
-            handleListMetadata(response)
-            val taskList = response.optJSONArray("taskList") ?: return emptyList()
+            if (!starTasks) handleListMetadata(response)
+            val taskList = response.optJSONArray(if (starTasks) "taskInfos" else "taskList") ?: return emptyList()
             val items = mutableListOf<TaskFlowItem>()
             for (i in 0 until taskList.length()) {
                 val task = taskList.optJSONObject(i) ?: continue
+                if (starTasks) {
+                    val biz = JSONObject(task.optString("bizInfo").ifBlank { "{}" })
+                    task.put("taskId", task.optString("taskType")).put("taskDisplayConfig", biz)
+                        .put("actionType", biz.optString("actionType")).put("taskPlantType", "ANTIEP")
+                }
                 val title = resolveOrchardTaskTitle(task)
                 val taskId = task.optString("taskId").trim()
                 val groupId = task.optString("groupId").trim()
@@ -813,6 +819,12 @@ class AntOrchard : ModelTask() {
 
         override fun receive(item: TaskFlowItem): TaskFlowActionResult {
             val task = item.raw ?: return missingOrchardRawResult(item, "triggerTbTask")
+            if (starTasks && task.optBoolean("directReceiveAward", false)) {
+                return TaskFlowActionResult.defer(
+                    deferredReason = io.github.aoguai.sesameag.task.common.DeferredReason.STATE_CONFIRMATION,
+                    message = "努力流星自动发奖待确认", refreshAfterAction = true,
+                )
+            }
             val taskId = task.optString("taskId")
             val taskPlantType = task.optString("taskPlantType")
             if (taskId.isBlank() || taskPlantType.isBlank()) {
@@ -844,6 +856,15 @@ class AntOrchard : ModelTask() {
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
             val task = item.raw ?: return missingOrchardRawResult(item, "complete")
+            if (item.id == "ANTFARM_ORCHARD_NORMAL_GONGGEFANGWEN") {
+                val source = resolveTaskActionSource(task)
+                if (source.isNullOrBlank()) return missingOrchardRawResult(item, "orchardIndex.source")
+                val visited = JSONObject(AntOrchardRpcCall.orchardIndex(source))
+                if (!isOrchardRpcSuccessResponse(visited)) return buildOrchardTaskFailureResult(
+                    visited, item.id, item.title, "visit", "AntOrchardRpcCall.orchardIndex", item,
+                )
+                return TaskFlowActionResult.success(refreshAfterAction = true)
+            }
             orchardGamePlayContract(task)?.let { contract ->
                 val ack = GameCenterPlayRpcCall.submitForAck(contract)
                 val response = ack.response
@@ -871,6 +892,7 @@ class AntOrchard : ModelTask() {
                     )
                 }
                 Log.orchard("农场乐园任务[${item.title}]时长上报已接受，继续任务完成闭环")
+                if (starTasks) return completeStarTask(item)
                 return executeOrchardFinishTask(
                     action = "GAME_PLAY",
                     sceneCode = item.sceneCode,
@@ -880,6 +902,14 @@ class AntOrchard : ModelTask() {
                     task = task,
                 )
             }
+            if (starTasks && item.id == "ORCHARD_NORMAL_STAR") return completeStarTask(item)
+            if (starTasks) return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
+                message = "努力流星游戏缺少可执行的完成合同",
+                rpc = "OrchardDailyTaskFlowAdapter.complete",
+                raw = task.toString(),
+                detail = orchardActionDetail(item, "complete"),
+            )
             if (isSupportedTaobaoVisitTask(task)) {
                 return executeTaobaoVisitTask(task, item)
             }
@@ -967,6 +997,16 @@ class AntOrchard : ModelTask() {
             if (duration <= 0) return null
             val contract = GameCenterPlayRpcCall.resolveContract(task, display) ?: return null
             return contract.copy(playTime = duration.coerceAtMost(Int.MAX_VALUE - 1) + 1)
+        }
+
+        private fun completeStarTask(item: TaskFlowItem): TaskFlowActionResult {
+            val response = JSONObject(AntOrchardRpcCall.finishTask(
+                "", item.sceneCode, item.id, "h5", outBizNo = "${item.id}_${System.currentTimeMillis()}",
+            ))
+            if (!isOrchardRpcSuccessResponse(response)) return buildOrchardTaskFailureResult(
+                response, item.id, item.title, "complete", "AntOrchardRpcCall.finishTask", item,
+            )
+            return TaskFlowActionResult.success(refreshAfterAction = true, progressChanged = false)
         }
 
         private fun completeOrchardXLightTask(

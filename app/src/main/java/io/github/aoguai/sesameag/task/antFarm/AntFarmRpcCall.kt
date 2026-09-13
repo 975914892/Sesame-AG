@@ -1523,10 +1523,11 @@ object AntFarmRpcCall {
     }
 
     @JvmStatic
-    fun queryRecentFarmFood(queryNum: Int): String {
-        val args =
-            "[{\"queryNum\": " + queryNum + ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"}]"
-        return requestString("com.alipay.antfarm.queryRecentFarmFood", args)
+    fun queryRecentFarmFood(queryNum: Int, pageNo: Int? = null): String {
+        val args = JSONObject().put("requestType", "NORMAL").put("sceneCode", "ANTFARM").put("source", "H5")
+        if (pageNo == null) args.put("queryNum", queryNum)
+        else args.put("pageNo", pageNo).put("pageSize", 10)
+        return requestString("com.alipay.antfarm.queryRecentFarmFood", JSONArray().put(args).toString())
     }
 
     @JvmStatic

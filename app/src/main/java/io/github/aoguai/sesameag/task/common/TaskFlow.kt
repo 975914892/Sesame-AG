@@ -1,7 +1,6 @@
 package io.github.aoguai.sesameag.task.common
 
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
-import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import org.json.JSONObject
@@ -642,7 +641,6 @@ class TaskFlowEngine(
                         "动作已推进"
                     }
                 adapter.logInfo("${adapter.flowName}[$reason，先回查服务端任务列表]")
-                GlobalThreadPools.sleepCompat(roundSleepMs)
                 round++
                 continue
             }
@@ -695,7 +693,6 @@ class TaskFlowEngine(
                 roundLimit = extendedRoundLimit
             }
 
-            GlobalThreadPools.sleepCompat(roundSleepMs)
             round++
         }
 

@@ -598,9 +598,11 @@ class MyBankWelfare : ModelTask() {
                 Log.mybank("${BUSINESS_NAME}🎐跳过[${candidate.item.name}]#缺少benefitId")
                 return ExchangeAttemptResult()
             }
+            val cityCode = io.github.aoguai.sesameag.hook.internal.LocationHelper.requireCityCode()
             val detailResp = JSONObject(
                 AntMemberRpcCall.querySingleBenefitDetail(
                     benefitId = candidate.benefitId,
+                    cityCode = cityCode,
                     requestSourceInfo = candidate.requestSourceInfo,
                     sourcePassMap = candidate.sourcePassMap
                 )
@@ -660,6 +662,7 @@ class MyBankWelfare : ModelTask() {
                 AntMemberRpcCall.exchangeMemberBenefit(
                     benefitId = confirmedCandidate.benefitId,
                     itemId = confirmedCandidate.itemId,
+                    cityCode = cityCode,
                     requestSourceInfo = confirmedCandidate.requestSourceInfo,
                     sourcePassMap = confirmedCandidate.sourcePassMap
                 )

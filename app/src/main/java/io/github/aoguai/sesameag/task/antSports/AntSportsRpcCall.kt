@@ -1395,7 +1395,6 @@ object AntSportsRpcCall {
      */
     object NeverlandRpcCall {
         private const val DEFAULT_SOURCE = "ch_toufang__yundongshouye"
-        private const val QUICK_GAME_CITY_CODE = "440100"
 
         /**
          * @brief 查询签到状态
@@ -1525,7 +1524,7 @@ object AntSportsRpcCall {
             categoryType: String = "",
             pageNum: Int = 1,
             pageSize: Int = 10,
-            cityCode: String = "440100",
+            cityCode: String,
             adSession: String = "",
         ): String {
             val args =
@@ -1552,7 +1551,7 @@ object AntSportsRpcCall {
         }
 
         /** 权益中心下拉奖励使用独立请求形状，不能复用商城字段。 */
-        fun queryRightsCenterItemList(): String {
+        fun queryRightsCenterItemList(cityCode: String): String {
             val args =
                 JSONArray()
                     .put(
@@ -1560,7 +1559,7 @@ object AntSportsRpcCall {
                             put("adSession", "")
                             put("categoryType", "ALL")
                             put("chInfo", DEFAULT_SOURCE)
-                            put("cityCode", QUICK_GAME_CITY_CODE)
+                            put("cityCode", cityCode)
                             put("filterBenefitList", JSONArray())
                             put("pageNum", 1)
                             put("pageSize", 15)
@@ -1599,7 +1598,7 @@ object AntSportsRpcCall {
             benefitId: String,
             itemId: String,
             materialType: String,
-            cityCode: String = "440100",
+            cityCode: String,
             apDid: String = "",
         ): String {
             val args =
@@ -1629,7 +1628,7 @@ object AntSportsRpcCall {
         fun createOrder(
             benefitId: String,
             itemId: String,
-            cityCode: String = "440100",
+            cityCode: String,
             apDid: String = "",
         ): String {
             val args =
@@ -1658,7 +1657,7 @@ object AntSportsRpcCall {
         }
 
         fun collectExchangeData(
-            cityCode: String = "440100",
+            cityCode: String,
             apDid: String = "",
         ): String {
             val args =
@@ -1722,10 +1721,10 @@ object AntSportsRpcCall {
          *
          * @remark 对应抓包：com.alipay.neverland.biz.rpc.queryQuickGameList
          */
-        fun queryQuickGameList(source: String = DEFAULT_SOURCE): String =
+        fun queryQuickGameList(source: String = DEFAULT_SOURCE, cityCode: String): String =
             RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.queryQuickGameList",
-                """[{"chInfo":"$source","cityCode":"$QUICK_GAME_CITY_CODE","source":"$source"}]""",
+                JSONArray().put(JSONObject().put("chInfo", source).put("cityCode", cityCode).put("source", source)).toString(),
             )
 
         /**
@@ -1743,7 +1742,7 @@ object AntSportsRpcCall {
          */
         fun queryTaskCenter(
             source: String,
-            cityCode: String = QUICK_GAME_CITY_CODE,
+            cityCode: String,
             apDid: String = "",
         ): String {
             val args =

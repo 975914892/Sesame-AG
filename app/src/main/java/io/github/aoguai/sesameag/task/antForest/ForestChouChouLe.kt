@@ -377,6 +377,9 @@ class ForestChouChouLe {
         if (taskStatus !in setOf(TaskStatus.TODO.name, "WAIT_COMPLETE")) {
             return false
         }
+        if (taskBaseInfo.optString("taskType") == "FOREST_ACTIVITY_DRAW_GYL") {
+            return false
+        }
         val bizInfo = taskBaseInfo.optString("bizInfo").toJson() ?: JSONObject()
         val prodPlayParam = taskBaseInfo.optString("prodPlayParam").toJson() ?: JSONObject()
         val exchangeTask = taskBaseInfo.optString("taskProdPlayType") == "EXCHANGE_ASSET" &&
@@ -390,8 +393,8 @@ class ForestChouChouLe {
         ) {
             return true
         }
-        if (taskBaseInfo.optString("taskProdPlayType") in setOf("VISIT_FLOAT_BALL", "CALL_APP_OUT_TASK")) {
-            return false
+        if (taskBaseInfo.optString("taskProdPlayType") == "VISIT_FLOAT_BALL") {
+            return !isStructuredGameTask(taskBaseInfo, bizInfo, prodPlayParam)
         }
         if (bizInfo.has("autoCompleteTask") && !bizInfo.optBoolean("autoCompleteTask")) {
             return false
@@ -547,6 +550,7 @@ class ForestChouChouLe {
     ) : TaskFlowAdapter {
         override val moduleName: String = FOREST_BLACKLIST_MODULE
         override val flowName: String = scene.name
+        override val continueCurrentRoundOnRetryableFailure: Boolean = true
 
         override fun query(): JSONObject = fetchFreshTaskList(scene) ?: JSONObject().put("success", false).put("message", "任务列表返回空")
 
@@ -615,7 +619,27 @@ class ForestChouChouLe {
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
             val taskBaseInfo = taskBaseInfo(item) ?: return missingTaskData(item, "complete")
-            forestGamePlayContract(item)?.let { contract ->
+            val descriptor = GameCenterPlayRpcCall.describeTask(taskBaseInfo, taskBizInfo(item), taskProdPlayParam(item))
+            val playContract = forestGamePlayContract(item)
+            if (!isExchangeDrawTask(item) && descriptor.isGameTask && playContract == null) {
+                val mappedTask = descriptor.mappedTask ?: return TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
+                    message = "森林游戏没有直接、点击、时长或已有业务完成闭环",
+                    rpc = "ChouChouLeTaskFlowAdapter.complete",
+                    raw = item.raw?.toString().orEmpty(),
+                    detail = actionDetail(item, TaskFlowAction.COMPLETE),
+                )
+                if (!kotlinx.coroutines.runBlocking { mappedTask.report(1) }) {
+                    return TaskFlowActionResult.failure(
+                        failureType = TaskRpcFailureType.RETRYABLE_RPC,
+                        message = "已有游戏业务动作未完成",
+                        rpc = "GameTask.report",
+                        detail = actionDetail(item, TaskFlowAction.COMPLETE),
+                        continueCurrentRoundOnFailure = true,
+                    )
+                }
+            }
+            playContract?.let { contract ->
                 val ack = GameCenterPlayRpcCall.submitForAck(contract)
                 val response = ack.response
                     ?: return TaskFlowActionResult.failure(
@@ -853,10 +877,11 @@ class ForestChouChouLe {
             return isExchangeAsset && exchangeAssetsInfo != null && vitalityScene
         }
 
-        /**
-         * 服务端明确标记为外部业务的任务不伪造完成；保留任务状态以等待服务端自行推进。
-         */
+        /** 游戏先复用已有动作合同，其他外部业务仍由所属玩法推进。 */
         private fun requiresExternalBusinessAction(item: TaskFlowItem): Boolean {
+            if (item.id == "FOREST_ACTIVITY_DRAW_GYL") {
+                return true
+            }
             if (isExchangeDrawTask(item)) {
                 return false
             }
@@ -864,8 +889,10 @@ class ForestChouChouLe {
                 return false
             }
             val taskBaseInfo = taskBaseInfo(item) ?: return false
-            when (taskBaseInfo.optString("taskProdPlayType")) {
-                "VISIT_FLOAT_BALL", "CALL_APP_OUT_TASK" -> return true
+            val descriptor = GameCenterPlayRpcCall.describeTask(taskBaseInfo, taskBizInfo(item), taskProdPlayParam(item))
+            if (descriptor.isGameTask) return false
+            if (taskBaseInfo.optString("taskProdPlayType") == "VISIT_FLOAT_BALL") {
+                return false
             }
             val bizInfo = taskBizInfo(item)
             if (bizInfo.has("autoCompleteTask") && !bizInfo.optBoolean("autoCompleteTask")) {

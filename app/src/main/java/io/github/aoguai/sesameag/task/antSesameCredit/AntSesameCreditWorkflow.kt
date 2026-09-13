@@ -90,7 +90,7 @@ internal suspend fun AntSesameCredit.prepareSesameWorkflows(
             if (!hasFlagToday(StatusFlags.FLAG_SESAME_ALCHEMY_NEXT_DAY_AWARD)) {
                 doSesameAlchemyNextDayAward()
             } else {
-                Log.sesame("✅ 芝麻粒次日奖励已领取，今天不再执行")
+                Log.sesame("芝麻粒次日奖励今日已检查，跳过重复执行")
             }
         })
     }

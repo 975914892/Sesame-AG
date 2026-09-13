@@ -362,6 +362,21 @@ object AntMemberRpcCall {
     }
 
     @JvmStatic
+    fun signPageTaskList(pageNo: Int = 1): String = RequestManager.requestString(
+        "com.alipay.amic.memtask.h5.MemTaskListQueryFacade.signPageTaskList",
+        JSONArray().put(JSONObject().put("pageNo", pageNo).put("pageSize", 8)
+            .put("previewTime", "").put("source", "antmember")
+            .put("sourcePassMap", buildMemberSourcePassMap())
+            .put("spaceCode", "ant_member_xlight_task").put("taskTopConfigId", "")).toString(),
+    )
+
+    @JvmStatic
+    fun queryGameEntranceInfo(): String = RequestManager.requestString(
+        "com.alipay.amic.biz.rpc.game.h5.GameCenterQueryFacade.queryGameEntranceInfo",
+        JSONArray().put(JSONObject().put("sourcePassMap", buildMemberSourcePassMap())).toString(),
+    )
+
+    @JvmStatic
     fun applyMemberTask(taskConfigId: String): String {
         val args =
             JSONObject().apply {
@@ -746,6 +761,15 @@ object AntMemberRpcCall {
     /**
      * 游戏中心赚现金任务领奖
      */
+    @JvmStatic
+    fun receiveGameCenterMilestone(task: JSONObject, source: String, oriChInfo: String): String =
+        RequestManager.requestString(
+            "com.alipay.gamecenteruprod.biz.rpc.p2e.receiveTaskMileStoneReward",
+            JSONArray().put(JSONObject().put("taskMileStoneId", task.optString("taskMileStoneId"))
+                .put("outBizNo", task.optString("outBizNo")).put("sign", task.optString("sign"))
+                .put("source", source).put("oriChInfo", oriChInfo)).toString(),
+        )
+
     @JvmStatic
     fun gameCenterP2eTaskReceive(
         task: JSONObject,
@@ -1166,6 +1190,14 @@ object AntMemberRpcCall {
     }
 
     @JvmStatic
+    fun beanTaskTrigger(appletId: String, sceneCode: String, taskCenterId: String, stageCode: String): String =
+        RequestManager.requestString(
+            "com.alipay.insmarketingbff.bean.taskTrigger",
+            JSONArray().put(JSONObject().put("appletId", appletId).put("sceneCode", sceneCode)
+                .put("taskCenId", taskCenterId).put("stageCode", stageCode)).toString(),
+        )
+
+    @JvmStatic
     fun beanTaskCenterConsult(
         taskCenterId: String,
         sceneCode: String,
@@ -1319,13 +1351,14 @@ object AntMemberRpcCall {
     @JvmStatic
     fun querySingleBenefitDetail(
         benefitId: String,
+        cityCode: String,
         requestSourceInfo: String = "",
         sourcePassMap: JSONObject? = null,
     ): String {
         val args =
             JSONObject().apply {
                 put("benefitId", benefitId)
-                put("cityCode", "440100")
+                put("cityCode", cityCode)
                 put("miniAppId", "")
                 if (requestSourceInfo.isNotBlank()) {
                     put("requestSourceInfo", requestSourceInfo)
@@ -1362,6 +1395,7 @@ object AntMemberRpcCall {
     fun exchangeMemberBenefit(
         benefitId: String,
         itemId: String,
+        cityCode: String,
         requestSourceInfo: String = "",
         sourcePassMap: JSONObject? = null,
     ): String {
@@ -1373,7 +1407,7 @@ object AntMemberRpcCall {
         val args =
             JSONObject().apply {
                 put("benefitId", benefitId)
-                put("cityCode", "440100")
+                put("cityCode", cityCode)
                 put("exchangeType", "POINT_PAY")
                 if (itemId.isNotBlank()) {
                     put("itemId", itemId)
@@ -1804,6 +1838,15 @@ object AntMemberRpcCall {
     fun queryBillBlockWorldHome(): String = RequestManager.requestString("alipay.memberasset.block.queryBlockHome", "[{}]")
 
     @JvmStatic
+    fun queryBillBlockWorldWarehouse(seasonId: String): String = RequestManager.requestString(
+        "alipay.memberasset.block.queryWarehouseBlocks",
+        JSONArray().put(JSONObject().put("seasonId", seasonId)).toString(),
+    )
+
+    @JvmStatic
+    fun reportBillBlockViewed(): String = RequestManager.requestString("alipay.memberasset.block.reportBlockViewed", "[{}]")
+
+    @JvmStatic
     fun queryBillBlockWorldDetail(blockConfigId: String, year: String, month: String): String {
         val args = JSONObject()
             .put("blockConfigId", blockConfigId)
@@ -1820,19 +1863,17 @@ object AntMemberRpcCall {
         RequestManager.requestString("alipay.memberasset.block.collectDailyProductCoin", "[null]")
 
     @JvmStatic
-    fun collectBillBlockWorldBlock(
-        blockRecordId: String,
-        posX: Int,
-        posY: Int,
+    fun batchCollectBillBlockWorldBlocks(
+        seasonId: String,
+        blockItems: JSONArray,
     ): String {
         val args =
             JSONObject().apply {
-                put("blockRecordId", blockRecordId)
-                put("posX", posX)
-                put("posY", posY)
+                put("blockItems", blockItems)
+                put("seasonId", seasonId)
             }
         return RequestManager.requestString(
-            "alipay.memberasset.block.collectBlock",
+            "alipay.memberasset.block.batchCollectBlock",
             JSONArray().put(args).toString(),
         )
     }

@@ -169,6 +169,21 @@ object AntSesameCreditRpcCall {
     }
 
     /**
+     * 芝麻租赁任务动作提交
+     */
+    @JvmStatic
+    fun submitSesameRentAction(): String {
+        val args = JSONObject()
+            .put("chInfo", "chInfo=ch_zmzltf__chsub_zmlrw")
+            .put("type", "actionSubmit")
+        return RequestManager.requestString(
+            "com.alipay.creditapollon.biz.rpc.api.rent.RentRpcService.actionSubmit",
+            JSONArray().put(args).toString(),
+            "creditapollon", "actionSubmit", "RentRpcService",
+        )
+    }
+
+    /**
      * 芝麻信用完成任务
      */
     @JvmStatic

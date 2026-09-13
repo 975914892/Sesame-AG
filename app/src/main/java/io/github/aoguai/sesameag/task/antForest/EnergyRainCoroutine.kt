@@ -790,8 +790,8 @@ object EnergyRainCoroutine {
                 return failure
             }
             val verifyResult = verifyEnergyRainGameTask(candidate, verifyResponse)
-            if (verifyResult == EnergyRainGameExecutionResult.EXECUTED_NO_PROGRESS && closureProgressed) {
-                EnergyRainGameExecutionResult.PROGRESSED
+            if (verifyResult == EnergyRainGameExecutionResult.EXECUTED_NO_PROGRESS && executedClosure) {
+                EnergyRainGameExecutionResult.CONFIRMED_DONE
             } else {
                 verifyResult
             }

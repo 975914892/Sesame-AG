@@ -141,7 +141,7 @@ class AntFarm : ModelTask() {
     internal var lastDonationNoMoreActivities: Boolean = false
         private set
     private val specialFoodUnitProduce: MutableMap<String, Double> = linkedMapOf()
-    private var specialFoodCuisineSnapshot: JSONArray? = null
+    internal var specialFoodCuisineSnapshot: JSONArray? = null
 
     /**
      * 标记农场是否已满（用于雇佣小鸡逻辑）
@@ -256,6 +256,8 @@ class AntFarm : ModelTask() {
      */
     internal var doFarmTask: BooleanModelField? = null // 做饲料任务
     internal var useAccelerateTool: BooleanModelField? = null
+    private var useFullRewardTool: BooleanModelField? = null
+    internal var specialFoodSelection: ChoiceModelField? = null
     private var useBigEaterTool: BooleanModelField? = null // ✅ 新增加饭卡
 
     /**
@@ -409,6 +411,12 @@ class AntFarm : ModelTask() {
             ).withDesc("选择自动雇佣并在满产后重雇的 NPC 小鸡；选“关闭”则不处理。").also {
                 npcAnimalType = it
             })
+        modelFields.addField(BooleanModelField(
+            "useFullRewardTool", "道具满时自动使用一次后领奖", false,
+        ).withDesc("待领奖道具容量不足时，按使用条件尝试消耗一张并回查库存；仍不足时保留待领奖。").also { useFullRewardTool = it })
+        modelFields.addField(ChoiceModelField(
+            "specialFoodSelection", "美食选择策略（自己与家庭）", 0, arrayOf("原有逻辑", "库存最多优先"),
+        ).withDesc("库存最多优先会在每批选择数量最多的美食；补蛋时可能比原有优化方案多产生少量进度。").also { specialFoodSelection = it })
         modelFields.addField(
             BooleanModelField(
                 "useBigEaterTool",
@@ -1007,7 +1015,7 @@ class AntFarm : ModelTask() {
     }
 
     /**
-     * 大表鸽遣返后，芝麻粒反馈可能晚于庄园响应产生；用账号私有记录把两个已验证 RPC 串为可恢复闭环。
+     * 大表鸽满产遣返前保存待收事实；收取反馈前先确认离场，支持遣返和奖励生成分别恢复。
      * 空字符串表示反馈尚未被首次观察到，非空值是已绑定、必须回查消失的 creditFeedbackId。
      */
     internal fun hasPendingZhimaPigeonRewardReceipt(): Boolean =
@@ -1021,8 +1029,18 @@ class AntFarm : ModelTask() {
             Log.error(TAG, "芝麻大表鸽🤖[无法取得账号私有存储，未登记芝麻粒待收状态]")
             return false
         }
-        userDataStore.put(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, "")
+        if (!hasPendingZhimaPigeonRewardReceipt()) userDataStore.put(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, "")
         return userDataStore.get(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, String::class.java) != null
+    }
+
+    internal fun confirmZhimaPigeonDeparture(): Boolean {
+        if (ownerFarmId.isNullOrBlank() && enterFarm() == null) return false
+        val config = NpcConfig.ZHIMA_PIGEON
+        val current = syncNpcAnimalStatus(config.source, "SYNC_PIGEON_REWARD") ?: return false
+        val pigeon = current.find(config.animalId) ?: return true
+        checkNpcReward(pigeon, config)
+        val refreshed = syncNpcAnimalStatus(config.source, "SYNC_PIGEON_DEPARTURE") ?: return false
+        return refreshed.find(config.animalId) == null
     }
 
     internal fun bindZhimaPigeonRewardFeedbackId(creditFeedbackId: String): Boolean {
@@ -2584,11 +2602,25 @@ class AntFarm : ModelTask() {
                         val stock = findFarmTool(toolType, forceRefresh = true)
                         if (awardCount <= 0 || stock == null) continue
                         if (stock.toolHoldLimit - stock.toolCount < awardCount) {
-                            if (toolType == ToolType.ACCELERATETOOL && useAccelerateTool?.value == true) {
-                                useAccelerateTool()
+                            val beforeCount = stock.toolCount
+                            if (useFullRewardTool?.value == true) {
+                                when (toolType) {
+                                    ToolType.ACCELERATETOOL -> useAccelerateTool(releaseRewardSlot = true)
+                                    ToolType.BIG_EATER_TOOL -> {
+                                        val day = LocalDate.now(FARM_ZONE).toString()
+                                        val used = getBigEaterUsedCount(day)
+                                        if (!serverUseBigEaterTool && used < 2 && isOwnerAnimalAtHome() &&
+                                            ownerAnimal.animalFeedStatus == AnimalFeedStatus.EATING.name &&
+                                            useFarmToolDetailed(ownerFarmId, toolType) == FarmToolUseResult.SUCCESS) {
+                                            putBigEaterUsedCount(day, used + 1)
+                                            syncAnimalStatus(ownerFarmId)
+                                        }
+                                    }
+                                    else -> useFarmToolDetailed(ownerFarmId, toolType)
+                                }
                             }
                             val after = findFarmTool(toolType, forceRefresh = true)
-                            if (after == null || after.toolHoldLimit - after.toolCount < awardCount) {
+                            if (after == null || after.toolCount >= beforeCount || after.toolHoldLimit - after.toolCount < awardCount) {
                                 Log.farm("领取道具[${toolType.nickName()}]容量不足，等待正常使用后补领")
                                 continue
                             }
@@ -2612,14 +2644,12 @@ class AntFarm : ModelTask() {
                         } else {
                             farmAwardNoProgressIds.add("tool:$taskType")
                             memo = memo.replace("道具", toolType.nickName().toString())
-                            Log.farm(memo)
-                            Log.farm(s)
+                            Log.error(TAG, "道具奖励领取失败 taskType=$taskType code=${jo.optString("resultCode")} msg=$memo raw=$s")
                         }
                     }
                 }
             } else {
-                Log.farm(memo)
-                Log.farm(s)
+                Log.error(TAG, "道具任务查询失败 msg=$memo raw=$s")
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "receiveToolTaskReward err:",t)
@@ -3056,8 +3086,9 @@ class AntFarm : ModelTask() {
                 if (!Status.hasFlagToday(StatusFlags.FLAG_FARM_QUESTION_CACHE)) {
                     val jo = JSONObject(DadaDailyRpcCall.home(activityId))
                     if (ResChecker.checkRes(TAG, "查询答题活动失败:", jo)) {
-                        val operationConfigList = jo.getJSONArray("operationConfigList")
-                        updateTomorrowAnswerCache(operationConfigList, tomorrow)
+                        jo.optJSONArray("operationConfigList")?.let {
+                            updateTomorrowAnswerCache(it, tomorrow)
+                        }
                         Status.setFlagToday(StatusFlags.FLAG_FARM_QUESTION_CACHE)
                     }
                 }
@@ -3131,8 +3162,9 @@ class AntFarm : ModelTask() {
                     }
                 }
                 Log.farm("饲料任务答题：" + (if (correct) "正确" else "错误") + "领取饲料［" + extInfo.getString("award") + "g］")
-                val operationConfigList = joDailySubmit.getJSONArray("operationConfigList")
-                updateTomorrowAnswerCache(operationConfigList, tomorrow)
+                joDailySubmit.optJSONArray("operationConfigList")?.let {
+                    updateTomorrowAnswerCache(it, tomorrow)
+                }
                 Status.setFlagToday(StatusFlags.FLAG_FARM_QUESTION_CACHE)
             }
         } catch (e: Exception) {
@@ -4938,8 +4970,8 @@ class AntFarm : ModelTask() {
      *
      * @return true: 使用成功，false: 使用失败
      */
-    private suspend fun useAccelerateTool(): Boolean {
-        if (useAccelerateTool?.value != true || !isOwnerAnimalAtHome() ||
+    private suspend fun useAccelerateTool(releaseRewardSlot: Boolean = false): Boolean {
+        if ((useAccelerateTool?.value != true && !releaseRewardSlot) || !isOwnerAnimalAtHome() ||
             ownerAnimal.animalFeedStatus != AnimalFeedStatus.EATING.name || ApplicationHookConstants.isOffline()
         ) return false
         val remainingTimeValue = getAccelerateToolRemainingTimeValue()
@@ -5045,6 +5077,10 @@ class AntFarm : ModelTask() {
                 remainingFood -= foodConsumePerHour
                 isUseAccelerateTool = true
                 Status.useAccelerateTool()
+                if (releaseRewardSlot) {
+                    syncAnimalStatus(ownerFarmId)
+                    return true
+                }
                 val timeLeft = remainingFood / totalConsumeSpeed
                 if (timeLeft >= 0.0){
                     Log.farm("使用了1张加速卡⏩ 预估剩余时间: ${(timeLeft/60).toInt()} 分钟")
@@ -5248,8 +5284,7 @@ class AntFarm : ModelTask() {
                     Status.setFlagToday(StatusFlags.FLAG_FARM_ACCELERATE_LIMIT)
                     Log.farm("加速卡触发系统上限(resultCode=3D16)，已记录为当日限制")
                 }
-                Log.farm(memo.ifBlank { "使用道具🎭[${toolType.nickName()}]失败" })
-                Log.farm(s)
+                Log.error(TAG, "使用道具失败 type=$toolType code=$resultCode msg=$memo raw=$s")
                 return FarmToolUseResult.FAILED
             }
         } catch (t: Throwable) {
@@ -5976,7 +6011,20 @@ class AntFarm : ModelTask() {
                     break
                 }
 
-                val plan = if (targetMode) {
+                val plan = if (specialFoodSelection?.value == 1) {
+                    val stock = stockList.filter { it.count > 0 }.minWithOrNull(
+                        compareByDescending<SpecialFoodStock> { it.count }.thenBy { it.cuisineId },
+                    ) ?: break
+                    val unit = specialFoodUnitProduce[stock.cuisineId]?.takeIf { it > SPECIAL_FOOD_PRODUCE_EPS }
+                    var count = min(min(stock.count, remainingToEat), SPECIAL_FOOD_BATCH_LIMIT)
+                    if (targetMode) count = min(count, if (unit == null) 1 else kotlin.math.ceil(remainingTarget / unit).toInt().coerceAtLeast(1))
+                    val estimated = unit?.times(count)
+                    SpecialFoodPlan(
+                        uses = listOf(stock.toSpecialFoodUse(count)), estimatedProduce = estimated,
+                        reachesTarget = targetMode && estimated != null && estimated + SPECIAL_FOOD_PRODUCE_EPS >= remainingTarget,
+                        unknownProbe = targetMode && unit == null,
+                    )
+                } else if (targetMode) {
                     selectTargetSpecialFoodPlan(stockList, remainingTarget, remainingToEat)
                 } else {
                     selectCountSpecialFoodPlan(stockList, remainingToEat)
@@ -7169,8 +7217,10 @@ class AntFarm : ModelTask() {
     )
 
     private data class NpcAnimalSyncResult(
-        val npcs: List<NpcAnimalSnapshot>,
+        val animals: List<NpcAnimalSnapshot>,
     ) {
+        val npcs: List<NpcAnimalSnapshot>
+            get() = animals.filter { it.raw.optString("subAnimalType") == "NPC" }
         val npc: NpcAnimalSnapshot?
             get() = npcs.firstOrNull()
 
@@ -7187,8 +7237,8 @@ class AntFarm : ModelTask() {
     internal suspend fun activateZhimaPigeonFromAlchemyTask(): Boolean {
         if (!isZhimaPigeonConfigured()) return false
         if (hasPendingZhimaPigeonRewardReceipt()) {
-            Log.farm("芝麻大表鸽🤖[满产奖励待芝麻信用收取确认，本日不重复雇佣]")
-            return true
+            Log.farm("芝麻大表鸽🤖[满产奖励仍待收取确认，暂缓新雇佣]")
+            return false
         }
         if (Status.hasFlagToday(StatusFlags.FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED)) {
             Log.farm("芝麻大表鸽🤖[今日满产奖励已领取，明日再雇佣]")
@@ -7199,7 +7249,8 @@ class AntFarm : ModelTask() {
             return false
         }
         handleNpcAnimalLogic(allowZhimaPigeonHire = true)
-        return true
+        return syncNpcAnimalStatus(NpcConfig.ZHIMA_PIGEON.source, "SYNC_PIGEON_ACTIVATED")
+            ?.find(NpcConfig.ZHIMA_PIGEON.animalId) != null
     }
 
     /**
@@ -7217,7 +7268,13 @@ class AntFarm : ModelTask() {
                 checkNpcReward(targetNpc, targetConfig)
                 return
             }
-            val currentNpc = selectReplaceableNpc(syncResult.npcs)
+            val hiredWorkers = syncResult.animals.filter { it.raw.optString("subAnimalType") == "WORK" }
+            val occupiedSlots = hiredWorkers.size + syncResult.npcs.size
+            val currentNpc = if (targetConfig == NpcConfig.ZHIMA_PIGEON && occupiedSlots >= 2 && hiredWorkers.isNotEmpty()) {
+                hiredWorkers.minWithOrNull(compareBy<NpcAnimalSnapshot> {
+                    it.raw.optLong("beHiredEndTime", Long.MAX_VALUE)
+                }.thenBy { it.animal.animalId })
+            } else selectReplaceableNpc(syncResult.npcs)
 
             if (currentNpc == null) {
                 if (syncResult.npcs.isNotEmpty()) {
@@ -7268,7 +7325,12 @@ class AntFarm : ModelTask() {
                 }
             val sendBackJo = JSONObject(sendBackRes)
             if (ResChecker.checkRes(TAG, sendBackJo)) {
-                Log.farm("NPC小鸡🤖[已遣返${currentName}]")
+                val latest = syncNpcAnimalStatus(source, "SYNC_NPC_REPLACE") ?: return
+                if (latest.animals.any { it.animal.animalId == currentNpc.animal.animalId }) {
+                    Log.error(TAG, "NPC小鸡遣返ACK后仍在场，等待离场确认 animalId=${currentNpc.animal.animalId}")
+                    return
+                }
+                Log.farm("NPC小鸡🤖[已确认遣返${currentName}]")
                 hireNpc(targetConfig)
             } else {
                 val classification = classifyFarmRpcFailure(sendBackJo)
@@ -7337,7 +7399,6 @@ class AntFarm : ModelTask() {
                     (0 until animalsArray.length())
                         .asSequence()
                         .mapNotNull { index -> animalsArray.optJSONObject(index) }
-                        .filter { it.optString("subAnimalType") == "NPC" }
                         .map { raw ->
                             NpcAnimalSnapshot(objectMapper.readValue(raw.toString(), Animal::class.java), raw)
                         }
@@ -7401,10 +7462,15 @@ class AntFarm : ModelTask() {
             "领取并重雇"
         }
         Log.farm("NPC小鸡🤖[${config.nickName}产出已满($currentReward)，$fullRewardMessage]")
+        if (config == NpcConfig.ZHIMA_PIGEON) {
+            if (!markZhimaPigeonRewardReceiptPending()) return
+        }
         val response = AntFarmRpcCall.sendBackNpcAnimal(
             snapshot.animal.animalId,
             snapshot.animal.currentFarmId,
             snapshot.animal.masterFarmId,
+            receiveNpcReward = true,
+            source = if (config == NpcConfig.ZHIMA_PIGEON) config.source else "H5",
         )
         val responseJo = JSONObject(response)
         if (!ResChecker.checkRes(TAG, responseJo)) {

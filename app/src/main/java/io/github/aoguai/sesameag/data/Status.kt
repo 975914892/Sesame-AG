@@ -756,7 +756,8 @@ class Status {
         @JvmStatic
         @JvmOverloads
         fun setFlagToday(flag: String, retryTimes: String? = null) {
-            if (ApplicationHookConstants.isOffline()) {
+            // RPC 桥先进入离线，会员随后仍须保存当天风险停止标识，避免恢复后重复触发。
+            if (ApplicationHookConstants.isOffline() && flag != StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY) {
                 if (offlineSkippedTodayFlags.add(flag)) {
                     Log.record(TAG, "离线模式跳过今日标识: $flag")
                 }

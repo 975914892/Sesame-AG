@@ -55,6 +55,41 @@ object YouthPrivilegeRpcCall {
     ): String = taskAction("taskComplete", taskCode, taskSource, taskType)
 
 
+    fun triggerFeedsPrize(): String = RequestManager.requestString(
+        "alipay.membertangram.biz.rpc.student.triggerPointPrize",
+        JSONArray().put(JSONObject().put("bizId", "DO_FEEDS_TASK").put("sceneCode", "STUDENT_MONEY_CHECK_IN")).toString(),
+    )
+
+    fun queryYouth100(): String {
+        val cityCode = io.github.aoguai.sesameag.hook.internal.LocationHelper.requireCityCode()
+        return request("youth100.homepage.query", JSONObject()
+            .put("sceneCode", "YOUTH100").put("chInfo", CH_INFO).put("adCode", cityCode).apply {
+                io.github.aoguai.sesameag.hook.internal.LocationHelper.getLocation()?.let { location ->
+                    put("latitude", location.getDouble("latitude"))
+                    put("longitude", location.getDouble("longitude"))
+                }
+            })
+    }
+
+    fun receiveMonthlyPrivilege(itemId: String, moduleCode: String): String = request(
+        "youth100.privilege.receive", JSONObject().put("itemId", itemId).put("moduleCode", moduleCode),
+    )
+
+    fun queryTrialPrizes(month: Boolean): String {
+        val day = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"))
+        val start = if (month) day.withDayOfMonth(1) else day
+        val end = if (month) day.withDayOfMonth(day.lengthOfMonth()) else day
+        return RequestManager.requestString("com.alipay.yebpromobff.promosdk2024.prize.query",
+            JSONArray().put(JSONObject().put("playEntrance", "YEB_YONG_TYJ_PROMO")
+                .put("playActionCode", if (month) "CAMP_MONTH_QUERY" else "CAMP_DAY_QUERY")
+                .put("startTime", "$start 00:00:00").put("endTime", "$end 23:59:59")).toString())
+    }
+
+    fun triggerTrialPrize(): String = RequestManager.requestString(
+        "com.alipay.yebpromobff.promosdk2024.prize.trigger",
+        JSONArray().put(JSONObject().put("playEntrance", "YEB_YONG_TYJ_PROMO").put("playActionCode", "CAMP_TRIGGER")).toString(),
+    )
+
     private fun taskAction(
         method: String,
         taskCode: String,

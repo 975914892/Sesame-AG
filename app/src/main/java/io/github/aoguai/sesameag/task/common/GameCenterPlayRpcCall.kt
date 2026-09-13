@@ -6,7 +6,7 @@ import io.github.aoguai.sesameag.util.GameTask
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Captured game-center contract used by task flows that only require play duration. */
+/** 游戏动作合同；任务所属模块负责完成、领奖和服务端终态回查。 */
 object GameCenterPlayRpcCall {
     private const val METHOD_SUBMIT_PLAY_DURATION =
         "com.alipay.gamecenteruprod.biz.rpc.v3.submitUserPlayDurationAction"
@@ -128,19 +128,23 @@ object GameCenterPlayRpcCall {
             objects.map { it.optString("gameTaskType") },
             urlParameters.valuesFor("gameTaskType"),
         )
-        val contract = resolveContractFrom(objects, urlParameters, gameAppId, source)
         val mappedTask = GameTask.fromAppId(gameAppId)
         val isGameTask = mappedTask != null ||
-            contract != null ||
-            gameTaskType.equals("shichang", ignoreCase = true) ||
+            gameTaskType.isNotBlank() ||
             hasP2eFloatingBallProtocol(objects) ||
+            urlParameters.valuesFor("gameAppId", "game_id").isNotEmpty() ||
             objects.any { objectValue ->
-                objectValue.optString("categorizationSecondLevel")
+                objectValue.optString("gameAppId").isNotBlank() ||
+                    objectValue.optString("game_id").isNotBlank() ||
+                    objectValue.optString("categorizationSecondLevel")
                     .equals("Game", ignoreCase = true) ||
                     objectValue.optJSONObject("taskCategorization")
                         ?.optString("categorizationSecondLevel")
                         ?.equals("Game", ignoreCase = true) == true
             }
+        val contract = if (isGameTask && (gameTaskType.isBlank() || gameTaskType.equals("shichang", ignoreCase = true))) {
+            resolveContractFrom(objects, urlParameters, gameAppId, source)
+        } else null
         return GameTaskDescriptor(
             roots = rootObjects,
             objects = objects,
@@ -160,12 +164,14 @@ object GameCenterPlayRpcCall {
         directFinishSupported: Boolean = false,
     ): TaskActionDecision {
         val descriptor = describeTask(*roots)
-        descriptor.mappedTask?.let { mappedTask ->
-            return TaskActionDecision(
-                action = TaskAction.LEGACY_EXTERNAL_REPORT,
-                mappedTask = mappedTask,
-                reason = "verified GameTask mapping",
-            )
+        if (descriptor.contract == null && !hasP2eFloatingBallProtocol(descriptor.objects)) {
+            descriptor.mappedTask?.let { mappedTask ->
+                return TaskActionDecision(
+                    action = TaskAction.LEGACY_EXTERNAL_REPORT,
+                    mappedTask = mappedTask,
+                    reason = "verified GameTask mapping",
+                )
+            }
         }
         if (!descriptor.isGameTask) {
             return TaskActionDecision(
@@ -197,7 +203,7 @@ object GameCenterPlayRpcCall {
         }
         return TaskActionDecision(
             action = TaskAction.DEFERRED,
-            reason = "game task has no verified completion contract",
+            reason = "game task has no direct, click, duration or supported business completion contract",
         )
     }
 
@@ -424,7 +430,7 @@ object GameCenterPlayRpcCall {
         val parameters = linkedMapOf<String, String>()
         val queue = ArrayDeque<String>()
         objects.forEach { objectValue ->
-            listOf("targetUrl", "actionUrl", "jumpUrl", "pageUrl", "taskJumpUrl")
+            listOf("targetUrl", "actionUrl", "jumpUrl", "jumpLink", "pageUrl", "taskJumpUrl")
                 .map(objectValue::optString)
                 .filterTo(queue) { it.isNotBlank() }
         }
@@ -520,7 +526,10 @@ object GameCenterPlayRpcCall {
         )
     }
 
-    fun submitP2eDurationForAck(contract: P2eFloatingBallContract): DurationBatchAck {
+    fun submitP2eDurationForAck(
+        contract: P2eFloatingBallContract,
+        playSource: String = contract.source,
+    ): DurationBatchAck {
         val totalSeconds = (contract.durationSeconds.toLong() + 1L)
             .coerceIn(1L, Int.MAX_VALUE.toLong())
             .toInt()
@@ -540,7 +549,7 @@ object GameCenterPlayRpcCall {
                 Contract(
                     gameAppId = contract.gameAppId,
                     playTime = chunk,
-                    source = contract.source,
+                    source = playSource,
                 )
             )
             acknowledgements += acknowledgement

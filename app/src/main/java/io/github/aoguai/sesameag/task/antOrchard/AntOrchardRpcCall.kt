@@ -330,16 +330,27 @@ object AntOrchardRpcCall {
             "[{\"manurePotNOs\":\"$manurePotNOs\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ORCHARD\",\"source\":\"$source\",\"version\":\"$VERSION\"}]",
         )
 
+    fun listStarTasks(): String = RequestManager.requestString(
+        "com.alipay.antiep.listTask",
+        JSONArray().put(JSONObject().put("extend", JSONObject().put("taskIdList", JSONArray(listOf(
+            "ORCHARD_NORMAL_STAR", "ORCHARD_NCLY_STAR30s_NCMXY", "ORCHARD_NCLY_STAR30s_NCDDP",
+            "ORCHARD_NCLY_STAR30s_MSQYJ", "ORCHARD_NCLY_STAR30s_NCZPT",
+        )))).put("requestType", "NORMAL").put("sceneCode", "ANTFARM_ORCHARD_TASK_V2")
+            .put("source", ENTRY_SOURCE).put("version", VERSION)).toString(),
+    )
+
     fun finishTask(
         userId: String,
         sceneCode: String,
         taskType: String,
         source: String = ENTRY_SOURCE,
-    ): String =
-        RequestManager.requestString(
-            "com.alipay.antiep.finishTask",
-            "[{\"outBizNo\":\"${userId}${System.currentTimeMillis()}\",\"requestType\":\"NORMAL\",\"sceneCode\":\"$sceneCode\",\"source\":\"$source\",\"taskType\":\"$taskType\",\"userId\":\"$userId\",\"version\":\"$VERSION\"}]",
-        )
+        outBizNo: String = "${userId}${System.currentTimeMillis()}",
+    ): String = RequestManager.requestString(
+        "com.alipay.antiep.finishTask",
+        JSONArray().put(JSONObject().put("outBizNo", outBizNo).put("requestType", "NORMAL")
+            .put("sceneCode", sceneCode).put("source", source).put("taskType", taskType)
+            .put("version", VERSION).apply { if (userId.isNotBlank()) put("userId", userId) }).toString(),
+    )
 
     fun triggerTbTask(
         taskId: String,

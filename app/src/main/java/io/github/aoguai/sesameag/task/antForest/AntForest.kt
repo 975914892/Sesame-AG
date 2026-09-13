@@ -47,6 +47,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowDecision
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
+ import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.antFarm.FarmGame
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
@@ -4279,6 +4280,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         val code = extractForestTaskFailureCode(response)
         val message = extractForestTaskFailureMessage(response)
         val rpc = when {
+            action == "finishTaskopengreen" -> "com.alipay.antieptask.finishTaskopengreen"
             action.contains("opengreen", ignoreCase = true) -> "AntForestRpcCall.receiveTaskAwardopengreen"
             action.contains("receive", ignoreCase = true) -> "AntForestRpcCall.receiveTaskAward"
             else -> "AntForestRpcCall.finishTask"
@@ -4293,14 +4295,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
 
             TaskRpcFailureType.BUSINESS_LIMIT -> {
-                Log.forest("森林任务[$taskTitle] classification=BUSINESS_LIMIT decision=STOP_TODAY_OR_CURRENT_CHAIN $detail")
+                Log.error(TAG, "森林任务[$taskTitle] classification=BUSINESS_LIMIT decision=STOP_TODAY_OR_CURRENT_CHAIN $detail")
                 false
             }
 
             TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE -> {
                 blacklistClassifiedForestTask(taskType, code)
                 tryKey?.let(forestTaskTryCount::remove)
-                Log.error(TAG, "森林任务[$taskTitle] classification=UNSUPPORTED_NO_CLOSURE decision=BLACKLIST reason=未抓到稳定完成RPC $detail")
+                Log.error(TAG, "森林任务[$taskTitle] classification=UNSUPPORTED_NO_CLOSURE decision=BLACKLIST reason=无法由当前业务动作完成 $detail")
                 false
             }
 
@@ -5766,13 +5768,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 },
                 "energy_rain_drive_home_task_list" to { AntForestRpcCall.queryTaskList() }
             )
-            val runResult = TaskFlowEngine(
-                ForestTaskFlowAdapter(
-                    taskSources = taskSources,
-                    targetTaskTypes = setOf(driveTaskType)
-                ),
-                roundSleepMs = 500L
-            ).run()
+            var driveTaskCompleted = false
+            val driveAdapter = object : TaskFlowAdapter by ForestTaskFlowAdapter(
+                taskSources = taskSources,
+                targetTaskTypes = setOf(driveTaskType)
+            ) {
+                override fun onAllTasksDone(snapshot: TaskFlowSnapshot) {
+                    driveTaskCompleted = snapshot.totalTasks > 0
+                }
+            }
+            val runResult = TaskFlowEngine(driveAdapter, roundSleepMs = 500L).run()
 
             val gameCenterMessage = gameCenterDriveResult?.message
                 ?.takeIf { it.isNotBlank() }
@@ -5784,7 +5789,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 TaskBlacklist.isTaskInBlacklist(forestTaskBlacklistModule, driveTaskType) ->
                     EnergyRainCoroutine.EnergyRainGameDriveStatus.SKIPPED_BLACKLISTED
 
-                runResult.completed -> EnergyRainCoroutine.EnergyRainGameDriveStatus.CONFIRMED_DONE
+                runResult.completed && driveTaskCompleted -> EnergyRainCoroutine.EnergyRainGameDriveStatus.CONFIRMED_DONE
                 runResult.progressed -> EnergyRainCoroutine.EnergyRainGameDriveStatus.PROGRESSED
                 gameCenterDriveResult?.status == EnergyRainCoroutine.EnergyRainGameDriveStatus.CONFIRMED_DONE ->
                     EnergyRainCoroutine.EnergyRainGameDriveStatus.CONFIRMED_DONE
@@ -6020,6 +6025,18 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return null
         }
         for (task in deliveryTasks) {
+            if (task.status in FOREST_LEYUAN_REWARD_READY_STATUSES) {
+                if (receiveEnergyRainGameCenterDeliveryAward(task)) {
+                    return EnergyRainCoroutine.EnergyRainGameDriveResult(
+                        EnergyRainCoroutine.EnergyRainGameDriveStatus.PROGRESSED,
+                        "游戏中心IEP奖励已处理，回查原任务: ${task.sceneCode}/${task.taskType}"
+                    )
+                }
+                continue
+            }
+            if (TaskBlacklist.isTaskInBlacklist(forestTaskBlacklistModule, task.taskType)) {
+                continue
+            }
             val quotaSuffix = if (task.rightTimesLimit > 0) {
                 " quota=${task.rightTimes}/${task.rightTimesLimit}"
             } else {
@@ -6035,7 +6052,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 "task_entry"
             )
             if (finishResponseText.isBlank()) {
-                Log.forest("游戏中心IEP候选[${task.title}]opengreen完成RPC返回空，继续后续候选")
+                Log.error(TAG, "游戏中心IEP候选[${task.title}][${task.sceneCode}/${task.taskType}]finishTaskopengreen返回空")
                 continue
             }
             val finishResponse = JSONObject(finishResponseText)
@@ -6056,22 +6073,19 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 }
 
                 else -> {
-                    when (classifyForestTaskFailure(finishResponse)) {
-                        TaskRpcFailureType.TERMINAL_DONE -> return EnergyRainCoroutine.EnergyRainGameDriveResult(
-                            EnergyRainCoroutine.EnergyRainGameDriveStatus.PROGRESSED,
-                            "游戏中心IEP任务已处理: ${task.sceneCode}/${task.taskType}"
-                        )
-
-                        TaskRpcFailureType.RETRYABLE_RPC,
-                        TaskRpcFailureType.BUSINESS_LIMIT,
-                        TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
-                        TaskRpcFailureType.NON_RETRYABLE_INVALID,
-                        TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW -> Unit
-                    }
-                    Log.forest(
-                        "游戏中心IEP候选[${task.title}]opengreen完成RPC未形成确认进展: " +
-                            extractForestTaskFailureMessage(finishResponse)
+                    val handled = handleForestTaskRpcFailure(
+                        action = "finishTaskopengreen",
+                        sceneCode = task.sceneCode,
+                        taskType = task.taskType,
+                        taskTitle = task.title,
+                        response = finishResponse
                     )
+                    if (handled) {
+                        return EnergyRainCoroutine.EnergyRainGameDriveResult(
+                            EnergyRainCoroutine.EnergyRainGameDriveStatus.PROGRESSED,
+                            "游戏中心IEP任务已处理，回查原任务: ${task.sceneCode}/${task.taskType}"
+                        )
+                    }
                 }
             }
         }
@@ -6090,7 +6104,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             task.taskType
         )
         if (responseText.isBlank()) {
-            Log.forest("游戏中心IEP候选[${task.title}]领奖RPC返回空，交由后续回查确认")
+            Log.error(TAG, "游戏中心IEP候选[${task.title}][${task.sceneCode}/${task.taskType}]receiveTaskAwardopengreen返回空")
             return false
         }
         val response = JSONObject(responseText)
@@ -6107,11 +6121,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
 
             else -> {
-                Log.forest(
-                    "游戏中心IEP候选[${task.title}]领奖未形成确认进展: " +
-                        extractForestTaskFailureMessage(response)
+                handleForestTaskRpcFailure(
+                    action = "receiveTaskAwardopengreen",
+                    sceneCode = task.sceneCode,
+                    taskType = task.taskType,
+                    taskTitle = task.title,
+                    response = response,
+                    terminalResult = false
                 )
-                false
             }
         }
     }

@@ -14,6 +14,18 @@ import java.util.UUID
  * 森林 RPC 调用类
  */
 object AntForestRpcCall {
+    fun memberForestSignin(version: String = "plant_black_v2"): String = RequestManager.requestString(
+        "com.alipay.amic.commonmodule.rpc.MemberForestSigninFacade.memberForestSignin",
+        JSONArray().put(JSONObject().put("chInfo", "forestWater").put("scene", "promote")
+            .put("extInfo", JSONObject().put("version", version))).toString(),
+    )
+
+    fun plantAward(awardSpeed: String): String = RequestManager.requestString(
+        "com.alipay.ugshopping.biz.service.rpc.plant.PlantFacade.plantAward",
+        JSONArray().put(JSONObject().put("awardType", "WATER").put("awardSpeed", awardSpeed)
+            .put("source", "forestWater")).toString(),
+    )
+
     private const val DEFAULT_SOURCE = "chInfo_ch_appcenter__chsub_9patch"
     private const val HOME_TASK_SOURCE = "chInfo_ch_appid-60000002"
     private const val FOREST_GAME_CENTER_SOURCE = "chInfo_ch_appid-60000002"

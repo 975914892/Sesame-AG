@@ -2,6 +2,7 @@ package io.github.aoguai.sesameag.task.antFarm
 
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.SelectModelField
 import io.github.aoguai.sesameag.task.antFarm.AntFarm.AnimalFeedStatus
@@ -735,6 +736,7 @@ data object AntFarmFamily {
                 return
             }
             val jo = JSONObject(AntFarmRpcCall.familyEatTogether(groupId, JSONArray(familyUserIds), array))
+            AntFarm.instance?.specialFoodCuisineSnapshot = null
             if (ResChecker.checkRes(TAG, jo)) {
                 Log.farm("家庭任务🏠请客" + periodName + "#消耗美食" + familyUserIds.size + "份（最近美食库存与特殊食品/补蛋共用）")
                 GlobalThreadPools.sleepCompat(500L)
@@ -914,11 +916,24 @@ data object AntFarmFamily {
             return null
         }
         try {
-            val jo = JSONObject(AntFarmRpcCall.queryRecentFarmFood(queryNum))
-            if (!ResChecker.checkRes(TAG, jo)) {
-                return null
-            }
-            val cuisines = jo.optJSONArray("cuisines") ?: return null
+            val preferStock = AntFarm.instance?.specialFoodSelection?.value == 1
+            var pageNo = 1
+            val cuisines = JSONArray()
+            do {
+                val jo = JSONObject(AntFarmRpcCall.queryRecentFarmFood(queryNum, if (preferStock) pageNo else null))
+                if (!ResChecker.checkRes(TAG, jo)) {
+                    Log.error(TAG, "家庭美食库存查询失败 pageNo=$pageNo raw=$jo")
+                    return null
+                }
+                val page = jo.optJSONArray("cuisines") ?: return null
+                for (index in 0 until page.length()) cuisines.put(page.getJSONObject(index))
+                if (!preferStock || !jo.optBoolean("hasMore", false)) break
+                if (page.length() == 0) {
+                    Log.error(TAG, "家庭美食分页为空但仍有后续页 pageNo=$pageNo raw=$jo")
+                    return null
+                }
+                pageNo++
+            } while (!ApplicationHookConstants.isOffline())
             val candidates =
                 buildList {
                     for (i in 0 until cuisines.length()) {
@@ -950,14 +965,15 @@ data object AntFarmFamily {
                 return null
             }
 
-            // 先保留库存量更多的美食；相同库存下优先消耗已知单份产蛋更少的菜品。
-            // 收益未知的菜品只会排在同库存且已知收益菜品之后，避免把未知当作零进度。
-            val candidatesInPriority =
+            val candidatesInPriority = if (preferStock) {
+                candidates.sortedWith(compareByDescending<FamilyCuisineCandidate> { it.availableCount }.thenBy { it.cuisineId })
+            } else {
                 candidates.sortedWith(
                     compareByDescending<FamilyCuisineCandidate> { it.availableCount }
                         .thenBy { it.knownEggProduce ?: Double.POSITIVE_INFINITY }
                         .thenBy { it.cuisineId },
                 )
+            }
             var remainingCount = queryNum
             val selectedCuisines = JSONArray()
             for (candidate in candidatesInPriority) {

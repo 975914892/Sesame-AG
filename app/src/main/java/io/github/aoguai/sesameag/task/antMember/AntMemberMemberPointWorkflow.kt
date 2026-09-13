@@ -44,6 +44,12 @@ internal fun AntMember.prepareMemberPointWorkflows(
         }
     }
 
+    if ((memberSign?.value == true || memberTask?.value == true) && !riskStoppedToday &&
+        !hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY)
+    ) {
+        deferredTasks.add(scope.async(Dispatchers.IO) { doMemberGameEntrance() })
+    }
+
     if (yebExpGold?.value == true) {
         deferredTasks.add(scope.async(Dispatchers.IO) { handleYebExpGoldTasks() })
     }

@@ -1,9 +1,14 @@
 package io.github.aoguai.sesameag.hook.internal
 
+import android.location.Geocoder
+import io.github.aoguai.sesameag.entity.AreaCode
+import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import org.json.JSONObject
 
 object LocationHelper {
@@ -53,10 +58,14 @@ object LocationHelper {
             }.invoke(null) as? Double
 
             if (latitude != null && longitude != null) {
-                val locationMap = mapOf(
+                val locationMap = mutableMapOf<String, Any>(
                     "latitude" to latitude,
                     "longitude" to longitude
                 )
+                val previous = getLocation()
+                if (previous?.optDouble("latitude") == latitude && previous.optDouble("longitude") == longitude) {
+                    previous.optString("cityCode").takeIf { it.isNotBlank() }?.let { locationMap["cityCode"] = it }
+                }
                 saveLocationToDataStore(locationMap)
                 JSONObject(locationMap)
             } else {
@@ -66,6 +75,23 @@ object LocationHelper {
             Log.error(TAG, "获取经纬度异常: ${e.message}")
             createAndSaveError("获取失败: ${e.message}")
         }
+    }
+
+    @Suppress("DEPRECATION")
+    fun requireCityCode(): String = runBlocking(Dispatchers.IO) {
+        val location = requestLocationSuspend()
+        location.optString("cityCode").takeIf { it.isNotBlank() }?.let { return@runBlocking it }
+        val latitude = location.optDouble("latitude", Double.NaN)
+        val longitude = location.optDouble("longitude", Double.NaN)
+        check(latitude.isFinite() && longitude.isFinite()) { "缺少宿主当前位置，城市相关请求保留待处理" }
+        val context = checkNotNull(ApplicationHook.appContext) { "宿主 Context 未初始化" }
+        check(Geocoder.isPresent()) { "系统地理编码不可用，城市相关请求保留待处理" }
+        val address = Geocoder(context, Locale.CHINA).getFromLocation(latitude, longitude, 1)?.firstOrNull()
+        val cityName = address?.locality?.takeIf { it.isNotBlank() } ?: address?.adminArea
+        val cityCode = AreaCode.getList().firstOrNull { it.name == cityName }?.id
+        check(!cityCode.isNullOrBlank()) { "系统地理编码与城市目录未能确定当前城市，保留待处理" }
+        saveLocationToDataStore(mapOf("latitude" to latitude, "longitude" to longitude, "cityCode" to cityCode))
+        cityCode
     }
 
     private fun createAndSaveError(msg: String): JSONObject {

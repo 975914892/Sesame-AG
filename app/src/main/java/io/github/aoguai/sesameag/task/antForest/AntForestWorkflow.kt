@@ -182,6 +182,7 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
 
     if (receiveForestTaskAward?.value == true) {
         receiveTaskAward()
+        waterMemberPlant()
         tc.countDebug("森林任务")
         handleGift7thSign(selfHomeObj)
         tc.countDebug("森林七日礼包")

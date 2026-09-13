@@ -388,13 +388,6 @@ class AntDodo : ModelTask() {
             }
         }
 
-        override fun isBlacklisted(item: TaskFlowItem): Boolean {
-            if (isConsecutiveCollectTask(item.type, item.title)) {
-                return false
-            }
-            return super<TaskFlowAdapter>.isBlacklisted(item)
-        }
-
         override fun receive(item: TaskFlowItem): TaskFlowActionResult {
             val response = AntDodoRpcCall.receiveTaskAward(item.sceneCode, item.type)
             if (response.isNullOrEmpty()) {
@@ -653,7 +646,7 @@ class AntDodo : ModelTask() {
     private fun mapConsecutiveCollectPhase(item: TaskFlowItem): TaskFlowPhase {
         val current = item.current ?: 0
         val limit = item.limit
-        val curCycleFinished = item.raw?.optJSONObject("taskInfo")?.optBoolean("curCycleFinished") == true
+        val curCycleFinished = item.raw?.optJSONObject("taskInfo")?.optJSONObject("taskBaseInfo")?.optBoolean("curCycleFinished") == true
         val progressMessage = when {
             limit == null -> "缺少有效进度[${item.progress}]，等待服务端刷新"
             current < limit && curCycleFinished -> "今日已完成，连续进度[$current/$limit]，等待后续天数推进"
