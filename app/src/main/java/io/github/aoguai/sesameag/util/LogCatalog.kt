@@ -54,10 +54,12 @@ enum class LogChannel(
 ) {
     SYSTEM(
         loggerName = "system",
-        displayName = "系统日志",
+        displayName = "系统诊断",
         moduleDomain = LogModuleDomain.SYSTEM,
         techKind = LogTechKind.SYSTEM,
         description = "模块内部系统日志",
+        viewerGroup = LogViewerGroup.TECHNICAL,
+        visibleInViewer = true,
     ),
     RECORD(
         loggerName = "record",

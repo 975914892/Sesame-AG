@@ -52,6 +52,7 @@ import io.github.aoguai.sesameag.util.IconManager
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.LogChannel
 import io.github.aoguai.sesameag.util.Logback
+import io.github.aoguai.sesameag.util.ModuleDiagnostics
 import io.github.aoguai.sesameag.util.PermissionUtil
 import io.github.aoguai.sesameag.util.ToastUtil
 import io.github.aoguai.sesameag.util.UserDataStoreManager
@@ -100,6 +101,7 @@ class MainActivity : ComponentActivity() {
         }
     private val permissionSettingsLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            ModuleDiagnostics.event("permission_settings", "returned", "requirement=${pendingPermissionRequest ?: "manual_card"}")
             pendingPermissionRequest = null
             requestTargetPermissionSnapshot(clearCached = true)
             continuePermissionQueueOrAuto()
@@ -153,6 +155,8 @@ class MainActivity : ComponentActivity() {
                 }
             ).takeIf { it.available && it.contextPackage == General.PACKAGE_NAME }
             pendingTargetPermissionSnapshotToken = 0L
+            ModuleDiagnostics.event("target_permission_snapshot", if (latestTargetPermissionSnapshot != null) "received" else "unavailable",
+                "exactAlarm=${latestTargetPermissionSnapshot?.targetExactAlarmAllowed} battery=${latestTargetPermissionSnapshot?.targetBatteryIgnored}")
             refreshPermissionHealth()
         }
     }
@@ -160,6 +164,7 @@ class MainActivity : ComponentActivity() {
     // Shizuku 监听器
     private val shizukuListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode == 1234) {
+            ModuleDiagnostics.event("shizuku_permission", "returned", "granted=${grantResult == PackageManager.PERMISSION_GRANTED}")
             if (pendingPermissionRequest == PermissionRequirement.SHELL_EXECUTOR) {
                 pendingPermissionRequest = null
             }
@@ -196,7 +201,9 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 CommandUtil.serviceStatus.collectLatest {
+                    ModuleDiagnostics.event("executor", "changed", "state=${it.javaClass.simpleName} type=${(it as? CommandUtil.ServiceStatus.Active)?.type ?: "unknown"}")
                     refreshPermissionHealth()
+                    viewModel.onExecutorStateChanged()
                     if (activePermissionMode == PermissionRequestMode.MANUAL_CARD ||
                         pendingPermissionRequest == PermissionRequirement.SHELL_EXECUTOR
                     ) {
@@ -291,19 +298,26 @@ class MainActivity : ComponentActivity() {
             MainUiEvent.RefreshOneWord -> viewModel.fetchOneWord()
             is MainUiEvent.OpenLog -> Unit
             MainUiEvent.RefreshEnvironment -> {
+                ModuleDiagnostics.event("environment_refresh", "requested")
                 CommandUtil.connect(applicationContext)
                 refreshEnvironment()
             }
             is MainUiEvent.RequestPermission -> requestPermissionFromCard(event.requirement)
             MainUiEvent.OpenTargetApp -> {
+                ModuleDiagnostics.event("open_target", "requested")
                 try {
                     val intent = packageManager.getLaunchIntentForPackage(General.PACKAGE_NAME)
                     if (intent != null) {
+                        viewModel.markExternalNavigation()
                         startActivity(intent)
+                        ModuleDiagnostics.event("open_target", "launched")
                     } else {
+                        ModuleDiagnostics.event("open_target", "launch_intent_unavailable", "target=${General.PACKAGE_NAME}")
                         ToastUtil.showToast(this, "暂时无法打开目标应用")
                     }
                 } catch (e: Exception) {
+                    viewModel.cancelExternalNavigation()
+                    ModuleDiagnostics.event("open_target", "failed", "error=${e.javaClass.simpleName}")
                     Log.printStackTrace("MainActivity", "打开目标应用失败", e)
                     ToastUtil.showToast(this, "暂时无法打开目标应用")
                 }
@@ -317,6 +331,7 @@ class MainActivity : ComponentActivity() {
 
             MainUiEvent.OpenExtend -> Unit
             MainUiEvent.ClearConfig -> {
+                ModuleDiagnostics.event("clear_module_data", "requested")
                 clearModuleDataFailures.value = emptyList()
                 lifecycleScope.launch(Dispatchers.IO) {
                     runCatching { DataStore.shutdown() }
@@ -345,9 +360,14 @@ class MainActivity : ComponentActivity() {
                         Logback.reloadFileLogging(enableCaptureAppender = true)
                     }
 
+                    if (!ModuleDiagnostics.clear(applicationContext)) {
+                        failedPaths += "system_diagnostics"
+                    }
+                    ModuleDiagnostics.event("clear_module_data", if (failedPaths.isEmpty()) "completed" else "failed", "failed=${failedPaths.size}")
                     withContext(Dispatchers.Main) {
                         viewModel.refreshUserConfigs()
                         if (failedPaths.isEmpty()) {
+                            viewModel.resetAccountGuide()
                             ThemeManager.resetToDefaults()
                             IconManager.syncIconState(this@MainActivity, false)
                             sendBroadcast(
@@ -379,7 +399,10 @@ class MainActivity : ComponentActivity() {
 
     private fun runManualTask(task: CustomTask, params: Map<String, Any>): LogSource? {
         val activeUserId = DataStore.get("activedUser", io.github.aoguai.sesameag.entity.UserEntity::class.java)?.userId
+        val detail = "task=${task.name} account=${ModuleDiagnostics.account(activeUserId)}"
+        ModuleDiagnostics.event("manual_task", "requested", detail)
         if (!AccountSlotRegistry.isExecutableUser(activeUserId)) {
+            ModuleDiagnostics.event("manual_task", "rejected", "$detail reason=account_not_executable")
             ToastUtil.showToast(this, "当前账号不在可执行槽位，无法运行手动任务")
             return null
         }
@@ -394,6 +417,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             sendBroadcast(intent)
+            ModuleDiagnostics.event("manual_task", "sent", detail)
             ToastUtil.showToast(this, "已发送指令: ${task.displayName}")
             val logFile = Files.getLogFile(LogChannel.RECORD)
             if (logFile.exists()) {
@@ -403,6 +427,7 @@ class MainActivity : ComponentActivity() {
                 null
             }
         } catch (e: Exception) {
+            ModuleDiagnostics.event("manual_task", "failed", "$detail error=${e.javaClass.simpleName}")
             ToastUtil.showToast(this, "发送失败: ${e.message}")
             null
         }
@@ -435,6 +460,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        viewModel.onForegroundStarted()
         refreshEnvironment()
         if (
             pendingPermissionRequest == PermissionRequirement.LSPOSED_TARGET_SCOPE &&
@@ -451,6 +477,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
+            viewModel.onForegroundStopped()
             CommandUtil.unbind(applicationContext)
         }
         if (!isChangingConfigurations && pendingPermissionRequest == null) {
@@ -471,6 +498,7 @@ class MainActivity : ComponentActivity() {
 
     private fun onRuntimePermissionRequestFinished(result: Map<String, Boolean>) {
         val deniedPermission = pendingPermissionRequest
+        ModuleDiagnostics.event("permission", "returned", "requirement=$deniedPermission granted=${result.values.all { it }} answered=${result.isNotEmpty()}")
         if (deniedPermission in setOf(
                 PermissionRequirement.MODULE_FILE,
                 PermissionRequirement.MODULE_NOTIFICATION
@@ -504,7 +532,9 @@ class MainActivity : ComponentActivity() {
             else -> null
         }
         if (settingsIntent != null) {
+            ModuleDiagnostics.event("permission_settings", "requested", "requirement=$permission target=$targetPackage")
             if (targetPackage != packageName && !PermissionUtil.isPackageInstalled(this, targetPackage)) {
+                ModuleDiagnostics.event("permission_settings", "target_not_visible", "target=$targetPackage")
                 ToastUtil.showToast(this, "未检测到目标应用")
                 return
             }
@@ -516,8 +546,13 @@ class MainActivity : ComponentActivity() {
                     Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM
                 else -> null
             }
+            viewModel.markExternalNavigation()
             if (!PermissionUtil.startActivitySafely(this, settingsIntent, fallbackAction, permissionSettingsLauncher)) {
+                viewModel.cancelExternalNavigation()
+                ModuleDiagnostics.event("permission_settings", "launch_failed", "requirement=$permission")
                 ToastUtil.showToast(this, "暂时无法打开系统设置")
+            } else {
+                ModuleDiagnostics.event("permission_settings", "launched", "requirement=$permission")
             }
             return
         }
@@ -604,7 +639,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestPermission(permission: PermissionRequirement): Boolean {
-        return when (permission) {
+        ModuleDiagnostics.event("permission", "requested", "requirement=$permission mode=$activePermissionMode")
+        viewModel.markExternalNavigation()
+        val requested = when (permission) {
             PermissionRequirement.MODULE_FILE -> {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
                     permission in deniedPermissionsThisVisibility &&
@@ -655,12 +692,18 @@ class MainActivity : ComponentActivity() {
 
             PermissionRequirement.SHELL_EXECUTOR -> requestShellExecutor()
         }
+        if (!requested) {
+            viewModel.cancelExternalNavigation()
+            ModuleDiagnostics.event("permission", "request_failed", "requirement=$permission")
+        }
+        return requested
     }
 
     private fun requestLsposedTargetScope(): Boolean {
         val sent = LsposedServiceManager.requestTargetScope { result ->
             runOnUiThread {
                 markRequestFinished(PermissionRequirement.LSPOSED_TARGET_SCOPE)
+                ModuleDiagnostics.event("lsposed_scope", if (result.success) "granted" else "failed")
                 if (result.success) {
                     ToastUtil.showToast(this, "已添加目标应用")
                 } else {
@@ -705,6 +748,7 @@ class MainActivity : ComponentActivity() {
         if (!PermissionUtil.isPackageInstalled(this, General.PACKAGE_NAME)) {
             latestTargetPermissionSnapshot = null
             pendingTargetPermissionSnapshotToken = 0L
+            ModuleDiagnostics.event("target_permission_snapshot", "target_not_visible")
             return false
         }
         val requestToken = System.nanoTime()
@@ -725,6 +769,7 @@ class MainActivity : ComponentActivity() {
             delay(350)
             if (pendingTargetPermissionSnapshotToken == requestToken) {
                 pendingTargetPermissionSnapshotToken = 0L
+                ModuleDiagnostics.event("target_permission_snapshot", "timeout", "limitMs=350")
                 refreshPermissionHealth()
             }
         }
@@ -745,6 +790,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshPermissionHealth(): PermissionHealthSnapshot {
         val snapshot = buildPermissionHealthSnapshot(pendingPermissionRequest)
+        viewModel.setPermissionQueueBusy(pendingPermissionRequest != null || activePermissionOrder.isNotEmpty())
         viewModel.updatePermissionHealth(snapshot)
         return snapshot
     }

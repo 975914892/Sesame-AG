@@ -15,6 +15,9 @@ import io.github.aoguai.sesameag.R
 import io.github.aoguai.sesameag.SesameApplication.Companion.PREFERENCES_KEY
 import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.Logback
+import io.github.aoguai.sesameag.util.ModuleDiagnostics
+import io.github.aoguai.sesameag.util.PermissionUtil
 import io.github.aoguai.sesameag.util.ToastUtil
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -98,6 +101,7 @@ class LogViewerViewModel(
     fun loadLogs(path: String) {
         if (currentFilePath == path && loadJob?.isActive == true) return
 
+        if (currentFilePath != path) ModuleDiagnostics.event("open_log", "opened", "file=${File(path).name}")
         currentFilePath = path
         loadJob?.cancel()
         updateJob?.cancel()
@@ -302,7 +306,11 @@ class LogViewerViewModel(
         val path = currentFilePath ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                if (Files.clearFile(File(path))) {
+                val cleared = if (path == Logback.systemLogFile?.absolutePath) {
+                    ModuleDiagnostics.clear(context)
+                } else Files.clearFile(File(path))
+                ModuleDiagnostics.event("clear_log", if (cleared) "completed" else "failed", "file=${File(path).name}")
+                if (cleared) {
                     forceFullReload.set(true)
                     fileUpdateChannel.trySend(Unit)
                     withContext(Dispatchers.Main) {
@@ -327,9 +335,16 @@ class LogViewerViewModel(
         if (exportJob?.isActive == true || _uiState.value.isExporting) return
         exportJob = viewModelScope.launch {
             _uiState.update { it.copy(isExporting = true) }
+            ModuleDiagnostics.event("export_log", "requested", "file=${File(path).name}")
             try {
+                if (!PermissionUtil.checkFilePermissions(context)) {
+                    ModuleDiagnostics.event("export_log", "permission_denied", "file=${File(path).name}")
+                    ToastUtil.showUiToast(context, "导出失败：缺少文件访问权限")
+                    return@launch
+                }
                 val sourceFile = File(path)
                 if (!sourceFile.exists()) {
+                    ModuleDiagnostics.event("export_log", "source_missing", "file=${sourceFile.name}")
                     ToastUtil.showUiToast(context, "源文件不存在")
                     return@launch
                 }
@@ -337,6 +352,8 @@ class LogViewerViewModel(
                     Files.exportFile(sourceFile, true)
                 }
 
+                ModuleDiagnostics.event("export_log", if (exportFile != null && exportFile.exists()) "completed" else "failed",
+                    "file=${sourceFile.name} size=${exportFile?.length() ?: 0}")
                 if (exportFile != null && exportFile.exists()) {
                     val msg = "${context.getString(R.string.file_exported)} ${exportFile.path}"
                     ToastUtil.showUiToast(context, msg)
@@ -346,6 +363,7 @@ class LogViewerViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                ModuleDiagnostics.event("export_log", "failed", "error=${e.javaClass.simpleName}")
                 Log.printStackTrace(tag, "Export error", e)
                 ToastUtil.showUiToast(context, "导出异常: ${e.message}")
             } finally {

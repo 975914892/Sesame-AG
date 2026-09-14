@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.entryProvider
@@ -129,6 +130,10 @@ fun MainScreen(
         ?: TopLevelDestination.OVERVIEW
     val currentStack = stacks.getValue(selected)
     val isTopLevelRoute = currentStack.size == 1
+    LifecycleResumeEffect(selected, isTopLevelRoute) {
+        viewModel.setHomeVisible(selected == TopLevelDestination.OVERVIEW && isTopLevelRoute)
+        onPauseOrDispose { viewModel.setHomeVisible(false) }
+    }
 
     fun navigate(route: AppRoute) {
         if (currentStack.lastOrNull() != route) currentStack.add(route)
@@ -146,6 +151,30 @@ fun MainScreen(
     val isLegalAccepted by viewModel.isLegalAccepted.collectAsStateWithLifecycle()
     val isSavingLegalAcceptance by viewModel.isSavingLegalAcceptance.collectAsStateWithLifecycle()
     val activeUser by viewModel.activeUser.collectAsStateWithLifecycle()
+    val accountGuide by viewModel.accountGuide.collectAsStateWithLifecycle()
+    CommonAlertDialog(
+        showDialog = accountGuide != null,
+        onDismissRequest = viewModel::dismissAccountGuide,
+        onConfirm = {
+            onEvent(if (accountGuide == "loading" || accountGuide == "unreadable") {
+                MainActivity.MainUiEvent.RefreshEnvironment
+            } else MainActivity.MainUiEvent.OpenTargetApp)
+        },
+        title = when (accountGuide) {
+            "loading" -> "正在读取账号配置"
+            "unreadable" -> "账号配置暂不可读取"
+            "legal" -> "协议确认需要账号"
+            else -> "请先在目标应用中登录"
+        },
+        text = when (accountGuide) {
+            "loading" -> "账号配置读取中，请稍后重试。"
+            "unreadable" -> "无法读取账号配置，请检查文件权限。"
+            "legal" -> "协议确认与账号绑定。当前没有可绑定账号，请在目标应用中尝试登录。"
+            else -> "尚未获取账号，请打开目标应用尝试登录后返回。"
+        },
+        confirmText = if (accountGuide == "loading" || accountGuide == "unreadable") "重新检查" else "打开目标应用",
+        dismissText = "稍后",
+    )
 
     val interceptedEvent: (MainActivity.MainUiEvent) -> Unit = { event ->
         when (event) {
@@ -180,6 +209,8 @@ fun MainScreen(
                 isLegalAccepted = isLegalAccepted,
                 isSavingLegalAcceptance = isSavingLegalAcceptance,
                 onLegalAcceptedChange = viewModel::setLegalAccepted,
+                onDialogVisibilityChange = viewModel::setHomeDialogVisible,
+                onExternalNavigation = viewModel::markExternalNavigation,
                 onOneWordClick = { interceptedEvent(MainActivity.MainUiEvent.RefreshOneWord) },
                 onEvent = interceptedEvent,
             )

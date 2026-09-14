@@ -20,6 +20,7 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const labelName = 'need info';
+            const botLogin = 'github-actions[bot]';
             const inactiveMs = 3 * 24 * 60 * 60 * 1000;
             const now = Date.now();
 
@@ -37,31 +38,61 @@ jobs:
                 continue;
               }
 
-              const labels = (issue.labels || []).map((label) => label.name);
-              if (!labels.includes(labelName)) {
-                continue;
-              }
-
               const inactiveForMs = now - new Date(issue.updated_at).getTime();
-              if (inactiveForMs < inactiveMs) {
+              if (!Number.isFinite(inactiveForMs) || inactiveForMs < inactiveMs) {
                 continue;
               }
 
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: issue.number,
-                body: `由于该 Issue 在 3 天内仍未补齐必要信息，现已被自动关闭。若仍需处理，请补充所需信息后重新打开。`
-              });
+              try {
+                const events = await github.paginate(github.rest.issues.listEvents, {
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  per_page: 100
+                });
+                const needInfoEvent = events.filter((event) =>
+                  ['labeled', 'unlabeled'].includes(event.event) && event.label?.name === labelName
+                ).sort((left, right) => right.id - left.id)[0];
+                if (
+                  needInfoEvent?.event !== 'labeled' ||
+                  needInfoEvent.actor?.type !== 'Bot' || needInfoEvent.actor?.login !== botLogin
+                ) {
+                  core.info(`Skipping manually managed or unattributed issue #${issue.number}.`);
+                  continue;
+                }
 
-              await github.rest.issues.update({
-                owner,
-                repo,
-                issue_number: issue.number,
-                state: 'closed',
-                state_reason: 'not_planned'
-              });
-              closedCount += 1;
+                const { data: currentIssue } = await github.rest.issues.get({
+                  owner,
+                  repo,
+                  issue_number: issue.number
+                });
+                const updatedAt = new Date(currentIssue.updated_at).getTime();
+                if (
+                  currentIssue.state !== 'open' || currentIssue.pull_request ||
+                  !(currentIssue.labels || []).some((label) => label.name === labelName) ||
+                  !Number.isFinite(updatedAt) || Date.now() - updatedAt < inactiveMs
+                ) {
+                  continue;
+                }
+
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                  state_reason: 'not_planned'
+                });
+                closedCount += 1;
+
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body: '由于该 Issue 连续 3 天无更新且仍缺必要信息，现已被自动关闭。若仍需处理，请补充所需信息后重新打开。'
+                });
+              } catch (error) {
+                core.warning(`Stopped processing issue #${issue.number}: ${error.message}`);
+              }
             }
 
             core.info(`Closed ${closedCount} stale need info issue(s).`);
