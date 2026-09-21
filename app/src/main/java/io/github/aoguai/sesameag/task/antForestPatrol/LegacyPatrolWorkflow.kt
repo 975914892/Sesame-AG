@@ -151,28 +151,12 @@ internal object LegacyPatrolWorkflow {
                     continue
                 }
                 matched = true
-                val pieces = animalProp.optJSONArray("pieces")
-                if (pieces == null || pieces.length() == 0) {
-                    Log.forestPatrol("巡护图鉴动物缺少碎片字段[${record.reserveName}/${animal.optString("name", animalId.toString())}]")
-                    return PatrolPieceState.UNKNOWN
-                }
-                for (pieceIndex in 0 until pieces.length()) {
-                    val piece = pieces.optJSONObject(pieceIndex)
-                        ?: return PatrolPieceState.UNKNOWN
-                    if (!piece.has("holdsNum") || piece.isNull("holdsNum")) {
-                        Log.forestPatrol(
-                            "巡护图鉴碎片缺少holdsNum字段[${record.reserveName}/" +
-                                "${animal.optString("name", animalId.toString())}]",
-                        )
-                        return PatrolPieceState.UNKNOWN
-                    }
-                    if (piece.optInt("holdsNum", 0) <= 0) {
-                        Log.forestPatrol(
-                            "巡护图鉴确认可推进缺片[${record.reserveName}/${record.patrolId}/" +
-                                "${animal.optString("name", animalId.toString())}]"
-                        )
-                        return PatrolPieceState.MISSING
-                    }
+                if (!animalProp.has("main") || animalProp.isNull("main")) {
+                    Log.forestPatrol(
+                        "巡护图鉴确认可推进缺片[${record.reserveName}/${record.patrolId}/" +
+                            "${animal.optString("name", animalId.toString())}]"
+                    )
+                    return PatrolPieceState.MISSING
                 }
             }
             if (!matched) {
