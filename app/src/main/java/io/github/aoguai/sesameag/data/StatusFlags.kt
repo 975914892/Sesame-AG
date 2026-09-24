@@ -364,27 +364,6 @@ object StatusFlags {
     /** 农场好友助力：好友关系无效前缀 */
     const val FLAG_ANTORCHARD_ASSIST_RELATION_INVALID_PREFIX = "orchard::assistRelationInvalid::"
 
-    /** 福气鱼池：今日签到已处理 */
-    const val FLAG_ANTFISHPOND_SIGN_DONE = "AntFishPond::signDone"
-
-    /** 福气鱼池：每日宝箱已领取 */
-    const val FLAG_ANTFISHPOND_GIFT_BOX_DONE = "AntFishPond::giftBoxDone"
-
-    /** 福气鱼池：明日钓竿奖励已领取 */
-    const val FLAG_ANTFISHPOND_TOMORROW_ROD_DONE = "AntFishPond::tomorrowRodDone"
-
-    /** 福气鱼池：今日稳定任务已无可执行项 */
-    const val FLAG_ANTFISHPOND_TASKS_DONE = "AntFishPond::tasksDone"
-
-    /** 福气鱼池：缺少 fishpondAngle riskToken */
-    const val FLAG_ANTFISHPOND_RISK_TOKEN_MISSING = "AntFishPond::riskTokenMissing"
-
-    /** 福气鱼池：今日自动钓鱼次数 */
-    const val FLAG_ANTFISHPOND_FISH_COUNT = "AntFishPond::fishCount"
-
-    /** 福气鱼池：今日自动钓鱼达到配置上限 */
-    const val FLAG_ANTFISHPOND_FISH_LIMIT_REACHED = "AntFishPond::fishLimitReached"
-
     /** 蚂蚁新村：今日丢肥料是否达到上限 */
     const val FLAG_ANTSTALL_THROW_MANURE_LIMIT: String = "Flag_AntStall_Throw_Manure_Limit"
 

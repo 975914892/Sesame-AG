@@ -23,7 +23,6 @@ enum class CustomTask(val displayName: String, val isModule: Boolean = false) {
     ANT_SESAME_CREDIT("芝麻信用", isModule = true),
     ANT_ORCHARD("农场", isModule = true),
     GOLDEN_BEAN_TREASURE("金豆夺宝", isModule = true),
-    ANT_FISH_POND("福气鱼池", isModule = true),
     ANT_SPORTS("运动", isModule = true),
     YOUTH_PRIVILEGE("青春特权", isModule = true),
     ECO_PROTECTION("生态保护", isModule = true),
