@@ -40,6 +40,39 @@ internal fun AntFarm.scheduleFarmChildTask(
     registerPersistentChildTask(childId, group, triggerAtMs, payload)
 }
 
+internal fun AntFarm.cancelLoveChickenSchedule() {
+    loveChickenChildTask?.cancel()
+    loveChickenChildTask = null
+    ownerFarmId?.takeIf { it.isNotBlank() }?.let { cancelPersistentChildTask("LC|$it") }
+}
+
+internal fun AntFarm.replaceLoveChickenSchedule(triggerAtMs: Long, extraPayload: JSONObject) {
+    val owner = AccountSessionCoordinator.currentUserId().orEmpty()
+    val epoch = AccountSessionCoordinator.currentSessionEpoch()
+    val farmId = ownerFarmId?.takeIf { it.isNotBlank() } ?: return
+    if (owner.isBlank() || epoch <= 0 || ApplicationHookConstants.isOffline()) return
+    loveChickenChildTask?.cancel()
+    loveChickenChildTask = null
+    val childId = "LC|$farmId"
+    val payload = JSONObject(extraPayload.toString()).put("farm_id", farmId)
+    registerPersistentChildTask(childId, "LC", triggerAtMs, payload)
+    // 长期等待交给持久唤醒；只有近一分钟的蹲点在内存等待。
+    if (triggerAtMs - System.currentTimeMillis() > 60_000L) return
+    lateinit var child: ModelTask.ChildModelTask
+    child = ModelTask.ChildModelTask(
+        id = childId, group = "LC", execTime = triggerAtMs,
+        suspendRunnable = {
+            if (loveChickenChildTask === child) {
+                loveChickenChildTask = null
+                detachChildTask(child)
+                runPersistentChildTask(childId, "LC", payload, "memory_timer", owner, epoch)
+            }
+        },
+    )
+    loveChickenChildTask = child
+    addChildTask(child)
+}
+
 internal fun AntFarm.deferFarmWork(reason: String, triggerAtMs: Long) {
     if (triggerAtMs <= System.currentTimeMillis()) return
     val store = UserDataStoreManager.getCurrentInstance() ?: return
@@ -59,6 +92,7 @@ internal fun AntFarm.scheduleFarmPendingWork() {
             "draw" -> enableChouchoule?.value != true
             "exchange" -> enableChouchoule?.value != true || autoExchange?.value != true
             "rankAwards" -> donationCompetition?.value != true
+            "loveChicken" -> loveChickenGathering?.value != true
             "awards" -> false
             else -> true
         }
@@ -82,6 +116,10 @@ internal suspend fun AntFarm.runDueFarmWork() {
         if (ApplicationHookConstants.isOffline()) break
         when (reason) {
             "rankAwards" -> if (donationCompetition?.value == true) handleDonationCompetition()
+            "loveChicken" -> if (loveChickenGathering?.value == true) {
+                runFarmPriorityDonations()
+                runLoveChickenGatheringWorkflow()
+            }
             "awards" -> receiveFarmAwards()
             "draw" -> if (enableChouchoule?.value == true) ChouChouLe().run(this)
             "exchange" -> if (enableChouchoule?.value == true && autoExchange?.value == true) ChouChouLe().exchangeIpRewards()
@@ -90,7 +128,7 @@ internal suspend fun AntFarm.runDueFarmWork() {
             }
         }
         // 已过期的日末触发只负责一次收尾；未确认的业务状态仍由下一轮自然调度读取。
-        if (reason == "awards" || reason == "draw") {
+        if (reason == "awards" || reason == "draw" || reason == "loveChicken") {
             val pending = store.getOrCreate<MutableMap<String, Long>>(FARM_PENDING_WORK)
             if ((pending[reason] ?: Long.MAX_VALUE) <= now) {
                 pending.remove(reason)

@@ -117,7 +117,7 @@ object TodayFlagRegistry {
         binding("AntFarm", "family", "familyOptions", patterns = listOf(exact(StatusFlags.FLAG_FARM_FAMILY_SIGNED), exact(StatusFlags.FLAG_FARM_FAMILY_SLEEP_TOGETHER), exact(StatusFlags.FLAG_FARM_FAMILY_DELIVER_MSG_SEND), exact(StatusFlags.FLAG_FARM_FAMILY_SHARE_TO_FRIENDS), exact(StatusFlags.FLAG_FARM_INVITE_FRIEND_VISIT_FAMILY), prefix(StatusFlags.FLAG_FARM_FAMILY_DECORATION_CHECK_DONE_PREFIX))),
         binding("AntFarm", "useAccelerateTool", "remainingTime", "accelerateToolDailyLimit", patterns = listOf(exact(StatusFlags.FLAG_FARM_ACCELERATE_LIMIT))),
         binding("AntFarm", "useSpecialFood", "useSpecialFoodCount", patterns = listOf(exact(StatusFlags.FLAG_FARM_SPECIAL_FOOD_LIMIT), exact(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DAILY_COUNT))),
-        binding("AntFarm", "donationCompetitionTrySpecialFood", "donationCompetitionSpecialFoodCount", patterns = listOf(exact(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_LIMIT), exact(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_DAILY_COUNT))),
+        binding("AntFarm", "activitySpecialFoodCount", "donationCompetitionTrySpecialFood", "loveChickenTrySpecialFood", patterns = listOf(exact(StatusFlags.FLAG_FARM_SPECIAL_FOOD_ACTIVITY_LIMIT), exact(StatusFlags.FLAG_FARM_SPECIAL_FOOD_ACTIVITY_DAILY_COUNT))),
         binding("AntFarm", "donation", patterns = listOf(prefix(StatusFlags.FLAG_FARM_DAILY_DONATION_DONE_PREFIX), prefix(StatusFlags.FLAG_FARM_DONATION_COUNT))),
         binding("AntFarm", "donationCompetition", patterns = listOf(prefix(StatusFlags.FLAG_FARM_DONATION_COMPETITION_AWARD_RECEIVED), exact(StatusFlags.FLAG_FARM_DONATION_COMPETITION_UNAVAILABLE))),
     )

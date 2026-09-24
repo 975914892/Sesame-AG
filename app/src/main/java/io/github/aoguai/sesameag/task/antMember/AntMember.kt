@@ -57,6 +57,7 @@ import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.BeanExchangeRightMap
 import io.github.aoguai.sesameag.util.maps.MemberBenefitsMap
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -923,7 +924,8 @@ class AntMember : ModelTask() {
     private fun queryMemberExchangeCandidates(
         userId: String?,
         pointBalance: String,
-        sleepMillis: Long = 0L
+        sleepMillis: Long = 0L,
+        onFailure: ((TaskFlowActionResult) -> Unit)? = null,
     ): LinkedHashMap<String, MemberExchangeCandidate> {
         val candidateMap = LinkedHashMap<String, MemberExchangeCandidate>()
         var currentPage = 1
@@ -934,10 +936,15 @@ class AntMember : ModelTask() {
             }
             val responseStr = AntMemberRpcCall.queryShandieEntityList(userId.orEmpty(), pointBalance, currentPage, 18)
             if (responseStr.isEmpty()) {
+                onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.RETRYABLE_RPC,
+                    rpc = "queryShandieEntityList", message = "空响应", raw = responseStr))
+                if (onFailure != null) return candidateMap
                 break
             }
             val jo = JSONObject(responseStr)
             if (!ResChecker.checkRes(TAG, "会员积分闪兑列表查询失败:", jo)) {
+                onFailure?.invoke(memberDomainTaskFailureResult(null, jo, responseStr, "queryShandieEntityList", "缺货补兑查询失败"))
+                if (onFailure != null) return candidateMap
                 break
             }
             addMemberExchangeCandidates(jo.optJSONArray("benefits"), candidateMap)
@@ -962,6 +969,7 @@ class AntMember : ModelTask() {
                 )
             )
             if (!ResChecker.checkRes(TAG, "会员积分专区列表查询失败:", jo)) {
+                onFailure?.invoke(memberDomainTaskFailureResult(null, jo, jo.toString(), "queryDeliveryZoneDetail", "缺货补兑查询失败"))
                 break
             }
             val uniqueId = jo.optString("uniqueId", deliveryUniqueId)
@@ -1359,7 +1367,7 @@ class AntMember : ModelTask() {
         )
     }
 
-    private fun exchangeMemberPointBenefit(candidate: MemberExchangeCandidate): Boolean {
+    private fun exchangeMemberPointBenefit(candidate: MemberExchangeCandidate, onFailure: ((TaskFlowActionResult) -> Unit)? = null): Boolean {
         return try {
             val cityCode = LocationHelper.requireCityCode()
             val detailResp = JSONObject(
@@ -1373,6 +1381,7 @@ class AntMember : ModelTask() {
             if (!ExchangeSafetyRules.isSuccessResponse(detailResp) &&
                 !ResChecker.checkRes(TAG, "会员积分权益详情查询失败:", detailResp)
             ) {
+                onFailure?.invoke(memberDomainTaskFailureResult(null, detailResp, detailResp.toString(), "querySingleBenefitDetail", "缺货补兑详情失败"))
                 return false
             }
             val detailCandidate = detailResp.optJSONObject("benefitDetail")
@@ -1399,6 +1408,7 @@ class AntMember : ModelTask() {
             if (!ExchangeSafetyRules.isSuccessResponse(confirmResp) &&
                 !ResChecker.checkRes(TAG, "会员积分兑换确认失败:", confirmResp)
             ) {
+                onFailure?.invoke(memberDomainTaskFailureResult(null, confirmResp, confirmResp.toString(), "queryPromoBenefitOrderConfirmInfo", "缺货补兑确认失败"))
                 return false
             }
             val confirmedCandidate = confirmResp.optJSONObject("promoBenefitOrderConfirmInfo")
@@ -1416,6 +1426,8 @@ class AntMember : ModelTask() {
             }
             if (confirmedCandidate.itemId.isBlank()) {
                 Log.member("会员积分🎐跳过[${confirmedCandidate.item.name}]#exchangeBenefit 缺少 itemId")
+                onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.NON_RETRYABLE_INVALID,
+                    rpc = "exchangeMemberBenefit", message = "缺少 itemId", raw = confirmResp.toString()))
                 return false
             }
 
@@ -1432,6 +1444,7 @@ class AntMember : ModelTask() {
                 !ResChecker.checkRes(TAG, "会员积分兑换失败:", exchangeResp)
             ) {
                 Log.member("会员积分🎐兑换失败[${confirmedCandidate.item.name}]#$exchangeResp")
+                onFailure?.invoke(memberDomainTaskFailureResult(null, exchangeResp, exchangeResp.toString(), "exchangeMemberBenefit", "缺货补兑失败"))
                 return false
             }
             val orderId = exchangeResp.optString("orderId")
@@ -1454,13 +1467,21 @@ class AntMember : ModelTask() {
                             detail?.optString("status").orEmpty()
                         }
                         Log.member("会员积分🎐兑换结果[${confirmedCandidate.item.name}]#${status.ifBlank { "已提交" }}")
-                    }
+                    } else onFailure?.invoke(memberDomainTaskFailureResult(null, orderResp, orderResp.toString(),
+                        "querySingleExchangeOrderDetail", "缺货补兑结果查询失败"))
                 }.onFailure {
+                    if (it is CancellationException) throw it
+                    onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                        rpc = "querySingleExchangeOrderDetail", message = it.message.orEmpty(), raw = it.toString()))
                     Log.printStackTrace(TAG, "exchangeMemberPointBenefit.queryOrderDetail err:", it)
                 }
             }
             true
+        } catch (e: CancellationException) {
+            throw e
         } catch (t: Throwable) {
+            onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                rpc = "exchangeMemberPointBenefit", message = t.message.orEmpty(), raw = t.toString()))
             Log.printStackTrace(TAG, "exchangeMemberPointBenefit err:", t)
             false
         }
@@ -7804,19 +7825,21 @@ class AntMember : ModelTask() {
     internal fun replenishExchangeByNeed(
         need: ExchangeEffectNeed,
         reason: String,
-        maxCount: Int
+        maxCount: Int,
+        onFailure: ((TaskFlowActionResult) -> Unit)? = null,
     ): ExchangeReplenishResult {
         return if (need == ExchangeEffectNeed.MEMBER_GOLD_TICKET) {
             replenishBeanExchangeByNeed(need, reason, maxCount)
         } else {
-            replenishMemberPointExchangeByNeed(need, reason, maxCount)
+            replenishMemberPointExchangeByNeed(need, reason, maxCount, onFailure)
         }
     }
 
     private fun replenishMemberPointExchangeByNeed(
         need: ExchangeEffectNeed,
         reason: String,
-        maxCount: Int
+        maxCount: Int,
+        onFailure: ((TaskFlowActionResult) -> Unit)? = null,
     ): ExchangeReplenishResult {
         if (memberPointExchangeBenefit?.value != true) {
             return ExchangeReplenishResult.NOT_SELECTED
@@ -7833,13 +7856,19 @@ class AntMember : ModelTask() {
         return runCatching {
             val memberInfo = JSONObject(AntMemberRpcCall.queryMemberInfo())
             if (!ResChecker.checkRes(TAG, "会员积分信息查询失败:", memberInfo)) {
+                onFailure?.invoke(memberDomainTaskFailureResult(null, memberInfo, memberInfo.toString(), "queryMemberInfo", "缺货补兑查询失败"))
                 return@runCatching ExchangeReplenishResult.RETRY_LATER
             }
             val pointBalance = memberInfo.optString("pointBalance")
                 .ifEmpty { memberInfo.optInt("pointBalance", 0).toString() }
-            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L)
+            var failure: TaskFlowActionResult? = null
+            val report: (TaskFlowActionResult) -> Unit = { result ->
+                failure = result
+                onFailure?.invoke(result)
+            }
+            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, report)
+            if (failure != null) return@runCatching ExchangeReplenishResult.RETRY_LATER
             var matchedSelected = false
-            var attempted = false
             var exchangedCount = 0
             for (candidate in candidateMap.values.sortedBy { ExchangeEffectCatalog.priorityFor(it.item, need) }) {
                 if (exchangedCount >= maxCount.coerceAtLeast(1)) {
@@ -7851,25 +7880,25 @@ class AntMember : ModelTask() {
                     continue
                 }
                 matchedSelected = true
-                if (!canMemberPointExchangeBenefitToday(candidate.item.id) ||
-                    candidate.item.safety != ExchangeSafety.AUTO
-                ) {
-                    continue
-                }
-                attempted = true
-                if (exchangeMemberPointBenefit(candidate)) {
+                if (!canMemberPointExchangeBenefitToday(candidate.item.id)) continue
+                if (candidate.item.safety != ExchangeSafety.AUTO) continue
+                if (exchangeMemberPointBenefit(candidate, report)) {
                     memberPointExchangeBenefitToday(candidate.item.id)
                     exchangedCount += 1
                     Log.member("会员积分缺货补兑🎐[${candidate.item.name}]#${reason.ifBlank { need.name }}")
                 }
+                if (failure != null) return@runCatching if (failure?.failureType == TaskRpcFailureType.BUSINESS_LIMIT)
+                    ExchangeReplenishResult.BUSINESS_LIMIT else ExchangeReplenishResult.RETRY_LATER
             }
             when {
                 exchangedCount > 0 -> ExchangeReplenishResult.EXCHANGED
-                matchedSelected && attempted -> ExchangeReplenishResult.BUSINESS_LIMIT
                 matchedSelected -> ExchangeReplenishResult.NOT_AVAILABLE
                 else -> ExchangeReplenishResult.NOT_SELECTED
             }
         }.onFailure {
+            if (it is CancellationException) throw it
+            onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                rpc = "replenishMemberPointExchangeByNeed", message = it.message.orEmpty(), raw = it.toString()))
             Log.printStackTrace(TAG, "replenishMemberPointExchangeByNeed err:", it)
         }.getOrDefault(ExchangeReplenishResult.RETRY_LATER)
     }

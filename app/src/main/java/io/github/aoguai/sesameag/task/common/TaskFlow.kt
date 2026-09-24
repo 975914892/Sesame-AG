@@ -3,6 +3,7 @@ package io.github.aoguai.sesameag.task.common
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TaskBlacklist
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import kotlin.math.max
 
@@ -396,6 +397,8 @@ class TaskFlowEngine(
             val response =
                 try {
                     adapter.query()
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (t: Throwable) {
                     adapter.logError("${adapter.flowName}[查询异常：${t.message}]")
                     return finishRunResult(
@@ -460,7 +463,6 @@ class TaskFlowEngine(
             var stopCurrentRound = false
             var refreshRequested = false
             var noProgressConfirmationRefreshRequested = false
-            var refreshBoundaryAction: TaskFlowAction? = null
             val roundActions = mutableListOf<TaskFlowRoundAction>()
             val roundDeferredReasonCounts = linkedMapOf<DeferredReason, Int>()
             val candidates =
@@ -481,9 +483,6 @@ class TaskFlowEngine(
 
                 val item = candidate.item
                 val action = candidate.initialAction
-                if (refreshBoundaryAction != null && refreshBoundaryAction != action) {
-                    break
-                }
                 if (shouldSkipItem(item)) continue
 
                 val actionKey = adapter.actionKey(item, action)
@@ -555,7 +554,6 @@ class TaskFlowEngine(
                     }
                     if (result.refreshAfterAction || requiresStateConfirmation) {
                         refreshRequested = true
-                        refreshBoundaryAction = action
                     }
                     continue
                 }
@@ -574,7 +572,6 @@ class TaskFlowEngine(
                         noProgressConfirmationRefreshRequested = true
                     }
                     refreshRequested = true
-                    refreshBoundaryAction = action
                     continue
                 }
 
@@ -585,6 +582,7 @@ class TaskFlowEngine(
                     progressed = true
                     progressedAny = true
                     roundActions.add(TaskFlowRoundAction("终态成功", item.title))
+                    refreshRequested = true
                     continue
                 }
 
@@ -598,7 +596,6 @@ class TaskFlowEngine(
                 executionState.failedActionKeys.add(actionKey)
                 if (result.refreshAfterAction) {
                     refreshRequested = true
-                    refreshBoundaryAction = action
                 }
                 val shouldStopAfterFailure =
                     result.stopCurrentRound ||
@@ -905,6 +902,8 @@ class TaskFlowEngine(
                     TaskFlowAction.SIGNUP -> adapter.signup(item)
                     TaskFlowAction.SEND -> adapter.send(item)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (t: Throwable) {
                 TaskFlowActionResult.failure(
                     failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,

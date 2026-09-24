@@ -433,10 +433,15 @@ object ModelFieldTodayStateResolver {
                 specialFoodLimitState(modelFields)
             }
 
+            "AntFarm.activitySpecialFoodCount",
             "AntFarm.donationCompetitionTrySpecialFood",
-            "AntFarm.donationCompetitionSpecialFoodCount",
+            "AntFarm.loveChickenTrySpecialFood",
             -> {
-                donationCompetitionSpecialFoodLimitState(modelFields)
+                limitReached(
+                    current = Status.getIntFlagToday(StatusFlags.FLAG_FARM_SPECIAL_FOOD_ACTIVITY_DAILY_COUNT),
+                    limit = intValue(modelFields["activitySpecialFoodCount"]),
+                    reason = "今日活动特殊食品使用已达上限",
+                )
             }
 
             "AntFarm.donation" -> {
@@ -518,15 +523,7 @@ object ModelFieldTodayStateResolver {
         return limitReached(
             current = Status.getIntFlagToday(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DAILY_COUNT),
             limit = intValue(modelFields["useSpecialFoodCount"]),
-            reason = "今日特殊食品使用已达上限",
-        )
-    }
-
-    private fun donationCompetitionSpecialFoodLimitState(modelFields: ModelFields): ModelFieldTodayState {
-        return limitReached(
-            current = Status.getIntFlagToday(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_DAILY_COUNT),
-            limit = intValue(modelFields["donationCompetitionSpecialFoodCount"]),
-            reason = "今日排位赛特殊食品使用已达上限",
+            reason = "今日日常特殊食品使用已达上限",
         )
     }
 

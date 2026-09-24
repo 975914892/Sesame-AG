@@ -207,6 +207,11 @@ abstract class ModelTask : Model() {
         return childTaskMap.containsKey(childId)
     }
 
+    /** 已开始的任务仍归 taskScope 管理；释放标识，允许它登记同一目标的下一次等待。 */
+    internal fun detachChildTask(childTask: ChildModelTask) {
+        childTaskMap.remove(childTask.id, childTask)
+    }
+
     /**
      * 添加子任务（协程版本，内部使用）
      * @param childTask 要添加的子任务
