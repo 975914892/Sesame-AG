@@ -1558,15 +1558,18 @@ class AntMember : ModelTask() {
             if (!ResChecker.checkRes(TAG, entrance)) return
             val actionUrl = entrance.optString("actionUrl")
             if (actionUrl.isBlank()) return
-            val uri = android.net.Uri.parse(actionUrl)
-            val page = uri.getQueryParameter("url")?.let(android.net.Uri::parse) ?: uri
-            val scene = page.getQueryParameter("sceneId").orEmpty()
-            val source = uri.getQueryParameter("chInfo").orEmpty()
+            val descriptor = GameCenterPlayRpcCall.describeTask(entrance)
+            val parameters = descriptor.urlParameters
+            val scene = parameters["sceneId"].orEmpty()
+            val source = descriptor.source
+            val moduleId = parameters["moduleId"].orEmpty()
+            val guideType = parameters["guideType"].orEmpty()
+            val passThrough = parameters["channelTaskPassThrough"].orEmpty()
             if (scene.isBlank() || source.isBlank()) {
                 Log.error(TAG, "会员游戏乐园入口缺少sceneId/source:$entrance")
                 return
             }
-            val home = GameCenterPlayRpcCall.queryExternalGameCenter(scene, "", "", source, "")
+            val home = GameCenterPlayRpcCall.queryExternalGameCenter(scene, moduleId, guideType, source, passThrough)
             if (!home.accepted) {
                 Log.error(TAG, "会员游戏乐园访问失败:${home.raw}")
                 return
@@ -1585,7 +1588,7 @@ class AntMember : ModelTask() {
                         firstQuery = false
                         home.response
                     } else {
-                        GameCenterPlayRpcCall.queryExternalGameCenter(scene, "", "", source, "").response
+                        GameCenterPlayRpcCall.queryExternalGameCenter(scene, moduleId, guideType, source, passThrough).response
                     }
                     return response ?: JSONObject().put("success", false)
                 }

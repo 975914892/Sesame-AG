@@ -185,6 +185,9 @@ object StatusFlags {
     const val FLAG_SESAME_ZHIMA_TREE_TASK_HANDLED_TODAY: String =
         "AntSesameCredit::zhimaTreeTaskHandledToday"
 
+    /** 芝麻树：同一任务快照的不可重试动作当日止损。 */
+    const val FLAG_SESAME_ZHIMA_TREE_ACTION_STOP_PREFIX = "AntSesameCredit::zhimaTreeActionStop::"
+
     /** 芝麻信用：当日加入任务次数已达上限 */
     const val FLAG_SESAME_JOIN_LIMIT_REACHED: String = "AntSesameCredit::sesameJoinLimitReached"
 
@@ -310,6 +313,12 @@ object StatusFlags {
 
     /** 神奇海洋：今日任务列表已确认无可执行项 */
     const val FLAG_ANTOCEAN_TASKS_DONE = "AntOcean::tasksDone"
+
+    /** 神奇海洋：完成动作被明确拒绝后，仅停止同一快照的当日重放。 */
+    const val FLAG_ANTOCEAN_ACTION_STOP_PREFIX = "AntOcean::taskActionStop::"
+
+    /** 海洋摸鱼：不可重试动作与主任务分开保存，便于独立清理。 */
+    const val FLAG_ANTOCEAN_AIFISH_ACTION_STOP_PREFIX = "AntOcean::aiFishActionStop::"
 
     // ============================================================
     // 神奇物种

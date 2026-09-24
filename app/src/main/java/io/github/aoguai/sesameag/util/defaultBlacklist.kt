@@ -392,6 +392,7 @@ private val sportsDefaultBlacklist =
 
 private val myBankWelfareDefaultBlacklist =
     setOf(
+        "AP12377633", // 绑卡事件任务，通用send返回10000005，需真实绑卡行为
         "AP12341521", // 查看借呗额度：需真实授信业务行为
         "AP18353629", // 办理全国大流量卡：需真实办理业务
         "AP12333795", // 完成1笔借呗支用：需真实借款支用行为
