@@ -525,16 +525,35 @@ object AccountSlotRegistry {
         configDir: File,
         recoverExpiredPending: Boolean,
     ): LoadedRecord? {
-        val recordFile = File(configDir, RECORD_FILE_NAME)
-        if (!recordFile.exists()) {
-            return LoadedRecord(bootstrapRecord(), needsWrite = true)
+        return runCatching {
+            val recordFile = File(configDir, RECORD_FILE_NAME)
+            if (!recordFile.exists()) {
+                return LoadedRecord(bootstrapRecord(), needsWrite = true)
+            }
+            val parsedRecord = runCatching {
+                JsonUtil.parseObject(Files.readFromFile(recordFile), AccountSlotRecord::class.java)
+            }.getOrNull() ?: run {
+                // 旧配置格式不兼容，删除后重建
+                recordFile.delete()
+                return LoadedRecord(bootstrapRecord(), needsWrite = true)
+            }
+            val validatedRecord = validateRecord(parsedRecord) ?: run {
+                // 校验失败，删除旧配置后重建
+                recordFile.delete()
+                return LoadedRecord(bootstrapRecord(), needsWrite = true)
+            }
+            val recoveredRecord = recoverRecord(validatedRecord, recoverExpiredPending)
+            LoadedRecord(recoveredRecord, needsWrite = recoveredRecord != validatedRecord)
+        }.getOrElse {
+            // 任何异常都不崩溃，返回空配置
+            LoadedRecord(
+                AccountSlotRecord(
+                    migrationState = AccountSlotMigrationState.READY,
+                    activeUserIds = emptyList(),
+                ),
+                needsWrite = false,
+            )
         }
-        val parsedRecord = runCatching {
-            JsonUtil.parseObject(Files.readFromFile(recordFile), AccountSlotRecord::class.java)
-        }.getOrNull() ?: return null
-        val validatedRecord = validateRecord(parsedRecord) ?: return null
-        val recoveredRecord = recoverRecord(validatedRecord, recoverExpiredPending)
-        return LoadedRecord(recoveredRecord, needsWrite = recoveredRecord != validatedRecord)
     }
 
     private fun writeLockedRecord(configDir: File, record: AccountSlotRecord): Boolean {
