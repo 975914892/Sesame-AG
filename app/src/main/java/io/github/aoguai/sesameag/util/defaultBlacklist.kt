@@ -15,6 +15,8 @@ private val sesameCreditDefaultBlacklist =
         "zml_mybx_xiadan_erfang",
         "zml_check_in_subscribe_task", // joinActivity 返回 PROMISE_TEMPLATE_NOT_EXIST
         "zml_set_home_task", // joinActivity 返回 PROMISE_TEMPLATE_NOT_EXIST
+        "玩游戏赢最高8888元红包", // 动态taskId每期变化，需游戏内事件，ILLEGAL_ARGUMENT promiseActivityExtCheck
+        "AP17379724", // 芝麻树租绿任务，rentGreenTaskFinish 返回 20020012
         "zml_zmzl_xdrw_erfang", // pushActivity 返回 ILLEGAL_ARGUMENT，需真实租赁下单
         "zml_tbbbnc_shifei_sanfang", // pushActivity 返回 ILLEGAL_ARGUMENT，需真实淘宝行为
         "zmxy_zml_wannengxiaozujian", // pushActivity 返回 ILLEGAL_ARGUMENT，需真实桌面组件行为
@@ -131,6 +133,7 @@ private val oceanDefaultBlacklist =
     setOf(
         "BWXRK_QDRW_HAIYANG",
         "AIFISH_ZHUANHUA_MHXCZ", // aiFishFinishTask 返回 400000040，当前任务类型不支持
+        "SYH_DCHY_zhuanhua202609", // 限时任务：完成任意游戏任务，finishTask 返回 400000040 不支持rpc调用
     )
 
 private val forestDefaultBlacklist =
