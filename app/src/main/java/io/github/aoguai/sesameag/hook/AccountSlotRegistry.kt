@@ -498,7 +498,9 @@ object AccountSlotRegistry {
                         val result = operation(loaded)
                         val recordToWrite = result.updatedRecord ?: loaded.record.takeIf { loaded.needsWrite }
                         if (recordToWrite != null) {
-                            check(writeLockedRecord(configDir, recordToWrite)) { "registry_write_failed" }
+                            if (!writeLockedRecord(configDir, recordToWrite)) {
+                                Log.w(TAG, "registry_write_failed: skip write, continue with in-memory record")
+                            }
                         }
                         result.value
                     }
@@ -525,22 +527,42 @@ object AccountSlotRegistry {
         configDir: File,
         recoverExpiredPending: Boolean,
     ): LoadedRecord? {
-        val recordFile = File(configDir, RECORD_FILE_NAME)
-        if (!recordFile.exists()) {
-            return LoadedRecord(bootstrapRecord(), needsWrite = true)
+        return runCatching {
+            val recordFile = File(configDir, RECORD_FILE_NAME)
+            if (!recordFile.exists()) {
+                return LoadedRecord(safeBootstrapRecord(), needsWrite = true)
+            }
+            val parsedRecord = runCatching {
+                JsonUtil.parseObject(Files.readFromFile(recordFile), AccountSlotRecord::class.java)
+            }.getOrNull() ?: run {
+                Log.w(TAG, "account_slot_record_parse_failed, falling back to bootstrap")
+                return LoadedRecord(safeBootstrapRecord(), needsWrite = true)
+            }
+            val validatedRecord = validateRecord(parsedRecord) ?: run {
+                Log.w(TAG, "account_slot_record_invalid, falling back to bootstrap")
+                return LoadedRecord(safeBootstrapRecord(), needsWrite = true)
+            }
+            val recoveredRecord = recoverRecord(validatedRecord, recoverExpiredPending)
+            LoadedRecord(recoveredRecord, needsWrite = recoveredRecord != validatedRecord)
+        }.getOrElse { error ->
+            Log.w(TAG, "account_slot_read_crashed: ${error.javaClass.simpleName}:${error.message}, using empty record")
+            LoadedRecord(
+                AccountSlotRecord(
+                    migrationState = AccountSlotMigrationState.READY,
+                    activeUserIds = emptyList(),
+                ),
+                needsWrite = false,
+            )
         }
-        val parsedRecord = runCatching {
-            JsonUtil.parseObject(Files.readFromFile(recordFile), AccountSlotRecord::class.java)
-        }.getOrNull() ?: run {
-            Log.w(TAG, "account_slot_record_parse_failed, falling back to bootstrap")
-            return LoadedRecord(bootstrapRecord(), needsWrite = true)
-        }
-        val validatedRecord = validateRecord(parsedRecord) ?: run {
-            Log.w(TAG, "account_slot_record_invalid, falling back to bootstrap")
-            return LoadedRecord(bootstrapRecord(), needsWrite = true)
-        }
-        val recoveredRecord = recoverRecord(validatedRecord, recoverExpiredPending)
-        return LoadedRecord(recoveredRecord, needsWrite = recoveredRecord != validatedRecord)
+    }
+
+    private fun safeBootstrapRecord(): AccountSlotRecord = runCatching {
+        bootstrapRecord()
+    }.getOrElse {
+        AccountSlotRecord(
+            migrationState = AccountSlotMigrationState.READY,
+            activeUserIds = emptyList(),
+        )
     }
 
     private fun writeLockedRecord(configDir: File, record: AccountSlotRecord): Boolean {
