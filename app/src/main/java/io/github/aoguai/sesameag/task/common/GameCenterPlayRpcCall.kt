@@ -5,6 +5,7 @@ import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.util.GameTask
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 
 /** 游戏动作合同；任务所属模块负责完成、领奖和服务端终态回查。 */
 object GameCenterPlayRpcCall {
@@ -413,6 +414,8 @@ object GameCenterPlayRpcCall {
                 "taskDisplayConfig",
                 "floatBallConfig",
                 "task",
+                "taskInfo",
+                "taskBaseInfo",
                 "bizInfo",
                 "taskCategorization",
                 "categorizationParamModel",
@@ -428,22 +431,52 @@ object GameCenterPlayRpcCall {
 
     private fun collectTaskUrlParameters(objects: List<JSONObject>): Map<String, String> {
         val parameters = linkedMapOf<String, String>()
-        val queue = ArrayDeque<String>()
+        val queue = ArrayDeque<Pair<String, String?>>()
+        val nestedKeys = listOf("url", "sourceUrl", "schema", "query", "channelTaskPassThrough")
         objects.forEach { objectValue ->
             listOf("targetUrl", "actionUrl", "jumpUrl", "jumpLink", "pageUrl", "taskJumpUrl")
                 .map(objectValue::optString)
-                .filterTo(queue) { it.isNotBlank() }
+                .filter { it.isNotBlank() }
+                .forEach { queue.add(it to null) }
         }
-        val visited = linkedSetOf<String>()
+        val visited = linkedSetOf<Pair<String, String?>>()
         while (queue.isNotEmpty()) {
-            val url = queue.removeFirst()
-            if (!visited.add(url)) continue
-            val uri = runCatching { Uri.parse(url) }.getOrNull() ?: continue
-            uri.queryParameterNames.forEach { key ->
-                uri.getQueryParameter(key)?.takeIf { it.isNotBlank() }?.let { parameters[key] = it }
+            val entry = queue.removeFirst()
+            if (!visited.add(entry)) continue
+            val (value, parentKey) = entry
+            val json = if (value.startsWith("{") || value.startsWith("\"")) {
+                runCatching { JSONTokener(value).nextValue() }.getOrNull()
+            } else null
+            when (json) {
+                is String -> {
+                    queue.add(json to parentKey)
+                    continue
+                }
+                is JSONObject -> {
+                    if (parentKey != null) parameters[parentKey] = json.toString()
+                    json.keys().forEach { key ->
+                        if (!json.isNull(key)) {
+                            val parameter = json.get(key).toString()
+                            parameters[key] = parameter
+                            if (key in nestedKeys) queue.add(parameter to key)
+                        }
+                    }
+                    continue
+                }
             }
-            listOf("url", "sourceUrl", "schema").forEach { key ->
-                uri.getQueryParameter(key)?.takeIf { it.isNotBlank() }?.let(queue::add)
+            val uri = runCatching {
+                Uri.parse(if (parentKey == "query" && value.contains('=')) "?$value" else value)
+            }.getOrNull() ?: continue
+            if (uri.isHierarchical && !uri.encodedQuery.isNullOrBlank()) {
+                uri.queryParameterNames.forEach { key ->
+                    uri.getQueryParameter(key)?.takeIf { it.isNotBlank() }?.let { parameter ->
+                        parameters[key] = parameter
+                        if (key in nestedKeys) queue.add(parameter to key)
+                    }
+                }
+            } else {
+                val decoded = Uri.decode(value)
+                if (decoded != value) queue.add(decoded to parentKey)
             }
         }
         return parameters

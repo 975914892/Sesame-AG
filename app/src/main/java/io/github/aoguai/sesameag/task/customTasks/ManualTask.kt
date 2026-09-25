@@ -8,7 +8,6 @@ import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antCooperate.AntCooperate
 import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
-import io.github.aoguai.sesameag.task.antFishPond.AntFishPond
 import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.task.antForestPatrol.AntForestPatrol
 import io.github.aoguai.sesameag.task.antMember.AntMember
@@ -146,7 +145,6 @@ object ManualTask {
                             CustomTask.ANT_SESAME_CREDIT -> runModuleTask(AntSesameCredit::class.java)
                             CustomTask.ANT_ORCHARD -> runModuleTask(AntOrchard::class.java)
                             CustomTask.GOLDEN_BEAN_TREASURE -> runModuleTask(GoldenBeanTreasure::class.java)
-                            CustomTask.ANT_FISH_POND -> runModuleTask(AntFishPond::class.java)
                             CustomTask.ANT_SPORTS -> runModuleTask(AntSports::class.java)
                             CustomTask.YOUTH_PRIVILEGE -> runModuleTask(YouthPrivilege::class.java)
                             CustomTask.ECO_PROTECTION -> runModuleTask(EcoProtection::class.java)

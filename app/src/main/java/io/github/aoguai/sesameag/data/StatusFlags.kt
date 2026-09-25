@@ -185,6 +185,9 @@ object StatusFlags {
     const val FLAG_SESAME_ZHIMA_TREE_TASK_HANDLED_TODAY: String =
         "AntSesameCredit::zhimaTreeTaskHandledToday"
 
+    /** 芝麻树：同一任务快照的不可重试动作当日止损。 */
+    const val FLAG_SESAME_ZHIMA_TREE_ACTION_STOP_PREFIX = "AntSesameCredit::zhimaTreeActionStop::"
+
     /** 芝麻信用：当日加入任务次数已达上限 */
     const val FLAG_SESAME_JOIN_LIMIT_REACHED: String = "AntSesameCredit::sesameJoinLimitReached"
 
@@ -311,6 +314,12 @@ object StatusFlags {
     /** 神奇海洋：今日任务列表已确认无可执行项 */
     const val FLAG_ANTOCEAN_TASKS_DONE = "AntOcean::tasksDone"
 
+    /** 神奇海洋：完成动作被明确拒绝后，仅停止同一快照的当日重放。 */
+    const val FLAG_ANTOCEAN_ACTION_STOP_PREFIX = "AntOcean::taskActionStop::"
+
+    /** 海洋摸鱼：不可重试动作与主任务分开保存，便于独立清理。 */
+    const val FLAG_ANTOCEAN_AIFISH_ACTION_STOP_PREFIX = "AntOcean::aiFishActionStop::"
+
     // ============================================================
     // 神奇物种
     // ============================================================
@@ -355,27 +364,6 @@ object StatusFlags {
     /** 农场好友助力：好友关系无效前缀 */
     const val FLAG_ANTORCHARD_ASSIST_RELATION_INVALID_PREFIX = "orchard::assistRelationInvalid::"
 
-    /** 福气鱼池：今日签到已处理 */
-    const val FLAG_ANTFISHPOND_SIGN_DONE = "AntFishPond::signDone"
-
-    /** 福气鱼池：每日宝箱已领取 */
-    const val FLAG_ANTFISHPOND_GIFT_BOX_DONE = "AntFishPond::giftBoxDone"
-
-    /** 福气鱼池：明日钓竿奖励已领取 */
-    const val FLAG_ANTFISHPOND_TOMORROW_ROD_DONE = "AntFishPond::tomorrowRodDone"
-
-    /** 福气鱼池：今日稳定任务已无可执行项 */
-    const val FLAG_ANTFISHPOND_TASKS_DONE = "AntFishPond::tasksDone"
-
-    /** 福气鱼池：缺少 fishpondAngle riskToken */
-    const val FLAG_ANTFISHPOND_RISK_TOKEN_MISSING = "AntFishPond::riskTokenMissing"
-
-    /** 福气鱼池：今日自动钓鱼次数 */
-    const val FLAG_ANTFISHPOND_FISH_COUNT = "AntFishPond::fishCount"
-
-    /** 福气鱼池：今日自动钓鱼达到配置上限 */
-    const val FLAG_ANTFISHPOND_FISH_LIMIT_REACHED = "AntFishPond::fishLimitReached"
-
     /** 蚂蚁新村：今日丢肥料是否达到上限 */
     const val FLAG_ANTSTALL_THROW_MANURE_LIMIT: String = "Flag_AntStall_Throw_Manure_Limit"
 
@@ -400,19 +388,17 @@ object StatusFlags {
     /** 庄园：加速卡每日次数上限标记 */
     const val FLAG_FARM_ACCELERATE_LIMIT = "antFarm::accelerateLimit"
 
-    /** 庄园：特殊食品今日已使用数量 */
+    /** 庄园：日常特殊食品今日已使用数量 */
     const val FLAG_FARM_SPECIAL_FOOD_DAILY_COUNT = "antFarm::specialFoodDailyCount"
 
-    /** 庄园：特殊食品今日已达自定义上限 */
+    /** 庄园：日常特殊食品今日已达自定义上限 */
     const val FLAG_FARM_SPECIAL_FOOD_LIMIT = "antFarm::specialFoodLimit"
 
-    /** 庄园：排位赛特殊食品今日已使用数量 */
-    const val FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_DAILY_COUNT =
-        "antFarm::specialFoodDonationCompetitionDailyCount"
+    /** 庄园：排位赛与爱心鸡结号共用的特殊食品今日已使用数量 */
+    const val FLAG_FARM_SPECIAL_FOOD_ACTIVITY_DAILY_COUNT = "antFarm::specialFoodActivityDailyCount"
 
-    /** 庄园：排位赛特殊食品今日已达自定义上限 */
-    const val FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_LIMIT =
-        "antFarm::specialFoodDonationCompetitionLimit"
+    /** 庄园：活动特殊食品今日已达自定义上限 */
+    const val FLAG_FARM_SPECIAL_FOOD_ACTIVITY_LIMIT = "antFarm::specialFoodActivityLimit"
 
     /** 庄园：今日是否已签到 */
     const val FLAG_FARM_SIGNED = "antFarm::signed"

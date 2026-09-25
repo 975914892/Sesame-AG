@@ -6,6 +6,9 @@ import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.task.antMember.AntMember
 import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
+import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
+import kotlinx.coroutines.CancellationException
 
 object ExchangeReplenisher {
     private const val TAG = "ExchangeReplenisher"
@@ -14,6 +17,7 @@ object ExchangeReplenisher {
         need: ExchangeEffectNeed,
         reason: String,
         maxCount: Int = 1,
+        onFailure: ((TaskFlowActionResult) -> Unit)? = null,
         afterExchangeRefresh: () -> Unit = {}
     ): ExchangeReplenishResult {
         val safeMaxCount = maxCount.coerceAtLeast(1)
@@ -21,14 +25,30 @@ object ExchangeReplenisher {
         var sawBusinessLimit = false
         var sawRetryLater = false
         var sawNotAvailable = false
-        for (provider in providersFor(need)) {
-            val result = runCatching { provider(need, reason, safeMaxCount) }
-                .onFailure { Log.printStackTrace(TAG, "replenish[$need] provider err:", it) }
-                .getOrDefault(ExchangeReplenishResult.RETRY_LATER)
+        var failure: TaskFlowActionResult? = null
+        val report: ((TaskFlowActionResult) -> Unit)? = onFailure?.let { sink ->
+            { result: TaskFlowActionResult -> failure = result; sink(result) }
+        }
+        for (provider in providersFor(need, report)) {
+            val result = try { provider(need, reason, safeMaxCount) }
+            catch (e: CancellationException) { throw e }
+            catch (t: Throwable) {
+                report?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                    rpc = "ExchangeReplenisher", message = t.message.orEmpty(), raw = t.toString()))
+                Log.printStackTrace(TAG, "replenish[$need] provider err:", t)
+                ExchangeReplenishResult.RETRY_LATER
+            }
+            if (failure != null) return if (failure?.failureType == TaskRpcFailureType.BUSINESS_LIMIT)
+                ExchangeReplenishResult.BUSINESS_LIMIT else ExchangeReplenishResult.RETRY_LATER
             when (result) {
                 ExchangeReplenishResult.EXCHANGED -> {
-                    runCatching { afterExchangeRefresh() }
-                        .onFailure { Log.printStackTrace(TAG, "replenish[$need] refresh err:", it) }
+                    try { afterExchangeRefresh() }
+                    catch (e: CancellationException) { throw e }
+                    catch (t: Throwable) {
+                        onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                            rpc = "ExchangeReplenisher.refresh", message = t.message.orEmpty(), raw = t.toString()))
+                        Log.printStackTrace(TAG, "replenish[$need] refresh err:", t)
+                    }
                     return ExchangeReplenishResult.EXCHANGED
                 }
                 ExchangeReplenishResult.NOT_SELECTED -> sawNotSelected = true
@@ -48,7 +68,8 @@ object ExchangeReplenisher {
     }
 
     private fun providersFor(
-        need: ExchangeEffectNeed
+        need: ExchangeEffectNeed,
+        onFailure: ((TaskFlowActionResult) -> Unit)? = null,
     ): List<(ExchangeEffectNeed, String, Int) -> ExchangeReplenishResult> {
         return when (need) {
             ExchangeEffectNeed.FOREST_DOUBLE_CLICK,
@@ -75,8 +96,8 @@ object ExchangeReplenisher {
             ExchangeEffectNeed.FARM_BIG_EATER_TOOL,
             ExchangeEffectNeed.FARM_FENCE_TOOL,
             ExchangeEffectNeed.FARM_NEW_EGG_TOOL -> listOf(
-                { n, r, c -> farmProvider(n, r, c) },
-                { n, r, c -> memberProvider(n, r, c) }
+                { n, r, c -> farmProvider(n, r, c, onFailure) },
+                { n, r, c -> memberProvider(n, r, c, onFailure) }
             )
             ExchangeEffectNeed.ORCHARD_FERTILIZER -> listOf(
                 { n, r, c -> memberProvider(n, r, c) }
@@ -99,15 +120,15 @@ object ExchangeReplenisher {
             ?: ExchangeReplenishResult.UNSUPPORTED
     }
 
-    private fun farmProvider(need: ExchangeEffectNeed, reason: String, maxCount: Int): ExchangeReplenishResult {
+    private fun farmProvider(need: ExchangeEffectNeed, reason: String, maxCount: Int, onFailure: ((TaskFlowActionResult) -> Unit)?): ExchangeReplenishResult {
         return Model.getModel(AntFarm::class.java)
-            ?.replenishExchangeByNeed(need, reason, maxCount)
+            ?.replenishExchangeByNeed(need, reason, maxCount, onFailure)
             ?: ExchangeReplenishResult.UNSUPPORTED
     }
 
-    private fun memberProvider(need: ExchangeEffectNeed, reason: String, maxCount: Int): ExchangeReplenishResult {
+    private fun memberProvider(need: ExchangeEffectNeed, reason: String, maxCount: Int, onFailure: ((TaskFlowActionResult) -> Unit)? = null): ExchangeReplenishResult {
         return Model.getModel(AntMember::class.java)
-            ?.replenishExchangeByNeed(need, reason, maxCount)
+            ?.replenishExchangeByNeed(need, reason, maxCount, onFailure)
             ?: ExchangeReplenishResult.UNSUPPORTED
     }
 }

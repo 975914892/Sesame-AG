@@ -909,8 +909,9 @@ class MyBankWelfare : ModelTask() {
         }
 
         override fun onQueryFailed(response: JSONObject) {
-            Log.mybank(
-                "$flowName[任务查询失败]#${extractResponseCode(response).ifBlank { extractResponseMessage(response) }}"
+            Log.error(
+                TAG,
+                "$flowName[任务查询失败]#${extractResponseCode(response).ifBlank { extractResponseMessage(response) }} raw=$response"
             )
         }
 
@@ -919,7 +920,7 @@ class MyBankWelfare : ModelTask() {
         }
 
         override fun logError(message: String) {
-            Log.mybank(message)
+            Log.error(TAG, message)
         }
 
         private fun triggerTaskStage(item: TaskFlowItem, stageCode: String): TaskFlowActionResult {

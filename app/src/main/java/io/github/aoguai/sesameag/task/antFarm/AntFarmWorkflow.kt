@@ -6,6 +6,7 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.task.common.TaskFlowRunResult
 import io.github.aoguai.sesameag.util.TimeCounter
+import io.github.aoguai.sesameag.util.maps.UserMap
 
 internal suspend fun AntFarm.runFarmLifecycleWorkflow(tc: TimeCounter): Boolean {
     if (enterFarm() == null) {
@@ -67,9 +68,19 @@ internal suspend fun AntFarm.runFarmTaskWorkflow(
         harvestProduce(ownerFarmId)
         tc.countDebug("收鸡蛋")
     }
+    runFarmPriorityDonations(userId)
+    tc.countDebug("每日捐蛋与排位赛")
+    if (loveChickenGathering?.value == true && !ApplicationHookConstants.isOffline()) {
+        runLoveChickenGatheringWorkflow()
+        tc.countDebug("爱心鸡结号")
+    } else if (loveChickenGathering?.value != true) cancelLoveChickenSchedule()
+    return result.copy(progressChanged = result.progressChanged || resourceProgress)
+}
+
+internal suspend fun AntFarm.runFarmPriorityDonations(userId: String? = UserMap.currentUid) {
+    if (ApplicationHookConstants.isOffline()) return
     if (donation?.value == true && shouldDonateEggNow(userId)) {
         val publicDonationMade = handleDonation()
-        tc.countDebug("每日捐蛋")
         val dailyDonationMarkedDone =
             !userId.isNullOrBlank() &&
                 Status.hasFlagToday(StatusFlags.FLAG_FARM_DAILY_DONATION_DONE_PREFIX + userId)
@@ -106,8 +117,6 @@ internal suspend fun AntFarm.runFarmTaskWorkflow(
     }
 
     if (!ApplicationHookConstants.isOffline()) handleDonationCompetition()
-
-    return result.copy(progressChanged = result.progressChanged || resourceProgress)
 }
 
 internal suspend fun AntFarm.runFarmSocialWorkflow(
@@ -184,6 +193,16 @@ internal suspend fun AntFarm.runFarmFinalizeWorkflow(
     val wasSleeping = isOwnerAnimalSleeping()
     receiveFarmAwards()
     runDueFarmWork()
+    if (!ApplicationHookConstants.isOffline()) {
+        runFarmKitchen()
+        refreshFarmStatus("家庭、抽奖、宝箱和兑换后补蛋")
+        if (shouldHarvestProduceNow()) harvestProduce(ownerFarmId)
+        runFarmPriorityDonations()
+    }
+    if (loveChickenGathering?.value == true && !ApplicationHookConstants.isOffline()) {
+        runLoveChickenGatheringWorkflow()
+        tc.countDebug("爱心鸡结号")
+    }
     animalSleepAndWake()
     tc.countDebug("小鸡睡觉&起床")
 
@@ -210,7 +229,7 @@ internal suspend fun AntFarm.runFarmResourceWork(includeGames: Boolean = true): 
     if (ApplicationHookConstants.isOffline()) return false
     val stockBefore = AntFarm.foodStock
     preloadFarmTools()
-    val kitchenProgress = runFarmKitchen()
+    val kitchenProgress = runFarmKitchen().progressed
     if (ApplicationHookConstants.isOffline()) return kitchenProgress
     if (includeGames && recordFarmGame?.value == true) FarmGame.run(this)
     if (ApplicationHookConstants.isOffline()) return kitchenProgress

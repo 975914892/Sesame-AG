@@ -229,19 +229,6 @@ private val forestDefaultBlacklist =
         "通过5关",
     )
 
-private val fishPondDefaultBlacklist =
-    setOf(
-        // 福气鱼池：游戏、订阅、分享、翻倍广告等任务缺少稳定自动完成闭环
-        "FISHPOND_NCLY_GAME",
-        "NORMAL_RENMENYOUXI",
-        "TASK_SUBSCRIBE",
-        "ANTFISHPOND_WECHAT_SHARE",
-        "LOTTERY_PLUS",
-        "RESCUE_AD",
-        "RESULT_DOUBLE_AD",
-        "FLOAT_GAME_AD",
-    )
-
 private val stallDefaultBlacklist =
     setOf(
         // 蚂蚁新村
@@ -392,6 +379,7 @@ private val sportsDefaultBlacklist =
 
 private val myBankWelfareDefaultBlacklist =
     setOf(
+        "AP12377633", // 绑卡事件任务，通用send返回10000005，需真实绑卡行为
         "AP12341521", // 查看借呗额度：需真实授信业务行为
         "AP18353629", // 办理全国大流量卡：需真实办理业务
         "AP12333795", // 完成1笔借呗支用：需真实借款支用行为
@@ -415,5 +403,4 @@ val DEFAULT_BLACKLIST: Map<String, Set<String>> =
         "网商银行" to myBankWelfareDefaultBlacklist,
         "神奇物种" to dodoDefaultBlacklist,
         "蚂蚁新村" to stallDefaultBlacklist,
-        "福气鱼池" to fishPondDefaultBlacklist,
     )

@@ -1046,7 +1046,7 @@ class AntSesameCredit : ModelTask() {
             if (item.type == "AD_TASK") {
                 return handleSesameAdTaskResult(task, item.title, "芝麻信用💳", moduleName)
             }
-            val result = completeSesameLifeRecord(
+            return completeSesameLifeRecord(
                 task = task,
                 taskTitle = item.title,
                 spec = SesameLifeRecordCompletionSpec(
@@ -1058,20 +1058,6 @@ class AntSesameCredit : ModelTask() {
                 ),
                 actionDetail = sesameCreditActionDetail(item, "finish"),
             )
-            // 重复校验只限制当前记录，其他任务和已受理动作仍需完成批量回查。
-            return if (!result.success &&
-                result.failureType == TaskRpcFailureType.BUSINESS_LIMIT &&
-                result.code == "OP_REPEAT_CHECK" &&
-                !isSesameTaskFlowInterrupted()
-            ) {
-                result.copy(
-                    stopCurrentRound = false,
-                    continueCurrentRoundOnFailure = true,
-                    refreshAfterAction = true,
-                )
-            } else {
-                result
-            }
         }
 
         override fun afterSuccess(
@@ -3191,6 +3177,7 @@ class AntSesameCredit : ModelTask() {
     private inner class ZhimaTreeTaskFlowAdapter : TaskFlowAdapter {
         override val moduleName: String = sesameCreditTaskBlacklistModule
         override val flowName: String = "芝麻树任务"
+        override val nonRetryableActionFlagPrefix: String = StatusFlags.FLAG_SESAME_ZHIMA_TREE_ACTION_STOP_PREFIX
 
         private val sourceResults = JSONObject()
         private val handledAdBizIds = mutableSetOf<String>()
@@ -3487,7 +3474,12 @@ class AntSesameCredit : ModelTask() {
             if (item.type == "AD_TASK") {
                 "${action.logName}:AD_TASK:${item.id}"
             } else {
-                "${action.logName}:${zhimaTreeTaskKey(item)}:${item.status}"
+                val taskRef = item.toZhimaTreeTaskRef()
+                val delegateRecordId = if (action == TaskFlowAction.SEND) {
+                    findZhimaTreePushModelDelegate(taskRef)?.recordId.orEmpty()
+                } else ""
+                "${action.logName}:${taskRef.key()}:${item.status}:${taskRef.appletType}:" +
+                    "${taskRef.appId}:${taskRef.chInfo}:${taskRef.refer}:${taskRef.playInfo}:$delegateRecordId"
             }
 
         override fun onQueryFailed(response: JSONObject) {
@@ -5826,7 +5818,7 @@ class AntSesameCredit : ModelTask() {
                     (failureType == TaskRpcFailureType.BUSINESS_LIMIT && errorCode == "OP_REPEAT_CHECK"),
             continueCurrentRoundOnFailure = failureType == TaskRpcFailureType.RETRYABLE_RPC &&
                 errorCode != "OP_REPEAT_CHECK",
-        )
+        ).copy(refreshAfterAction = true)
     }
 
     private fun submitSesameGameDuration(

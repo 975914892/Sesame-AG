@@ -358,22 +358,6 @@ object ModelFieldTodayStateResolver {
                 )
             }
 
-            "AntFishPond.fishPondTask" -> {
-                allFlags(
-                    StatusFlags.FLAG_ANTFISHPOND_SIGN_DONE,
-                    StatusFlags.FLAG_ANTFISHPOND_GIFT_BOX_DONE,
-                    StatusFlags.FLAG_ANTFISHPOND_TOMORROW_ROD_DONE,
-                    StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE,
-                    reason = "今日鱼池任务奖励已处理",
-                )
-            }
-
-            "AntFishPond.autoFish",
-            "AntFishPond.fishDailyLimit",
-            -> {
-                fishPondAutoFishState(modelFields)
-            }
-
             "AntStall.stallThrowManure" -> {
                 flag(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT, "今日丢肥料已达上限")
             }
@@ -433,10 +417,15 @@ object ModelFieldTodayStateResolver {
                 specialFoodLimitState(modelFields)
             }
 
+            "AntFarm.activitySpecialFoodCount",
             "AntFarm.donationCompetitionTrySpecialFood",
-            "AntFarm.donationCompetitionSpecialFoodCount",
+            "AntFarm.loveChickenTrySpecialFood",
             -> {
-                donationCompetitionSpecialFoodLimitState(modelFields)
+                limitReached(
+                    current = Status.getIntFlagToday(StatusFlags.FLAG_FARM_SPECIAL_FOOD_ACTIVITY_DAILY_COUNT),
+                    limit = intValue(modelFields["activitySpecialFoodCount"]),
+                    reason = "今日活动特殊食品使用已达上限",
+                )
             }
 
             "AntFarm.donation" -> {
@@ -518,15 +507,7 @@ object ModelFieldTodayStateResolver {
         return limitReached(
             current = Status.getIntFlagToday(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DAILY_COUNT),
             limit = intValue(modelFields["useSpecialFoodCount"]),
-            reason = "今日特殊食品使用已达上限",
-        )
-    }
-
-    private fun donationCompetitionSpecialFoodLimitState(modelFields: ModelFields): ModelFieldTodayState {
-        return limitReached(
-            current = Status.getIntFlagToday(StatusFlags.FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_DAILY_COUNT),
-            limit = intValue(modelFields["donationCompetitionSpecialFoodCount"]),
-            reason = "今日排位赛特殊食品使用已达上限",
+            reason = "今日日常特殊食品使用已达上限",
         )
     }
 
@@ -537,21 +518,6 @@ object ModelFieldTodayStateResolver {
             "今日公益捐蛋已处理",
         )
     }
-
-    private fun fishPondAutoFishState(modelFields: ModelFields): ModelFieldTodayState =
-        when {
-            Status.hasFlagToday(StatusFlags.FLAG_ANTFISHPOND_RISK_TOKEN_MISSING) -> {
-                inactive("缺少 fishpondAngle riskToken，今日已跳过自动钓鱼")
-            }
-
-            else -> {
-                limitReached(
-                    current = Status.getIntFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_COUNT),
-                    limit = intValue(modelFields["fishDailyLimit"]),
-                    reason = "今日自动钓鱼已达每日上限",
-                )
-            }
-        }
 
     private fun paradiseCoinExchangeState(modelFields: ModelFields): ModelFieldTodayState {
         val selectedBenefits = stringSetValue(modelFields["paradiseCoinExchangeBenefitList"])

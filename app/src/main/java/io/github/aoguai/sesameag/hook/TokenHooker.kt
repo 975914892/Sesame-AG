@@ -31,9 +31,6 @@ object TokenHooker {
         registerRpcHandler("com.alipay.adexchange.ad.facade.xlightPlugin") { paramsJson ->
             handleAntFarmToken(currentUserId, paramsJson)
         }
-        registerRpcHandler("com.alipay.antfishpond.fishpondAngle") { paramsJson ->
-            handleFishPondRiskToken(currentUserId, paramsJson)
-        }
 
         Log.record(TAG, "✅ VIP业务监听已启动，当前绑定用户: $currentUserId")
     }
@@ -81,29 +78,6 @@ object TokenHooker {
         }
     }
 
-    private fun handleFishPondRiskToken(userId: String, paramsJson: JSONObject) {
-        try {
-            val requestData = extractFirstRequestData(paramsJson) ?: paramsJson
-            val riskToken = requestData.optString("riskToken").orEmpty()
-            if (riskToken.isBlank()) return
-
-            val vipData = IdMapManager.getInstance(VipDataIdMap::class.java)
-            vipData.load(userId)
-            if (vipData[FISHPOND_RISK_TOKEN_KEY] == riskToken) {
-                return
-            }
-            vipData.add(FISHPOND_RISK_TOKEN_KEY, riskToken)
-
-            if (vipData.save(userId)) {
-                Log.fishpond("捕获到福气鱼池 fishpondAngle riskToken 并已保存, uid=$userId")
-            } else {
-                Log.error(TAG, "保存福气鱼池 riskToken 到 vipdata.json 失败, uid=$userId")
-            }
-        } catch (e: Exception) {
-            Log.error(TAG, "解析福气鱼池 riskToken 异常: ${e.message}")
-        }
-    }
-
     /**
      * xlightPlugin 的入参结构在不同版本/场景下会有差异：
      * - 可能是 positionRequest 直接挂在根对象
@@ -147,21 +121,5 @@ object TokenHooker {
             null
         }
     }
-
-    private fun extractFirstRequestData(paramsJson: JSONObject): JSONObject? {
-        val requestData = paramsJson.opt("requestData")
-        return when (requestData) {
-            is JSONObject -> requestData
-            is JSONArray -> {
-                for (i in 0 until requestData.length()) {
-                    requestData.optJSONObject(i)?.let { return it }
-                }
-                null
-            }
-            else -> null
-        }
-    }
-
-    private const val FISHPOND_RISK_TOKEN_KEY = "antfishpond_riskToken"
 }
 

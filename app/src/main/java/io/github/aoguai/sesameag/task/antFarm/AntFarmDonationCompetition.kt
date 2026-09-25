@@ -11,6 +11,7 @@ import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.UserDataStoreManager
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -115,6 +116,12 @@ private fun stopDonationCompetitionIfUnavailable(
     rpc: String,
     response: JSONObject,
 ): Boolean {
+    if (response.optJSONObject("donationCompetitionActivityConf")?.has("projectId") == true ||
+        response.optJSONObject("userDonationLevelInfo")?.has("userContributionNum") == true
+    ) {
+        Log.farm("$rpc 返回爱心鸡结号结构，由独立活动配置处理")
+        return true
+    }
     if (!isDonationCompetitionUnavailableResponse(response)) {
         return false
     }
@@ -213,6 +220,8 @@ internal fun AntFarm.handleDonationCompetition() {
         }
 
         scheduleDonationCompetitionTask(endTimeMs)
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Log.printStackTrace(TAG, "handleDonationCompetition err:", e)
     }
@@ -833,6 +842,7 @@ private fun AntFarm.checkRankAndDonate(
                     return false
                 }
 
+                val myStars = myData.optInt("rewardStarNum", 0)
                 val serverDonationTotal = myData.getInt("donationNum")
                 val localDonationTotal = Status.getDailyDonationTotal(myUid)
                 if (serverDonationTotal > localDonationTotal) {
@@ -852,7 +862,6 @@ private fun AntFarm.checkRankAndDonate(
                 }
 
                 val myRank = myData.getInt("rankOrder")
-                val myStars = myData.optInt("rewardStarNum", 0)
                 val overtakeAmount = donationCompetitionOvertakeAmount?.value ?: 1
 
                 // 如果已经是第一名，根据策略不做处理
@@ -970,6 +979,8 @@ private fun AntFarm.checkRankAndDonate(
                 "刷新捐蛋排位赛失败: ${formatFarmHighRiskFailure("enterDonationCompetitionRank", jo, classification)}",
             )
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Log.printStackTrace(TAG, "checkRankAndDonate err:", e)
     }
@@ -978,18 +989,14 @@ private fun AntFarm.checkRankAndDonate(
 
 private fun AntFarm.donateForCompetition(count: Int, uid: String): Boolean {
     try {
-        if (harvestBenevolenceScore < count) {
-            if (benevolenceScore >= 1.0) {
-                Log.record(TAG, "排位反超蛋数不足(当前:$harvestBenevolenceScore)，发现有待收取蛋($benevolenceScore)，尝试先收获...")
-                harvestProduce(ownerFarmId)
-            }
-
-            if (harvestBenevolenceScore < count &&
-                !tryUseSpecialFoodForCompetition(count)
-            ) {
-                Log.record(TAG, "排位反超🥚[鸡蛋不足(当前:$harvestBenevolenceScore)，需要:$count，跳过本次捐赠]")
-                return false
-            }
+        val resource = replenishEggsForDonation(count, forCompetition = true)
+        if (resource.failure != null) {
+            Log.record(TAG, "排位赛补蛋停止: ${resource.failure}")
+            return false
+        }
+        if (resource.availableEggs < count) {
+            Log.record(TAG, "排位反超🥚[鸡蛋不足(当前:$harvestBenevolenceScore)，需要:$count，保留后续补蛋]")
+            return false
         }
 
         val endCal = TimeUtil.getTodayCalendarByTimeStr("2000")
@@ -1037,88 +1044,12 @@ private fun AntFarm.donateForCompetition(count: Int, uid: String): Boolean {
             refreshDonationState(activityId)
             return true
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Log.printStackTrace(TAG, "donateForCompetition err:", e)
     }
     return false
-}
-
-private fun AntFarm.tryUseSpecialFoodForCompetition(requiredEggCount: Int): Boolean {
-    if (harvestBenevolenceScore >= requiredEggCount) {
-        return true
-    }
-    if (!isAutoUseSpecialFoodEnabled()) {
-        Log.record(TAG, "排位反超蛋数不足，未开启“使用特殊食品”，跳过特殊食品补蛋")
-        return false
-    }
-    if (donationCompetitionTrySpecialFood?.value != true) {
-        return false
-    }
-    if (isOwnerAnimalSleeping()) {
-        Log.record(TAG, "排位反超蛋数不足，小鸡正在睡觉，无法通过特殊食品补蛋")
-        return false
-    }
-    if (!isOwnerAnimalAtHome()) {
-        Log.record(TAG, "排位反超蛋数不足，小鸡不在庄园，暂不尝试特殊食品补蛋")
-        return false
-    }
-
-    val usageCountFlag = StatusFlags.FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_DAILY_COUNT
-    val usageLimitFlag = StatusFlags.FLAG_FARM_SPECIAL_FOOD_DONATION_COMPETITION_LIMIT
-    val dailyLimit = donationCompetitionSpecialFoodCount?.value ?: -1
-
-    val usedToday = Status.getIntFlagToday(usageCountFlag) ?: 0
-    if (dailyLimit > 0 &&
-        usedToday >= dailyLimit
-    ) {
-        Status.setFlagToday(usageLimitFlag)
-        Log.record(TAG, "排位赛特殊食品今日已使用${usedToday}个，达到上限${dailyLimit}个，停止补蛋")
-        return false
-    }
-
-    val cuisineList = fetchCuisineListForCompetition() ?: return false
-    val remainingDailyQuota = if (dailyLimit > 0) dailyLimit - usedToday else -1
-    if (remainingDailyQuota == 0) {
-        Status.setFlagToday(usageLimitFlag)
-        Log.record(TAG, "排位赛特殊食品今日已无剩余额度，停止补蛋")
-        return false
-    }
-
-    val eggGap = (requiredEggCount - harvestBenevolenceScore).coerceAtLeast(0.0)
-    if (eggGap <= 0.0) {
-        return true
-    }
-
-    val usedCount =
-        useSpecialFood(
-            cuisineList = cuisineList,
-            maxUsage = remainingDailyQuota,
-            usageCountFlag = usageCountFlag,
-            usageLimitFlag = usageLimitFlag,
-            usageDailyLimit = dailyLimit,
-            usageLabel = "排位赛特殊食品",
-            targetEggGap = eggGap,
-            guardScene = "排位赛特殊食品补蛋",
-        )
-    if (usedCount <= 0) {
-        Log.record(TAG, "排位反超蛋数不足，特殊食品调用未成功，停止补蛋")
-        return false
-    }
-
-    if (isOwnerAnimalSleeping()) {
-        Log.record(TAG, "排位反超蛋数不足，尝试补蛋后小鸡进入睡眠，停止继续补蛋")
-        return false
-    }
-    if (!isOwnerAnimalAtHome()) {
-        Log.record(TAG, "排位反超蛋数不足，尝试补蛋后小鸡离开庄园，停止继续补蛋")
-        return false
-    }
-
-    if (benevolenceScore >= 1.0) {
-        harvestProduce(ownerFarmId)
-    }
-    syncAnimalStatus(ownerFarmId)
-    return harvestBenevolenceScore >= requiredEggCount
 }
 
 /**
@@ -1164,34 +1095,6 @@ private fun AntFarm.printDonationReport() {
             )
         }
     } catch (_: Exception) {
-    }
-}
-
-private fun AntFarm.fetchCuisineListForCompetition(): JSONArray? {
-    val uid = UserMap.currentUid
-    if (uid.isNullOrBlank()) {
-        Log.record(TAG, "排位赛读取特殊食品库存失败：当前用户ID为空")
-        return null
-    }
-    return try {
-        val jo = JSONObject(AntFarmRpcCall.enterFarm(uid, uid))
-        if (!ResChecker.checkRes(TAG, jo)) {
-            Log.record(TAG, "排位赛读取特殊食品库存失败: ${jo.optString("memo").ifBlank { jo.optString("resultDesc") }}")
-            null
-        } else {
-            val farmVO = jo.optJSONObject("farmVO")
-            if (farmVO != null) {
-                harvestBenevolenceScore = farmVO.optDouble("harvestBenevolenceScore", harvestBenevolenceScore)
-            }
-            val cuisineList = jo.optJSONArray("cuisineList")
-            if (cuisineList == null) {
-                Log.record(TAG, "排位赛读取特殊食品库存失败：cuisineList 为空")
-            }
-            cuisineList
-        }
-    } catch (e: Exception) {
-        Log.printStackTrace(TAG, "fetchCuisineListForCompetition err:", e)
-        null
     }
 }
 

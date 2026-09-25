@@ -621,14 +621,8 @@ class ForestChouChouLe {
             val taskBaseInfo = taskBaseInfo(item) ?: return missingTaskData(item, "complete")
             val descriptor = GameCenterPlayRpcCall.describeTask(taskBaseInfo, taskBizInfo(item), taskProdPlayParam(item))
             val playContract = forestGamePlayContract(item)
-            if (!isExchangeDrawTask(item) && descriptor.isGameTask && playContract == null) {
-                val mappedTask = descriptor.mappedTask ?: return TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
-                    message = "森林游戏没有直接、点击、时长或已有业务完成闭环",
-                    rpc = "ChouChouLeTaskFlowAdapter.complete",
-                    raw = item.raw?.toString().orEmpty(),
-                    detail = actionDetail(item, TaskFlowAction.COMPLETE),
-                )
+            val mappedTask = descriptor.mappedTask
+            if (!isExchangeDrawTask(item) && playContract == null && mappedTask != null) {
                 if (!kotlinx.coroutines.runBlocking { mappedTask.report(1) }) {
                     return TaskFlowActionResult.failure(
                         failureType = TaskRpcFailureType.RETRYABLE_RPC,

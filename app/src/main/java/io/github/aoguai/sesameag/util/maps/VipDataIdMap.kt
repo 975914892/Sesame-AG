@@ -5,7 +5,7 @@ package io.github.aoguai.sesameag.util.maps
  *
  * 每个用户一个 vipdata.json，内容为简单的 key-value 映射，例如：
  * {
- *   "antfishpond_riskToken": "xxxx"
+ *   "AntFarmReferToken": "xxxx"
  * }
  */
 class VipDataIdMap : IdMapManager() {

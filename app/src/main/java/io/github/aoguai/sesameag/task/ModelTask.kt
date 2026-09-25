@@ -128,7 +128,6 @@ abstract class ModelTask : Model() {
             "海洋", "神奇海洋" -> Log.ocean(msg)
             "神奇物种" -> Log.dodo(msg)
             "会员" -> Log.member(msg)
-            "福气鱼池" -> Log.fishpond(msg)
             "运动" -> Log.sports(msg)
             "绿色经营" -> Log.greenFinance(msg)
             "芝麻信用" -> Log.sesame(msg)
@@ -140,7 +139,6 @@ abstract class ModelTask : Model() {
                 ModelGroup.FARM -> Log.farm(msg)
                 ModelGroup.STALL -> Log.stall(msg)
                 ModelGroup.DODO -> Log.dodo(msg)
-                ModelGroup.FISHPOND -> Log.fishpond(msg)
                 ModelGroup.SPORTS -> Log.sports(msg)
                 ModelGroup.MEMBER -> Log.member(msg)
                 ModelGroup.SESAME_CREDIT -> Log.sesame(msg)
@@ -205,6 +203,11 @@ abstract class ModelTask : Model() {
     /** 检查是否存在指定ID的子任务 */
     fun hasChildTask(childId: String): Boolean {
         return childTaskMap.containsKey(childId)
+    }
+
+    /** 已开始的任务仍归 taskScope 管理；释放标识，允许它登记同一目标的下一次等待。 */
+    internal fun detachChildTask(childTask: ChildModelTask) {
+        childTaskMap.remove(childTask.id, childTask)
     }
 
     /**
