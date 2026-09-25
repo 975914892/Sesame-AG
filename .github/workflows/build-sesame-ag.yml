@@ -248,6 +248,17 @@ jobs:
       - name: 赋予Gradle执行权限
         run: chmod +x gradlew
 
+      - name: 修改可执行槽位上限为10
+        run: |
+          SLOT_FILE="app/src/main/java/io/github/aoguai/sesameag/hook/AccountSlotRegistry.kt"
+          if [ -f "$SLOT_FILE" ]; then
+            sed -i 's/const val MAX_EXECUTABLE_ACCOUNT_SLOTS = [0-9]*/const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 10/' "$SLOT_FILE"
+            echo "✅ 已设置可执行槽位上限为10"
+            grep "MAX_EXECUTABLE_ACCOUNT_SLOTS = " "$SLOT_FILE" | head -1
+          else
+            echo "⚠️ 未找到 AccountSlotRegistry.kt，跳过槽位修改"
+          fi
+
       - name: 执行Release构建
         run: ./gradlew --no-daemon --stacktrace assembleRelease
 
