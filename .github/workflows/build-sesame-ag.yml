@@ -176,7 +176,7 @@ jobs:
           echo "failed_count=$FAILED_COUNT" >> "$GITHUB_OUTPUT"
           
           if [ $APPLIED_COUNT -gt 0 ]; then
-            git commit -m "chore: 应用自定义补丁（账号池上限调整）" || echo "无变更需提交"
+            git commit -m "chore: 应用自定义补丁（账号池上限调整）[skip ci]" || echo "无变更需提交"
             echo "has_patches=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_patches=false" >> "$GITHUB_OUTPUT"
