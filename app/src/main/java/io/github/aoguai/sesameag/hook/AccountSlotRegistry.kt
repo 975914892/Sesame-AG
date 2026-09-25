@@ -531,8 +531,14 @@ object AccountSlotRegistry {
         }
         val parsedRecord = runCatching {
             JsonUtil.parseObject(Files.readFromFile(recordFile), AccountSlotRecord::class.java)
-        }.getOrNull() ?: return null
-        val validatedRecord = validateRecord(parsedRecord) ?: return null
+        }.getOrNull() ?: run {
+            Log.w(TAG, "account_slot_record_parse_failed, falling back to bootstrap")
+            return LoadedRecord(bootstrapRecord(), needsWrite = true)
+        }
+        val validatedRecord = validateRecord(parsedRecord) ?: run {
+            Log.w(TAG, "account_slot_record_invalid, falling back to bootstrap")
+            return LoadedRecord(bootstrapRecord(), needsWrite = true)
+        }
         val recoveredRecord = recoverRecord(validatedRecord, recoverExpiredPending)
         return LoadedRecord(recoveredRecord, needsWrite = recoveredRecord != validatedRecord)
     }
