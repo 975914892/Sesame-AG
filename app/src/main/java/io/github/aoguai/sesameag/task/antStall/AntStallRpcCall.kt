@@ -16,7 +16,7 @@ import java.util.UUID
 object AntStallRpcCall {
 
     /** 接口版本号 */
-    private const val VERSION = "0.1.2607061424.40"
+    private const val VERSION = "0.1.2609021051.58"
     private const val BASE_SOURCE = "ch_appcenter__chsub_9patch"
     private const val IEP_SOURCE = "AST"
     private const val SHARE_SOURCE = "ANTSTALL"
@@ -114,7 +114,7 @@ object AntStallRpcCall {
      */
     fun rankDonateCount(startNum: Int): String =
         RequestManager.requestString(
-            "com.alipay.antstall.rank.donate.count",
+            "com.alipay.antstall.rank.coin.donate",
             "[{\"source\":\"$BASE_SOURCE\",\"startNum\":$startNum,\"systemType\":\"android\",\"version\":\"$VERSION\"}]",
         )
 

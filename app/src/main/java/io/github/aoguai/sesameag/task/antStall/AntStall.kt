@@ -66,6 +66,7 @@ class AntStall : ModelTask() {
         INVITE_REGISTER,
         XLIGHT,
         ELEME_TOKEN,
+        OPEN_SHOP,
     }
 
     /**
@@ -1175,9 +1176,10 @@ class AntStall : ModelTask() {
     }
 
     /**
-     * @brief 获取好友排行榜
+     * @brief 获取可摆摊好友座位（分页遍历好友捐赠排行榜）
+     * @return null 表示查询失败；空列表表示没有可摆摊好友
      */
-    private fun rankDonateCount(shopIds: Queue<String>) {
+    private fun collectOpenShopSeats(): List<Seat>? {
         try {
             val seats = mutableListOf<Seat>()
             val seenStartNumbers = mutableSetOf<Int>()
@@ -1188,7 +1190,7 @@ class AntStall : ModelTask() {
                 val json = JSONObject(response)
                 if (!ResChecker.checkRes(TAG, json)) {
                     Log.error(TAG, "rankDonateCount err: $response")
-                    return
+                    return null
                 }
 
                 val friendRankList = json.optJSONArray("friendRankList") ?: JSONArray()
@@ -1219,10 +1221,19 @@ class AntStall : ModelTask() {
                 startNum = nextStartNum
             }
 
-            friendHomeOpen(seats, shopIds)
+            return seats
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "rankDonateCount err:", t)
+            return null
         }
+    }
+
+    /**
+     * @brief 获取好友排行榜并摆摊
+     */
+    private fun rankDonateCount(shopIds: Queue<String>) {
+        val seats = collectOpenShopSeats() ?: return
+        friendHomeOpen(seats, shopIds)
     }
 
     /**
@@ -1232,16 +1243,21 @@ class AntStall : ModelTask() {
         seatId: String,
         userId: String,
         shopId: String,
-    ) {
-        try {
+    ): Boolean {
+        return try {
             val response = AntStallRpcCall.shopOpen(seatId, userId, shopId)
             val json = JSONObject(response)
 
             if (json.optString("resultCode") == "SUCCESS") {
                 Log.stall("蚂蚁新村⛪在[${UserMap.getMaskName(userId)}]家摆摊")
+                true
+            } else {
+                Log.stall("蚂蚁新村⛪在[${UserMap.getMaskName(userId)}]家摆摊失败: $response")
+                false
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "openShop err:", t)
+            false
         }
     }
 
@@ -1251,13 +1267,14 @@ class AntStall : ModelTask() {
     private fun friendHomeOpen(
         seats: List<Seat>,
         shopIds: Queue<String>,
-    ) {
+    ): Boolean {
+        var opened = false
         val sortedSeats = seats.sortedByDescending { it.hot }
         val currentUid = UserMap.currentUid
 
         for (seat in sortedSeats) {
             if (shopIds.isEmpty()) {
-                return
+                return opened
             }
             val userId = seat.userId
 
@@ -1286,12 +1303,15 @@ class AntStall : ModelTask() {
                 if (targetSeatId == null) {
                     continue
                 }
-                val shopId = shopIds.poll() ?: return
-                openShop(targetSeatId, userId, shopId)
+                val shopId = shopIds.poll() ?: return opened
+                if (openShop(targetSeatId, userId, shopId)) {
+                    opened = true
+                }
             } catch (t: Throwable) {
                 Log.printStackTrace(TAG, t)
             }
         }
+        return opened
     }
 
     private fun queryFriendHomeIfAvailable(
@@ -1555,6 +1575,10 @@ class AntStall : ModelTask() {
 
                         StallTaskCompleteRoute.ELEME_TOKEN -> {
                             completeElemeVisitTask(item)
+                        }
+
+                        StallTaskCompleteRoute.OPEN_SHOP -> {
+                            completeOpenShopTask(item)
                         }
 
                         StallTaskCompleteRoute.FINISH -> {
@@ -2273,6 +2297,105 @@ class AntStall : ModelTask() {
         return StallTaskRefreshResult(state = StallTaskRefreshState.QUERY_FAILED)
     }
 
+    /**
+     * @brief 每日去好友家摆摊：摆摊动作本身即完成任务（服务端置 FINISHED），无需 finishTask
+     */
+    private fun completeOpenShopTask(item: TaskFlowItem): TaskFlowActionResult {
+        val response = AntStallRpcCall.shopList()
+        val json =
+            try {
+                JSONObject(response)
+            } catch (t: Throwable) {
+                Log.printStackTrace(TAG, "shopList err:", t)
+                return emptyStallActionResponse(
+                    rpc = "AntStallRpcCall.shopList",
+                    item = item,
+                    action = "shopList",
+                    raw = response,
+                )
+            }
+        if (!ResChecker.checkRes(TAG, json)) {
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.RETRYABLE_RPC,
+                message = "查询小摊列表失败",
+                rpc = "AntStallRpcCall.shopList",
+                raw = response,
+                detail = stallTaskActionDetail(item, "shopList"),
+                stopCurrentRound = true,
+            )
+        }
+        val astUserShopList = json.optJSONArray("astUserShopList") ?: JSONArray()
+        val shopId =
+            (0 until astUserShopList.length())
+                .asSequence()
+                .mapNotNull { astUserShopList.optJSONObject(it) }
+                .firstOrNull { it.optString("status") == "FREE" }
+                ?.optString("shopId")
+                ?.takeIf { it.isNotBlank() }
+        if (shopId == null) {
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.BUSINESS_LIMIT,
+                message = "没有空闲小摊可摆摊",
+                rpc = "AntStallRpcCall.shopList",
+                detail = stallTaskActionDetail(item, "openShop"),
+            )
+        }
+
+        val seats = collectOpenShopSeats()
+        if (seats == null) {
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.RETRYABLE_RPC,
+                message = "查询好友捐赠排行失败",
+                rpc = "AntStallRpcCall.rankDonateCount",
+                detail = stallTaskActionDetail(item, "openShop"),
+            )
+        }
+
+        if (!friendHomeOpen(seats, LinkedList(listOf(shopId)))) {
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.BUSINESS_LIMIT,
+                message = "未找到可摆摊好友座位",
+                rpc = "AntStall.shopOpen",
+                detail = stallTaskActionDetail(item, "openShop"),
+            )
+        }
+
+        val refreshResult = refreshStallTaskState(item.type)
+        return when (refreshResult.state) {
+            StallTaskRefreshState.REWARD_READY -> {
+                TaskFlowActionResult.success(refreshAfterAction = true)
+            }
+
+            StallTaskRefreshState.TERMINAL -> {
+                TaskFlowActionResult.success()
+            }
+
+            StallTaskRefreshState.MISSING,
+            StallTaskRefreshState.TODO,
+            StallTaskRefreshState.UNKNOWN,
+            -> {
+                TaskFlowActionResult.defer(
+                    deferredReason = DeferredReason.STATE_CONFIRMATION,
+                    message = "已去好友家摆摊，等待服务端状态确认",
+                    rpc = "AntStallRpcCall.taskList",
+                    raw = refreshResult.raw,
+                    detail = stallTaskActionDetail(item, "openShopRefresh"),
+                )
+            }
+
+            StallTaskRefreshState.QUERY_FAILED -> {
+                TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.RETRYABLE_RPC,
+                    message = "已去好友家摆摊，任务状态刷新失败",
+                    rpc = "AntStallRpcCall.taskList",
+                    raw = refreshResult.raw,
+                    detail = stallTaskActionDetail(item, "openShopRefresh"),
+                    continueCurrentRoundOnFailure = true,
+                )
+            }
+        }
+    }
+
     private fun completeInviteRegisterTask(item: TaskFlowItem): TaskFlowActionResult =
         if (inviteRegister()) {
             TaskFlowActionResult.success()
@@ -2397,6 +2520,7 @@ class AntStall : ModelTask() {
             item.type == STALL_DAILY_QA_TASK_TYPE -> StallTaskCompleteRoute.DAILY_QA
             item.type == STALL_INVITE_REGISTER_TASK_TYPE -> StallTaskCompleteRoute.INVITE_REGISTER
             item.type == STALL_ELEME_VISIT_TASK_TYPE -> StallTaskCompleteRoute.ELEME_TOKEN
+            item.type == STALL_OPEN_SHOP_TASK_TYPE -> StallTaskCompleteRoute.OPEN_SHOP
             stallGamePlayContract(item) != null -> StallTaskCompleteRoute.GAME_PLAY_DURATION
             else -> StallTaskCompleteRoute.FINISH
         }
@@ -3276,6 +3400,7 @@ class AntStall : ModelTask() {
         private const val STALL_XLIGHT_TASK_TYPE = "ANTSTALL_XLIGHT_VARIABLE_AWARD"
         private const val STALL_XLIGHT_SPACE_CODE = "ANT_FARM_NEW_VILLAGE"
         private const val STALL_ELEME_VISIT_TASK_TYPE = "ANTSTALL_ELEME_VISIT"
+        private const val STALL_OPEN_SHOP_TASK_TYPE = "ANTSTALL_NORMAL_DAILY_OPENSHOP"
         private const val STALL_XLIGHT_PAGE_FROM = "ch_url-https://68687809.h5app.alipay.com/www/game.html"
         private const val STALL_TASK_REFRESH_ATTEMPTS = 3
         private const val STALL_TASK_REFRESH_DELAY_MS = 600L
