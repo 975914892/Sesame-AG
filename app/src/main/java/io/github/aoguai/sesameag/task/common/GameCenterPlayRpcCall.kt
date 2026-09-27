@@ -1033,12 +1033,23 @@ object GameCenterPlayRpcCall {
             .put("unityDeviceLevel", "high"),
     )
 
-    fun queryGameCenterHome(source: String, trafficDriverId: String): FloatingBallAck = requestAck(
+    fun queryGameCenterHome(
+        source: String,
+        trafficDriverId: String,
+        sourceTab: String = "index",
+    ): FloatingBallAck = requestAck(
         "com.alipay.gamecenterhome.biz.rpc.queryHomePage",
         JSONObject()
             .put("source", source)
-            .put("sourceTab", "index")
+            .put("sourceTab", sourceTab)
             .put("trafficDriverId", trafficDriverId),
+    )
+
+    fun queryWalkMain(source: String, passThrough: String): FloatingBallAck = requestAck(
+        "com.alipay.gamecenteruprod.biz.rpc.walkgrid.queryWalkMain",
+        JSONObject()
+            .put("source", source)
+            .put("channelTaskPassThrough", passThrough),
     )
 
     fun consultGameFloatingBall(

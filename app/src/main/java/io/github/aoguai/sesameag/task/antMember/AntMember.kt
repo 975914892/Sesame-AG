@@ -11,9 +11,17 @@ import io.github.aoguai.sesameag.data.Status.Companion.setFlagToday
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.MapperEntity
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
 import io.github.aoguai.sesameag.hook.HookReadyChecker
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
+import io.github.aoguai.sesameag.hook.keepalive.ScheduledTaskRouter
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
+import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.hook.internal.LocationHelper
 import io.github.aoguai.sesameag.hook.internal.LocationHelper.requestLocationSuspend
 import io.github.aoguai.sesameag.model.ModelFields
@@ -64,6 +72,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -221,6 +231,8 @@ class AntMember : ModelTask() {
         NO_TASK,
         UNKNOWN
     }
+
+    private val memberFloatingBallMutex = Mutex()
 
     private data class MemberFloatingBallTaskRef(
         val bizNo: String,
@@ -1558,15 +1570,49 @@ class AntMember : ModelTask() {
             if (!ResChecker.checkRes(TAG, entrance)) return
             val actionUrl = entrance.optString("actionUrl")
             if (actionUrl.isBlank()) return
-            val descriptor = GameCenterPlayRpcCall.describeTask(entrance)
-            val parameters = descriptor.urlParameters
-            val scene = parameters["sceneId"].orEmpty()
-            val source = descriptor.source
-            val moduleId = parameters["moduleId"].orEmpty()
-            val guideType = parameters["guideType"].orEmpty()
-            val passThrough = parameters["channelTaskPassThrough"].orEmpty()
-            if (scene.isBlank() || source.isBlank()) {
-                Log.error(TAG, "会员游戏乐园入口缺少sceneId/source:$entrance")
+            val launchUri = android.net.Uri.parse(actionUrl)
+            val pageUri = android.net.Uri.parse(launchUri.getQueryParameter("url") ?: actionUrl)
+            // 频道透传中的 sceneId 属于任务，不能用于外部乐园页面。
+            val scene = pageUri.getQueryParameter("sceneId").orEmpty()
+            val source = pageUri.getQueryParameter("chInfo")
+                ?: launchUri.getQueryParameter("chInfo").orEmpty()
+            val moduleId = pageUri.getQueryParameter("moduleId").orEmpty()
+            val guideType = pageUri.getQueryParameter("guideType").orEmpty()
+            val passThrough = GameCenterPlayRpcCall.describeTask(entrance)
+                .urlParameters["channelTaskPassThrough"].orEmpty()
+            if (source.isBlank()) {
+                Log.error(TAG, "会员游戏入口缺少source:$entrance")
+                return
+            }
+            if (pageUri.lastPathSegment == "index.html" && pageUri.getQueryParameter("tab") == "promote") {
+                val home = GameCenterPlayRpcCall.queryGameCenterHome(
+                    source = source,
+                    trafficDriverId = pageUri.getQueryParameter("trafficDriverId").orEmpty(),
+                    sourceTab = "promote",
+                )
+                if (!home.accepted) {
+                    Log.error(TAG, "会员游戏中心访问失败[gamecenterhome.queryHomePage]:${home.raw}")
+                    return
+                }
+                val walk = GameCenterPlayRpcCall.queryWalkMain(source, passThrough)
+                if (!walk.accepted) {
+                    Log.error(TAG, "会员游戏中心访问失败[walkgrid.queryWalkMain]:${walk.raw}")
+                    return
+                }
+                val refreshedEntrance = JSONObject(AntMemberRpcCall.queryGameEntranceInfo())
+                if (!ResChecker.checkRes(TAG, "会员游戏入口刷新失败:", refreshedEntrance)) return
+                val before = entrance.optInt("gameEntrancePointNum", -1)
+                val after = refreshedEntrance.optInt("gameEntrancePointNum", -1)
+                val rewardMessage = walk.response?.optJSONObject("data")?.optString("globalToast").orEmpty()
+                if (before > 0 && after >= 0 && after < before) {
+                    Log.member("会员游戏中心🎮[访问奖励已确认] 入口积分:$before→$after $rewardMessage")
+                } else if (before > 0) {
+                    Log.member("会员游戏中心🎮[访问已提交，等待入口积分刷新] $rewardMessage")
+                }
+                return
+            }
+            if (pageUri.lastPathSegment != "externalGameCenter.html" || scene.isBlank()) {
+                Log.error(TAG, "会员游戏入口页面或页面场景无效:$entrance")
                 return
             }
             val home = GameCenterPlayRpcCall.queryExternalGameCenter(scene, moduleId, guideType, source, passThrough)
@@ -1670,7 +1716,7 @@ class AntMember : ModelTask() {
 
     internal suspend fun doAllMemberAvailableTaskCompat(): Unit = CoroutineUtils.run {
         try {
-            val floatingBallState = processMemberFloatingBallTaskCompat()
+            val floatingBallState = memberFloatingBallMutex.withLock { processMemberFloatingBallTaskCompat() }
             val processedAnyTask = floatingBallState == MemberFloatingBallTaskProcessState.PROCESSED
             if (ApplicationHookConstants.isOffline()) {
                 Log.member("会员任务[浮球]#检测到离线模式，本轮中断")
@@ -1681,15 +1727,12 @@ class AntMember : ModelTask() {
                 MemberFloatingBallTaskProcessState.PROCESSED -> Unit
 
                 MemberFloatingBallTaskProcessState.RETRY_LATER -> {
-                    Log.member("会员任务[浮球]#存在进行中任务，本轮结束")
-                    return@run
+                    Log.member("会员任务[浮球]#等待后续调度，继续处理任务列表")
                 }
 
                 MemberFloatingBallTaskProcessState.UNKNOWN -> {
-                    if (!hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)) {
-                        Log.member("会员任务[浮球]#当前链路状态未确认，本轮结束")
-                    }
-                    return@run
+                    if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)) return@run
+                    Log.error(TAG, "会员浮球状态未确认，继续处理独立会员任务")
                 }
 
                 MemberFloatingBallTaskProcessState.NO_TASK -> {
@@ -1697,7 +1740,11 @@ class AntMember : ModelTask() {
                 }
             }
 
-            when (processCurrentMemberTaskListCompat()) {
+            val taskListState = processCurrentMemberTaskListCompat()
+            if (floatingBallState == MemberFloatingBallTaskProcessState.RETRY_LATER ||
+                floatingBallState == MemberFloatingBallTaskProcessState.UNKNOWN
+            ) return@run
+            when (taskListState) {
                 CurrentMemberTaskListProcessState.COMPLETED -> {
                     markMemberTaskDoneToday("会员任务#任务列表已处理完成，今日停止继续刷新")
                 }
@@ -2395,8 +2442,7 @@ class AntMember : ModelTask() {
                 if (!isOfflineMemberTaskStopReason(stopReason)) {
                     setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)
                 }
-                Log.member("会员任务[浮球]#${buildMemberTaskQueryStopMessage(stopReason, floatingBallObject)}"
-                )
+                Log.error(TAG, "会员任务[浮球]#${buildMemberTaskQueryStopMessage(stopReason, floatingBallObject)}")
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
             if (!ResChecker.checkRes(TAG, floatingBallObject)) {
@@ -2421,18 +2467,139 @@ class AntMember : ModelTask() {
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
 
-            if (isMemberTaskProcessInProgressStatus(taskRef.taskStatus)) {
-                Log.member("会员任务[浮球]#当前状态${taskRef.taskStatus}，按服务端流程查询后续广告任务")
+            if (taskRef.endDt > System.currentTimeMillis()) {
+                scheduleMemberFloatingBallTask(taskRef)
+                return@run MemberFloatingBallTaskProcessState.RETRY_LATER
             }
+
+            val triggered = JSONObject(AntMemberRpcCall.triggerSignFloatingBall(taskRef.bizNo, taskRef.taskType))
+            if (stopMemberCoreTasksForRpcRisk("AntMember.triggerSignFloatingBall", triggered)) {
+                Log.error(TAG, "会员浮球完成受限[triggerSignFloatingBall]:$triggered")
+                return@run MemberFloatingBallTaskProcessState.UNKNOWN
+            }
+            if (!ResChecker.checkRes(TAG, "会员浮球完成失败[triggerSignFloatingBall]:", triggered)) {
+                return@run MemberFloatingBallTaskProcessState.UNKNOWN
+            }
+            val completedTask = triggered.optJSONObject("currentTaskInfo")
+            if (completedTask == null || completedTask.optString("bizNo") != taskRef.bizNo ||
+                completedTask.optString("taskStatus") != "SUCCESS"
+            ) {
+                Log.member("会员任务[浮球]#完成动作已接受，等待当前轮状态确认")
+                return@run MemberFloatingBallTaskProcessState.RETRY_LATER
+            }
+            UnifiedScheduler.cancelPersistentByDedupeKey(
+                ApplicationHook.appContext,
+                "$PERSISTENT_FLOATING_BALL_KIND:${AccountSessionCoordinator.currentUserId()}:${taskRef.bizNo}",
+            )
+            Log.member("会员任务[浮球]#本轮完成，奖励${completedTask.optInt("awardNum", 0)}积分")
+            val nextTask = buildMemberFloatingBallTaskRef(triggered)
+                ?.takeIf {
+                    !triggered.optBoolean("allTaskCompleted") && it.bizNo != taskRef.bizNo &&
+                        !isMemberTaskProcessFinishedStatus(it.taskStatus)
+                }
+            if (nextTask != null) scheduleMemberFloatingBallTask(nextTask)
             if (!tryProcessMemberFloatingBallAdTask(taskRef)) {
                 Log.member("会员任务[浮球]#后续广告任务待确认，后续调度继续查询")
                 return@run MemberFloatingBallTaskProcessState.RETRY_LATER
             }
-            return@run MemberFloatingBallTaskProcessState.PROCESSED
+            return@run if (nextTask != null) MemberFloatingBallTaskProcessState.RETRY_LATER
+                else MemberFloatingBallTaskProcessState.PROCESSED
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "processMemberFloatingBallTaskCompat err:", t)
             return@run MemberFloatingBallTaskProcessState.UNKNOWN
         }
+    }
+
+    private fun scheduleMemberFloatingBallTask(taskRef: MemberFloatingBallTaskRef) {
+        val context = ApplicationHook.appContext ?: return
+        val ownerUserId = AccountSessionCoordinator.currentUserId()?.takeIf { it.isNotBlank() } ?: return
+        val sessionEpoch = AccountSessionCoordinator.currentSessionEpoch()
+        val childId = "$PERSISTENT_FLOATING_BALL_KIND:$ownerUserId:${taskRef.bizNo}"
+        val triggerAt = max(System.currentTimeMillis() + 1000L, taskRef.endDt)
+        val payload = JSONObject()
+            .put("child_kind", PERSISTENT_FLOATING_BALL_KIND)
+            .put("owner_user_id", ownerUserId)
+            .put("session_epoch", sessionEpoch)
+        val schedule = UnifiedScheduler.schedulePersistentTrigger(
+            context = context,
+            name = "会员签到浮球",
+            kind = PersistentScheduleKind.MODULE_CHILD,
+            triggerAtMs = triggerAt,
+            dedupeKey = childId,
+            payloadJson = payload.toString(),
+            ownerUserId = ownerUserId,
+            sessionEpoch = sessionEpoch,
+        )
+        if (schedule.state == PersistentScheduleState.FAILED) {
+            Log.error(TAG, "会员浮球持久调度注册失败:${schedule.lastError}，保留进程内等待")
+        }
+        if (!hasChildTask(childId)) {
+            addChildTask(ChildModelTask(
+                id = childId,
+                group = PERSISTENT_FLOATING_BALL_KIND,
+                execTime = triggerAt,
+                suspendRunnable = {
+                    if (schedule.state == PersistentScheduleState.FAILED) {
+                        triggerPersistentMemberFloatingBall(schedule.payloadJson, schedule.id, "member_timer")
+                    } else {
+                        ScheduledTaskRouter.fire(context, schedule, "member_timer")
+                    }
+                },
+            ))
+        }
+        Log.member("会员任务[浮球]#已安排${TimeUtil.getCommonDate(triggerAt)}继续领取")
+    }
+
+    internal fun triggerPersistentMemberFloatingBall(payloadJson: String, scheduleId: String, source: String): Boolean {
+        val payload = JSONObject(payloadJson)
+        val ownerUserId = payload.optString("owner_user_id")
+        val sessionEpoch = payload.optLong("session_epoch")
+        val worker = runCatching {
+            GlobalThreadPools.execute(GlobalThreadPools.computeDispatcher) {
+                PersistentScheduleRegistry.markRunning(scheduleId, source = "member_floating_ball:$source")
+                val lease = ApplicationHook.appContext?.let { context ->
+                    WakeLockManager.acquire(
+                        context = context,
+                        timeoutMs = PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
+                        source = "member_floating_ball",
+                        scheduleId = scheduleId,
+                    )
+                }
+                try {
+                    val result = memberFloatingBallMutex.withLock {
+                        if (!AccountSessionCoordinator.isCurrentSession(ownerUserId, sessionEpoch) ||
+                            !isEnable() || memberTask?.value != true ||
+                            hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)
+                        ) null else processMemberFloatingBallTaskCompat()
+                    }
+                    if (result == MemberFloatingBallTaskProcessState.UNKNOWN) {
+                        PersistentScheduleRegistry.markFailed(
+                            ApplicationHook.appContext, scheduleId, "会员浮球执行失败，详见RPC错误日志", source = source,
+                        )
+                    } else {
+                        PersistentScheduleRegistry.markFired(ApplicationHook.appContext, scheduleId, source = source)
+                    }
+                } catch (t: Throwable) {
+                    Log.printStackTrace(TAG, "会员浮球持久任务执行失败", t)
+                    PersistentScheduleRegistry.markFailed(
+                        ApplicationHook.appContext, scheduleId, t.message ?: t.javaClass.name, source = source,
+                    )
+                } finally {
+                    lease?.close()
+                }
+            }
+        }.onFailure {
+            Log.printStackTrace(TAG, "会员浮球持久任务提交失败", it)
+        }.getOrNull() ?: return false
+        worker.invokeOnCompletion { error ->
+            PersistentScheduleRegistry.markWorkerFailedIfActive(
+                ApplicationHook.appContext,
+                scheduleId,
+                "worker_completed_without_terminal_state:${error?.javaClass?.simpleName ?: "none"}",
+                source = "member_floating_ball:$source",
+            )
+        }
+        return true
     }
 
     private fun isMemberTaskProcessInProgressStatus(status: String): Boolean {
@@ -8575,6 +8742,7 @@ class AntMember : ModelTask() {
     }
 
     companion object {
+        internal const val PERSISTENT_FLOATING_BALL_KIND = "ANT_MEMBER_FLOATING_BALL"
         private val TAG: String = AntMember::class.java.getSimpleName()
         private const val memberTaskBlacklistModule = "会员"
         private const val insuredTaskBlacklistModule = "蚂蚁保"
