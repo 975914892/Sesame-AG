@@ -65,7 +65,6 @@ class AntStall : ModelTask() {
         DAILY_QA,
         INVITE_REGISTER,
         XLIGHT,
-        ELEME_TOKEN,
         OPEN_SHOP,
     }
 
@@ -1573,10 +1572,6 @@ class AntStall : ModelTask() {
                             handleXlightTask(item)
                         }
 
-                        StallTaskCompleteRoute.ELEME_TOKEN -> {
-                            completeElemeVisitTask(item)
-                        }
-
                         StallTaskCompleteRoute.OPEN_SHOP -> {
                             completeOpenShopTask(item)
                         }
@@ -2095,59 +2090,6 @@ class AntStall : ModelTask() {
         }
     }
 
-    private fun completeElemeVisitTask(item: TaskFlowItem): TaskFlowActionResult {
-        val response = AntStallRpcCall.generateToken(item.type)
-        val json =
-            JsonUtil.parseJSONObjectOrNull(response) ?: return emptyStallActionResponse(
-                rpc = "AntStallRpcCall.generateToken",
-                item = item,
-                action = "generateToken",
-                raw = response,
-            )
-        if (!isStallTaskRpcSuccess(json)) {
-            return stallTaskActionFailureResult(
-                response = json,
-                rpc = "AntStallRpcCall.generateToken",
-                detail = stallTaskActionDetail(item, "generateToken"),
-            )
-        }
-
-        val refreshResult = refreshStallTaskState(item.type)
-        return when (refreshResult.state) {
-            StallTaskRefreshState.REWARD_READY -> {
-                TaskFlowActionResult.success(refreshAfterAction = true)
-            }
-
-            StallTaskRefreshState.TERMINAL -> {
-                TaskFlowActionResult.success()
-            }
-
-            StallTaskRefreshState.MISSING,
-            StallTaskRefreshState.TODO,
-            StallTaskRefreshState.UNKNOWN,
-            -> {
-                TaskFlowActionResult.defer(
-                    deferredReason = DeferredReason.STATE_CONFIRMATION,
-                    message = "饿了么 token 已生成，等待服务端状态确认",
-                    rpc = "AntStallRpcCall.taskList",
-                    raw = refreshResult.raw,
-                    detail = stallTaskActionDetail(item, "generateTokenRefresh"),
-                )
-            }
-
-            StallTaskRefreshState.QUERY_FAILED -> {
-                TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.RETRYABLE_RPC,
-                    message = "饿了么 token 已生成，任务状态刷新失败",
-                    rpc = "AntStallRpcCall.taskList",
-                    raw = refreshResult.raw,
-                    detail = stallTaskActionDetail(item, "generateTokenRefresh"),
-                    continueCurrentRoundOnFailure = true,
-                )
-            }
-        }
-    }
-
     private enum class StallTaskRefreshState {
         REWARD_READY,
         TERMINAL,
@@ -2519,7 +2461,6 @@ class AntStall : ModelTask() {
             isDynamicXLightTask(item) -> StallTaskCompleteRoute.XLIGHT
             item.type == STALL_DAILY_QA_TASK_TYPE -> StallTaskCompleteRoute.DAILY_QA
             item.type == STALL_INVITE_REGISTER_TASK_TYPE -> StallTaskCompleteRoute.INVITE_REGISTER
-            item.type == STALL_ELEME_VISIT_TASK_TYPE -> StallTaskCompleteRoute.ELEME_TOKEN
             item.type == STALL_OPEN_SHOP_TASK_TYPE -> StallTaskCompleteRoute.OPEN_SHOP
             stallGamePlayContract(item) != null -> StallTaskCompleteRoute.GAME_PLAY_DURATION
             else -> StallTaskCompleteRoute.FINISH
@@ -3399,7 +3340,6 @@ class AntStall : ModelTask() {
         private const val STALL_INVITE_REGISTER_TASK_TYPE = "ANTSTALL_NORMAL_INVITE_REGISTER"
         private const val STALL_XLIGHT_TASK_TYPE = "ANTSTALL_XLIGHT_VARIABLE_AWARD"
         private const val STALL_XLIGHT_SPACE_CODE = "ANT_FARM_NEW_VILLAGE"
-        private const val STALL_ELEME_VISIT_TASK_TYPE = "ANTSTALL_ELEME_VISIT"
         private const val STALL_OPEN_SHOP_TASK_TYPE = "ANTSTALL_NORMAL_DAILY_OPENSHOP"
         private const val STALL_XLIGHT_PAGE_FROM = "ch_url-https://68687809.h5app.alipay.com/www/game.html"
         private const val STALL_TASK_REFRESH_ATTEMPTS = 3

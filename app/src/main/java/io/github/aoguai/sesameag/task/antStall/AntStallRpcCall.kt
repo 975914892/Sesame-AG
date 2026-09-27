@@ -30,7 +30,6 @@ object AntStallRpcCall {
     private const val METHOD_TASK_LIST = "com.alipay.antstall.task.list"
     private const val METHOD_SIGN_TODAY = "com.alipay.antstall.sign.today"
     private const val METHOD_FINISH_TASK = "com.alipay.antiep.finishTask"
-    private const val METHOD_GENERATE_TOKEN = "com.alipay.antiep.generateToken"
     private const val METHOD_RECEIVE_TASK_AWARD = "com.alipay.antiep.receiveTaskAward"
 
     /**
@@ -165,18 +164,6 @@ object AntStallRpcCall {
             "[{\"outBizNo\":\"$outBizNo\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTSTALL_TASK\",\"source\":\"$IEP_SOURCE\",\"systemType\":\"android\",\"taskType\":\"$taskType\",\"version\":\"$VERSION\"}]"
         )
         return response
-    }
-
-    /**
-     * @brief 生成外跳任务 token
-     * @param taskType 任务类型
-     * @return 响应字符串
-     */
-    fun generateToken(taskType: String): String {
-        return RequestManager.requestString(
-            METHOD_GENERATE_TOKEN,
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTSTALL_TASK\",\"source\":\"$IEP_SOURCE\",\"systemType\":\"android\",\"taskType\":\"$taskType\",\"version\":\"$VERSION\"}]"
-        )
     }
 
     /**

@@ -240,6 +240,7 @@ private val stallDefaultBlacklist =
         "ANTSTALL_TASK_xcjmjyjuankuan2026|帮乡村姐妹家乡就业",
         "ANTSTALL_TASK_kuaishouhuanduan|去快手逛一逛",
         "ANTSTALL_TASK_taojinbihuanduan|进入淘宝芭芭农场领免费水果",
+        "ANTSTALL_ELEME_VISIT|去饿了么果园逛一逛", // 外跳任务，需真实到饿了么果园页面浏览上报，无自动闭环（generateToken后服务端不翻转状态）
         "ANTSTALL_P2P_DAILY_SHARER|邀请好友助力",
         "ANTSTALL_TASK_XCXYX_langmancanting", // 需要完成游戏订单，普通finishTask返回400000040
         "ANTSTALL_TASK_XCXYX_qingyunjue", // 需要游戏内闯关事件，普通finishTask返回400000040
