@@ -1827,18 +1827,32 @@ class AntFarm : ModelTask() {
         spuId: String,
         spuName: String,
         minPrice: Int,
+        moneyPrice: Int,
+        outSpuId: String,
         controlTag: String,
         itemStatusList: JSONArray?
     ): ExchangeItem {
         val statusText = formatFarmPropStatusList(itemStatusList)
         val blocked = hasBlockingFarmPropStatus(itemStatusList)
-        val safety = if (blocked) ExchangeSafety.UNAVAILABLE else ExchangeSafety.AUTO
-        val safetyReason = if (blocked) statusText else ""
+        val mixedPayment = moneyPrice > 0 || outSpuId.isNotBlank()
+        val safety = when {
+            blocked -> ExchangeSafety.UNAVAILABLE
+            mixedPayment -> ExchangeSafety.LOG_ONLY
+            else -> ExchangeSafety.AUTO
+        }
+        val safetyReason = when {
+            blocked -> statusText
+            mixedPayment -> "乐园币+现金混合支付"
+            else -> ""
+        }
         val effectTags = ExchangeEffectCatalog.tagsFor(ExchangeEffectCatalog.SOURCE_FARM_PARADISE, spuName)
         return ExchangeItem(
             id = spuId,
             name = spuName.ifBlank { spuId },
-            cost = ExchangeCost(pointText = "${minPrice}乐园币"),
+            cost = ExchangeCost(
+                pointText = "${minPrice}乐园币",
+                cashText = if (moneyPrice > 0) "${String.format(Locale.US, "%.2f", moneyPrice / 100.0)}元" else ""
+            ),
             limit = ExchangeLimit(statusText = listOf(controlTag, statusText).filter { it.isNotBlank() }.joinToString("、")),
             safety = safety,
             safetyReason = safetyReason,
@@ -1920,7 +1934,7 @@ class AntFarm : ModelTask() {
                     continue
                 }
                 val itemStatusList = mallItemInfo.optJSONArray("itemStatusList")
-                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName.ifBlank { spuId }, minPrice, controlTag, itemStatusList)
+                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName.ifBlank { spuId }, minPrice, mallItemInfo.optInt("moneyPrice"), mallItemInfo.optString("outSpuId"), controlTag, itemStatusList)
                 benefitMap.add(spuId, exchangeItem.displayName())
                 rows.add(exchangeItem.toOptionRow())
             }
@@ -1968,6 +1982,8 @@ class AntFarm : ModelTask() {
                     spuId = mallItemInfo.optString("spuId"),
                     spuName = mallItemInfo.optString("spuName"),
                     minPrice = mallItemInfo.optInt("minPrice"),
+                    moneyPrice = mallItemInfo.optInt("moneyPrice"),
+                    outSpuId = mallItemInfo.optString("outSpuId"),
                     controlTag = mallItemInfo.optString("controlTag"),
                     itemStatusList = mallItemInfo.optJSONArray("itemStatusList")
                 )
@@ -2036,7 +2052,7 @@ class AntFarm : ModelTask() {
                 val controlTag = mallItemInfo.getString("controlTag")
                 val spuId = mallItemInfo.getString("spuId")
                 val itemStatusList = mallItemInfo.optJSONArray("itemStatusList")
-                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName, minPrice, controlTag, itemStatusList)
+                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName, minPrice, mallItemInfo.optInt("moneyPrice"), mallItemInfo.optString("outSpuId"), controlTag, itemStatusList)
                 oderInfo = exchangeItem.displayName()
                 IdMapManager.getInstance(ParadiseCoinBenefitIdMap::class.java)
                     .add(spuId, oderInfo)

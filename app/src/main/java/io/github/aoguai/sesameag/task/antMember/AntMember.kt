@@ -1316,23 +1316,18 @@ class AntMember : ModelTask() {
             ?.takeIf { it.isNotBlank() }
             ?.let { statusParts.add(it) }
 
-        val autoBenefitMark = benefitMark.equals("ONE_PARTY_VIRTUAL_ITEM", ignoreCase = true) &&
-            itemSource.equals("PROMO", ignoreCase = true)
-        val unsafeByMark = !autoBenefitMark
         val (baseSafety, baseReason) = ExchangeSafetyRules.classify(
             cashValues = listOf(channelPrice, yuan),
-            textValues = listOf(name, benefitMark, actionUrl, itemSource, extInfo?.toString(), linkInfo?.toString()),
+            textValues = listOf(actionUrl, extInfo?.toString(), linkInfo?.toString()),
             defaultReason = "涉及实付或下单链路"
         )
         val safety = when {
             statusParts.any { it == "服务端不可兑" || it == "库存不足" } -> ExchangeSafety.UNAVAILABLE
-            unsafeByMark -> ExchangeSafety.LOG_ONLY
             baseSafety == ExchangeSafety.LOG_ONLY -> ExchangeSafety.LOG_ONLY
             else -> ExchangeSafety.AUTO
         }
         val safetyReason = when {
             safety == ExchangeSafety.UNAVAILABLE -> statusParts.firstOrNull { it == "服务端不可兑" || it == "库存不足" }.orEmpty()
-            unsafeByMark -> "非纯积分虚拟道具"
             baseReason.isNotEmpty() -> baseReason
             else -> ""
         }
