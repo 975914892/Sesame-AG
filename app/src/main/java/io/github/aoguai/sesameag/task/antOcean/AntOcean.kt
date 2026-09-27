@@ -2825,8 +2825,8 @@ class AntOcean : ModelTask() {
             }
 
             code == "400000040" -> {
-                // 仅当前动作被明确拒绝，不据此永久封禁任务及领奖。
-                TaskRpcFailureType.NON_RETRYABLE_INVALID
+                // 当前任务类型不支持该RPC完成，自动加入黑名单；领奖阶段不受黑名单影响。
+                TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
             }
 
             code in setOf("20020012", "TASK_ID_INVALID", "ILLEGAL_ARGUMENT", "PROMISE_TEMPLATE_NOT_EXIST") -> {

@@ -4260,6 +4260,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         val code = extractForestTaskFailureCode(response)
         val message = extractForestTaskFailureMessage(response)
         return when {
+            code == "400000008" || // 完成任务幂等id重复，服务端已受理该次完成
             isForestTaskAlreadyHandled(response) ||
                 containsAnyForest(message, "已领取", "已经领取", "重复领取", "重复领奖", "重复完成", "已完成", "任务已完结", "任务已结束") ->
                 TaskRpcFailureType.TERMINAL_DONE

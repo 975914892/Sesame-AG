@@ -52,7 +52,7 @@ object AntForestRpcCall {
     private var TASK_LIST_EXT_VERSION = "20260109"
     private var TAKE_LOOK_VERSION = "20260107"
     private const val COLLECT_ENERGY_VERSION = "20250326"
-    private const val TAKE_LOOK_COMBINE_BIZ_VERSION = "20250108"
+    private const val TAKE_LOOK_COMBINE_BIZ_VERSION = "20260616"
 
     private enum class ForestRpcScene {
         HOME_TASK_LIST,

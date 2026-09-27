@@ -43,12 +43,12 @@ private val sesameAlchemyDefaultBlacklist =
         "hjwf_xiangjiangshikaipao_renwu", // 游戏事件不能由pushActivity完成，返回ILLEGAL_ARGUMENT
         "hjwf_zcylt_chongzhi", // 真实充值不能由pushActivity完成，返回ILLEGAL_ARGUMENT
         "hjwf_langmancanting_renwu", // 完成3个订单的游戏事件，pushActivity返回ILLEGAL_ARGUMENT
+        "玩游戏赢最高8888元红包", // 动态taskId每期变化，需游戏内事件，ILLEGAL_ARGUMENT promiseActivityExtCheck
     )
 
 private val orchardDefaultBlacklist =
     setOf(
         // 芭芭农场
-        "ORCHARD_NORMAL_KUAISHOU_MAX", // 逛一逛快手
         "ORCHARD_NORMAL_DIAOYU1", // 钓鱼1次
         "ZHUFANG3IN1", // 添加农场小组件并访问
         "70000|逛好物最高得1500肥料", // XLight广告流量风控，缺少稳定自动闭环
@@ -60,9 +60,7 @@ private val orchardDefaultBlacklist =
         "ORCHARD_NORMAL_AQ_XIAZAI", // 下载蚂蚁阿福看健康攻略
         "ncflzhrw51", // 去游戏中心抢金条：不支持rpc调用
         "babafarm_cjmk_xdujdd15", // 去游戏中心玩游戏：不支持rpc调用
-        "LINGHUOTIAOKONG", // 逛一逛新浪微博
         "ANTFARM_ORCHARD_NORMAL_YITAO", // 逛一逛一淘
-        "ANTFARM_ORCHARD_NORMAL_CAINIAO_DUAN", // 菜鸟任务 finishTask 返回 400000040
         "ORCHARD_NCLY_ZH_MSQYJ_V3", // 美食趣味记依赖真实游戏事件
         "ORCHARD_NCLY_ZH_DDPLY_V3", // 对对碰乐园依赖真实游戏事件
         "ORCHARD_NCLY_ZH_JHWG_V3",
@@ -77,7 +75,6 @@ private val orchardDefaultBlacklist =
         "ORCHARD_NORMAL_SHANGOUMIANDAN|逛一逛淘宝闪购", // finishTask 返回 400000040，不支持rpc调用
         "ORCHARD_NORMAL_TAOBAOTAOLIPAI_VISIT|逛一逛淘宝拍照", // 不支持rpc调用
         "ORCHARD_NORMAL_TAOBAO26_618|去淘金币赢20亿", // 不支持rpc调用，缺少稳定完成RPC闭环
-        "ORCHARD_NORMAL_WAIMAIMIANDAN", // 逛一逛闪购外卖
         "ORCHARD_NORMAL_BAIDU_DUO", // 去百度浏览资讯
         "ORCHARD_NORMAL_XIANXIAZHIFU100", // 到店支付1笔得100肥
         "ANTFARM_ORCHARD_P2P_SHARER", // 分享给好友
