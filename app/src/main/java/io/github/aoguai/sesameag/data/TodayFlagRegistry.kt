@@ -75,6 +75,7 @@ object TodayFlagRegistry {
         binding("AntMember", "memberPointExchangeBenefit", "memberPointExchangeBenefitList", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE))),
         binding("AntMember", "enableGameCenter", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_GAME_CENTER_DONE))),
         binding("AntMember", "beanSignIn", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_BEAN_SIGN_DONE))),
+        binding("AntMember", "beanDrawPrize", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE))),
         binding("AntMember", "collectInsuredGold", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_INSURED_GOLD_DONE), prefix(StatusFlags.FLAG_ANTMEMBER_INSURED_TASK_CENTER_DONE_PREFIX))),
         binding("AntMember", "merchantSign", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_MERCHANT_SIGN_DONE))),
         binding("AntMember", "merchantMoreTask", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_MERCHANT_MORE_TASK_DONE))),

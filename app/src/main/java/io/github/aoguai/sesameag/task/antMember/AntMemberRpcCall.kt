@@ -1092,6 +1092,36 @@ object AntMemberRpcCall {
         )
 
     @JvmStatic
+    fun beanCampConsult(planId: String): String {
+        val args =
+            JSONObject().apply {
+                put("planId", planId)
+            }
+        return RequestManager.requestString(
+            "com.alipay.insmarketingbff.bean.campConsult",
+            JSONArray().put(args).toString(),
+        )
+    }
+
+    @JvmStatic
+    fun beanTriggerDrawPrize(
+        campId: String,
+        planId: String,
+        lastDrawTime: Long,
+    ): String {
+        val args =
+            JSONObject().apply {
+                put("campId", campId)
+                put("lastDrawTime", lastDrawTime)
+                put("planId", planId)
+            }
+        return RequestManager.requestString(
+            "com.alipay.insmarketingbff.bean.triggerDrawPrize",
+            JSONArray().put(args).toString(),
+        )
+    }
+
+    @JvmStatic
     fun queryGuardianGradeAwards(): String {
         val args =
             JSONObject().apply {

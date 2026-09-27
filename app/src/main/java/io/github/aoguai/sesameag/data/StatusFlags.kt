@@ -150,6 +150,9 @@ object StatusFlags {
     /** 今日安心豆签到与守护者奖励是否已处理 */
     const val FLAG_ANTMEMBER_BEAN_SIGN_DONE = "AntMember::beanSignInDone"
 
+    /** 今日安心豆抽奖是否已处理 */
+    const val FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE = "AntMember::beanDrawPrizeDone"
+
     /** 今日蚂蚁保保障金是否已处理 */
     const val FLAG_ANTMEMBER_INSURED_GOLD_DONE = "AntMember::insuredGoldDone"
 

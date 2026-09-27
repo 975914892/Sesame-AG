@@ -193,6 +193,10 @@ object ModelFieldTodayStateResolver {
                 flag(StatusFlags.FLAG_ANTMEMBER_BEAN_SIGN_DONE, "今日安心豆签到已处理")
             }
 
+            "AntMember.beanDrawPrize" -> {
+                flag(StatusFlags.FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE, "今日安心豆抽奖已处理")
+            }
+
             "AntMember.collectInsuredGold" -> {
                 flag(StatusFlags.FLAG_ANTMEMBER_INSURED_GOLD_DONE, "今日蚂蚁保保障金已处理")
             }

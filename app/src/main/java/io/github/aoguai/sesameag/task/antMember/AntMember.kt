@@ -145,6 +145,7 @@ class AntMember : ModelTask() {
     internal var merchantMoreTask: BooleanModelField? = null
     internal var beanSignIn: BooleanModelField? = null
     internal var beanExchangeRight: BooleanModelField? = null
+    internal var beanDrawPrize: BooleanModelField? = null
     private var beanExchangeRightList: SelectModelField? = null
 
 
@@ -437,6 +438,10 @@ class AntMember : ModelTask() {
             BooleanModelField(
                 "beanExchangeRight", "安心豆 | 兑换权益", false
             ).withDesc("按“安心豆 | 兑换列表”刷新并处理安心豆权益；涉及下单或外跳的权益只记录提醒。").also { beanExchangeRight = it })
+        modelFields.addField(
+            BooleanModelField(
+                "beanDrawPrize", "安心豆 | 抽奖", false
+            ).withDesc("查询并参与安心豆抽奖计划，每次消耗 1 豆，抽得现金红包自动到账。").also { beanDrawPrize = it })
         modelFields.addField(
             SelectModelField(
                 "beanExchangeRightList",
@@ -6231,10 +6236,9 @@ class AntMember : ModelTask() {
                 failureType = consult.failureType, message = "游戏浮球查询失败", raw = consult.raw,
                 rpc = "GameCenterPlayRpcCall.consultP2eFloatingBall",
             )
-            val details = consult.response?.optJSONObject("data")?.optJSONObject("floatingBallDetails")
-            val typeList = details?.optJSONArray("typeList")
+            val typeList = consult.response?.optJSONObject("data")?.optJSONArray("floatingBallTypeList")
             val types = typeList?.let { list ->
-                (0 until list.length()).mapNotNull { list.optJSONObject(it)?.optString("type") }.filter { it.isNotBlank() }
+                (0 until list.length()).mapNotNull { list.optString(it).takeIf { type -> type.isNotBlank() } }
             }.orEmpty()
             val duration = consult.timeSeconds ?: 0
             if (types.isEmpty() || duration <= 0) {
@@ -7007,6 +7011,56 @@ class AntMember : ModelTask() {
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "beanSignIn err:", t)
+        }
+    }
+
+    internal fun beanDrawPrize() {
+        try {
+            if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE)) {
+                Log.member("安心豆🎰[今日已处理，跳过]")
+                return
+            }
+
+            try {
+                val consultStr = AntMemberRpcCall.beanCampConsult(BEAN_DRAW_PLAN_ID)
+                var jo = JSONObject(consultStr)
+                if (!ResChecker.checkRes(TAG, jo)) {
+                    Log.member(jo.toString())
+                    return
+                }
+
+                val consultResult = jo.optJSONObject("result")
+                if (consultResult == null) {
+                    Log.error(TAG, "安心豆🎰[抽奖咨询缺少result]#$consultStr")
+                    return
+                }
+
+                val campId = consultResult.optString("campId")
+                if (!consultResult.optBoolean("consultResult", false) || campId.isBlank()) {
+                    Log.member("安心豆🎰[暂无可参与抽奖]")
+                    setFlagToday(StatusFlags.FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE)
+                    return
+                }
+
+                val drawStr = AntMemberRpcCall.beanTriggerDrawPrize(campId, BEAN_DRAW_PLAN_ID, System.currentTimeMillis())
+                jo = JSONObject(drawStr)
+                if (ResChecker.checkRes(TAG, jo)) {
+                    val drawResult = jo.optJSONObject("result")
+                    val prizeAmount = drawResult?.optString("prizeAmount") ?: ""
+                    if (drawResult?.optBoolean("triggerResult", false) == true && prizeAmount.isNotBlank()) {
+                        Log.member("安心豆🎰[抽奖获得${prizeAmount}元]")
+                    } else {
+                        Log.member("安心豆🎰[抽奖未中奖]")
+                    }
+                    setFlagToday(StatusFlags.FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE)
+                } else {
+                    Log.member(jo.toString())
+                }
+            } catch (e: NullPointerException) {
+                Log.printStackTrace(TAG, "安心豆🎰[RPC桥接失败]#可能是RpcBridge未初始化", e)
+            }
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "beanDrawPrize err:", t)
         }
     }
 
@@ -8537,6 +8591,7 @@ class AntMember : ModelTask() {
         private const val MEMBER_TASK_REPEAT_LIMIT = 6
         private const val MEMBER_CALL_APP_VERIFY_RETRY_LIMIT = 5
         private const val MEMBER_CALL_APP_VERIFY_SLEEP_MS = 2000L
+        private const val BEAN_DRAW_PLAN_ID = "INSP29990111"
 
 
         /**
