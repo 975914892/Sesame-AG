@@ -18,6 +18,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
@@ -895,6 +896,7 @@ class ChouChouLe {
     }
 
     fun refreshIpChouChouLeExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
+        ExchangeFetchPacing.domainStartDelay()
         val activity = queryActiveIpDrawActivity() ?: throw IllegalStateException("未获取到有效的IP抽抽乐活动")
         val snapshot = queryIpDrawMallSnapshot(activity) ?: throw IllegalStateException("未获取到IP抽抽乐商店快照")
         syncIpDrawShopSnapshot(snapshot)
@@ -993,6 +995,7 @@ class ChouChouLe {
                 break
             }
             startIndex = nextStartIndex
+            ExchangeFetchPacing.pageTurnDelay()
         }
 
         if (pageCount >= maxPages) {

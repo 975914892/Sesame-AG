@@ -3,9 +3,11 @@ package io.github.aoguai.sesameag.task.exchange
 import com.fasterxml.jackson.core.type.TypeReference
 import io.github.aoguai.sesameag.entity.MapperEntity
 import io.github.aoguai.sesameag.util.Files
+import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import org.json.JSONObject
+import kotlin.random.Random
 
 enum class ExchangeSafety {
     AUTO,
@@ -332,6 +334,27 @@ class ExchangeOptionRow() : MapperEntity() {
     }
 }
 
+object ExchangeFetchPacing {
+    /**
+     * 设置页快速展示窗口：窗口内的重复展开直接用缓存，不再全量拉取兑换列表
+     */
+    const val SETTINGS_FRESH_TTL_MS: Long = 10 * 60 * 1000L
+
+    /**
+     * 兑换列表翻页间隔：固定基数加随机抖动，避免匀速翻页节奏
+     */
+    fun pageTurnDelay(baseMillis: Long = 1000L, jitterMillis: Long = 1200L) {
+        GlobalThreadPools.sleepCompat(baseMillis + Random.nextLong(0, jitterMillis + 1))
+    }
+
+    /**
+     * 兑换域刷新启动错开：多域同批刷新时打乱各域起跑时刻
+     */
+    fun domainStartDelay() {
+        GlobalThreadPools.sleepCompat(800L + Random.nextLong(0, 1701L))
+    }
+}
+
 object ExchangeOptionsCache {
     private const val TAG = "ExchangeOptionsCache"
     private const val FILE_PREFIX = "exchange_options_"
@@ -374,6 +397,41 @@ object ExchangeOptionsCache {
 
     fun loadForSettingsCache(userId: String?, target: String): List<ExchangeOptionRow> {
         return load(userId, target).map { it.asLogOnlyCacheRow(CACHE_REASON) }
+    }
+
+    /**
+     * 读取 TTL 内的新鲜缓存供设置页快速展示，超时或缺失返回空列表
+     */
+    fun loadFreshForSettingsCache(userId: String?, target: String, ttlMillis: Long): List<ExchangeOptionRow> {
+        val normalizedUserId = userId?.trim().orEmpty()
+        if (normalizedUserId.isEmpty()) {
+            return emptyList()
+        }
+        return runCatching {
+            val file = Files.getTargetFileofUser(normalizedUserId, fileName(target)) ?: return emptyList()
+            if (!file.exists() || System.currentTimeMillis() - file.lastModified() > ttlMillis) {
+                return emptyList()
+            }
+            loadForSettingsCache(normalizedUserId, target)
+        }.onFailure {
+            Log.printStackTrace(TAG, "loadFresh err:", it)
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 判断指定域的缓存是否在 TTL 内新鲜，不读取内容
+     */
+    fun isFresh(userId: String?, target: String, ttlMillis: Long): Boolean {
+        val normalizedUserId = userId?.trim().orEmpty()
+        if (normalizedUserId.isEmpty()) {
+            return false
+        }
+        return runCatching {
+            val file = Files.getTargetFileofUser(normalizedUserId, fileName(target)) ?: return false
+            file.exists() && System.currentTimeMillis() - file.lastModified() <= ttlMillis
+        }.onFailure {
+            Log.printStackTrace(TAG, "isFresh err:", it)
+        }.getOrDefault(false)
     }
 
     private fun fileName(target: String): String {

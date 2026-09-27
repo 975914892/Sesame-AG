@@ -26,6 +26,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeCost
 import io.github.aoguai.sesameag.task.exchange.ExchangeDisplayMeta
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
@@ -144,6 +145,15 @@ class MyBankWelfare : ModelTask() {
     }
 
     private fun refreshMyBankWelfareExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.mybank("${BUSINESS_NAME}🎐设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -195,6 +205,7 @@ class MyBankWelfare : ModelTask() {
 
     private fun refreshMyBankWelfareExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         try {
+            ExchangeFetchPacing.domainStartDelay()
             val userId = UserMap.currentUid
             val exchangeData = queryMyBankWelfareExchangeData()
             val benefitMap = IdMapManager.getInstance(MyBankWelfareBenefitMap::class.java)
@@ -245,6 +256,7 @@ class MyBankWelfare : ModelTask() {
                 break
             }
             pageNum++
+            ExchangeFetchPacing.pageTurnDelay()
         }
     }
 

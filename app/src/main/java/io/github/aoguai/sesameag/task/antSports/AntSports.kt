@@ -43,6 +43,7 @@ import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
@@ -676,6 +677,7 @@ class AntSports : ModelTask() {
 
     private fun refreshSportsEnergyExchangeCandidatesFromRpc(throwOnError: Boolean = false): List<SportsEnergyExchangeCandidate> {
         try {
+            ExchangeFetchPacing.domainStartDelay()
             val cityCode = LocationHelper.requireCityCode()
             val categoryTypes = linkedSetOf("")
             runCatching {
@@ -733,6 +735,7 @@ class AntSports : ModelTask() {
                     }
                     adSession = data.optString("adSession", adSession)
                     pageNum++
+                    ExchangeFetchPacing.pageTurnDelay()
                 }
             }
             if (candidateMap.isEmpty()) {
@@ -763,6 +766,15 @@ class AntSports : ModelTask() {
     }
 
     private fun refreshSportsEnergyExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.sports("运动能量兑换🎁设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -817,6 +829,10 @@ class AntSports : ModelTask() {
                 ?.filter { it.isNotEmpty() }
                 ?.toSet()
                 ?: emptySet()
+            if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
+                Log.sports("运动能量兑换🎁TTL内跳过全量列表拉取")
+                return
+            }
             val candidates = refreshSportsEnergyExchangeCandidatesFromRpc()
             if (candidates.isEmpty()) {
                 return
@@ -863,6 +879,10 @@ class AntSports : ModelTask() {
             ?.toSet()
             ?: emptySet()
         if (selectedIds.isEmpty()) {
+            return ExchangeReplenishResult.NOT_SELECTED
+        }
+        if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
+            Log.sports("运动能量兑换🎁TTL内跳过补兑列表拉取#$reason")
             return ExchangeReplenishResult.NOT_SELECTED
         }
         return runCatching {

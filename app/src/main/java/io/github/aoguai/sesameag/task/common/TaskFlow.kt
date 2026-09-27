@@ -3,11 +3,13 @@ package io.github.aoguai.sesameag.task.common
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.Status.TodayFlagState
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import kotlin.math.max
+import kotlin.random.Random
 
 enum class TaskRpcFailureType {
     TERMINAL_DONE,
@@ -351,6 +353,7 @@ class TaskFlowEngine(
     private companion object {
         const val MAX_DYNAMIC_ROUND_LIMIT = 64
         const val DYNAMIC_ROUND_LIMIT_EXTRA = 6
+        const val ROUND_SLEEP_JITTER_MS = 1500L
     }
 
     fun run(): TaskFlowRunResult {
@@ -371,6 +374,10 @@ class TaskFlowEngine(
         var failureStoppedActions = false
 
         while (round <= roundLimit) {
+            if (round > 1) {
+                // 轮间停顿：基础间隔叠加随机抖动，避免匀速连续回查形成机器节奏
+                CoroutineUtils.sleepCompat(roundSleepMs + Random.nextLong(0, ROUND_SLEEP_JITTER_MS))
+            }
             if (adapter.isFlowHandledToday()) {
                 adapter.onFlowHandledToday()
                 return finishRunResult(

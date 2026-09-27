@@ -10,6 +10,7 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.maps.VitalityRewardsMap
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.util.ResChecker
 
 /**
@@ -76,6 +77,7 @@ object Vitality {
                     break
                 }
                 startIndex += pageSize
+                ExchangeFetchPacing.pageTurnDelay()
             }
             if (!loadedAny) {
                 Log.error(TAG, "活力兑换🍃初始化失败！")

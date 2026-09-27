@@ -57,6 +57,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeEffectTag
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
@@ -1746,6 +1747,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun refreshVitalityExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.forest("活力兑换🍃设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -1797,6 +1807,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
     private fun refreshVitalityExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         return runCatching {
+            ExchangeFetchPacing.domainStartDelay()
             Vitality.initVitality("")
             val rows = buildVitalityExchangeOptionRows()
             ExchangeOptionsCache.save(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, rows)

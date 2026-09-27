@@ -38,6 +38,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
@@ -6122,6 +6123,16 @@ class AntSesameCredit : ModelTask() {
      * 仿照会员积分兑换逻辑：遍历列表更新Map，同时匹配用户设置进行兑换
      */
     private fun refreshSesameGrainExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows =
+            ExchangeOptionsCache.loadFreshForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN,
+                ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS,
+            )
+        if (freshRows.isNotEmpty()) {
+            Log.sesame("芝麻粒兑换🛒设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows =
                 ExchangeOptionsCache.loadForSettingsCache(
@@ -6175,6 +6186,7 @@ class AntSesameCredit : ModelTask() {
 
     private fun refreshSesameGrainExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         try {
+            ExchangeFetchPacing.domainStartDelay()
             val userId = UserMap.currentUid
             val maxPage = 10
             val pageSize = 20
@@ -6229,6 +6241,9 @@ class AntSesameCredit : ModelTask() {
                     }
                     hasNextPage = data.optBoolean("hasNext", false)
                     currentPage++
+                    if (hasNextPage && currentPage <= maxPage) {
+                        ExchangeFetchPacing.pageTurnDelay()
+                    }
                 }
             }
             sesameGiftMap.save(userId)

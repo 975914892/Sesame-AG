@@ -671,7 +671,9 @@ class AriverRpcBridge : RpcBridge {
                     } else {
                         -1L
                     }
-                if (captureSucceeded && !rpcEntity.hasError && !captureAttemptResponseRecorded) {
+                if (captureAttemptResponseRecorded) {
+                    // attempt 层已完整记录该请求响应，避免 finally 重复记录或误报为 null
+                } else if (captureSucceeded && !rpcEntity.hasError) {
                     RpcTrafficCapture.recordModuleResponse(
                         captureMethodName,
                         rpcEntity.responseString,

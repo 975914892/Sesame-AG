@@ -57,6 +57,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
@@ -1762,6 +1763,15 @@ class AntFarm : ModelTask() {
 
     private fun refreshIpChouChouLeExchangeOptionsForSettings(): List<MapperEntity> {
         val legacyRows = AntFarmIPChouChouLeBenefit.getList()
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.farm("IP抽抽乐商店💸设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -1868,6 +1878,15 @@ class AntFarm : ModelTask() {
     }
 
     private fun refreshParadiseCoinExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.farm("小鸡乐园币💸设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -1916,6 +1935,7 @@ class AntFarm : ModelTask() {
 
     private fun refreshParadiseCoinExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         try {
+            ExchangeFetchPacing.domainStartDelay()
             val jo = JSONObject(AntFarmRpcCall.getMallHome())
             if (!ResChecker.checkRes(TAG, jo)) {
                 Log.error(TAG, "小鸡乐园币💸[设置页刷新权益列表失败]")
