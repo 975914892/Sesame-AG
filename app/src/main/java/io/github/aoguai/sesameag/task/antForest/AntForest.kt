@@ -1,7 +1,6 @@
 package io.github.aoguai.sesameag.task.antForest
 
 import android.annotation.SuppressLint
-import io.github.aoguai.sesameag.data.RuntimeInfo
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.data.Statistics
@@ -71,7 +70,6 @@ import io.github.aoguai.sesameag.util.FriendGuard
 import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.Notify.updateRunningLastExec
-import io.github.aoguai.sesameag.util.Notify.updateRunningStatus
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.TimeCounter
@@ -851,17 +849,6 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             "任务开始时输出当前森林背包道具清单。"
         ).also { showBagList = it })
         return modelFields
-    }
-
-    override fun check(): Boolean {
-        if (!super.check()) return false
-        val currentTime = System.currentTimeMillis()
-        val forestPauseTime = RuntimeInfo.getInstance().getLong(RuntimeInfo.RuntimeInfoKey.ForestPauseTime)
-        if (forestPauseTime > currentTime) {
-            Log.forest(getName() + "任务-异常等待中，暂不执行检测！")
-            return false
-        }
-        return true
     }
 
     /**
@@ -3511,9 +3498,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         if (waitWhenExceptionMs > 0) {
                             val waitTime =
                                 System.currentTimeMillis() + waitWhenExceptionMs
-                            RuntimeInfo.getInstance()
-                                .put(RuntimeInfo.RuntimeInfoKey.ForestPauseTime, waitTime)
-                            updateRunningStatus("异常")
+                            pauseSelfUntil(waitTime)
                             Log.forest("触发异常,等待至" + TimeUtil.getCommonDate(waitTime))
                             errorWait = true
                             return@Runnable

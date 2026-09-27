@@ -8,8 +8,6 @@ import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.NetworkUtils
-import io.github.aoguai.sesameag.util.Notify
-import io.github.aoguai.sesameag.util.TimeUtil
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -132,12 +130,7 @@ object RequestManager {
                 "rpc_error_threshold",
                 "method=$method current=$currentCount threshold=$maxCount reason=$reason"
             )
-            // 2. 发送通知 (根据用户配置)
-            if (BaseModel.errNotify.value == true) {
-                val msg = "${TimeUtil.getTimeStr()} | 网络异常次数超过阈值[$maxCount]"
-                Notify.sendAlert(msg, "RPC 连续失败，脚本已暂停")
-            }
-            // 3. 立即尝试一次恢复
+            // 立即尝试一次恢复（告警由 enterOffline 单点发送）
             handleOfflineRecovery()
         }
     }

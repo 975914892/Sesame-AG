@@ -204,9 +204,6 @@ class AriverRpcBridge : RpcBridge {
     private fun handleAuthLikeError(
         rpcEntity: RpcEntity,
         methodName: String?,
-        statusText: String,
-        notifyTitle: String,
-        response: String?,
         reason: String,
         offlineDetail: String = reason,
         count: Int,
@@ -214,18 +211,7 @@ class AriverRpcBridge : RpcBridge {
         maxErrorCount.set(0)
         val wasOffline = io.github.aoguai.sesameag.hook.ApplicationHookConstants.offline
         val cooldownMs = offlineCooldownMs()
-        if (!wasOffline) {
-            Notify.updateRunningStatus(statusText)
-            if (BaseModel.errNotify.value == true &&
-                shouldNotifyNow(lastErrorNotifyAtMs, errorNotifyIntervalMs)
-            ) {
-                Notify.sendAlert(
-                    "${TimeUtil.getTimeStr()} | $notifyTitle",
-                    response.orEmpty(),
-                )
-            }
-        }
-
+        // 常驻标题与离线告警统一由 enterOffline 单点驱动，此处不再重复设置/发送
         if (!wasOffline) {
             io.github.aoguai.sesameag.hook.ApplicationHookConstants.enterOffline(
                 cooldownMs,
@@ -588,9 +574,6 @@ class AriverRpcBridge : RpcBridge {
                             return handleAuthLikeError(
                                 rpcEntity = rpcEntity,
                                 methodName = methodName,
-                                statusText = "检测到访问受限，已进入离线模式",
-                                notifyTitle = "检测到访问受限，已进入离线模式",
-                                response = response,
                                 reason = "访问受限: $errorCode/$errorMessage",
                                 offlineDetail = buildOfflineDetail(methodName, errorCode, errorMessage, "访问受限"),
                                 count = count,
@@ -601,9 +584,6 @@ class AriverRpcBridge : RpcBridge {
                             return handleAuthLikeError(
                                 rpcEntity = rpcEntity,
                                 methodName = methodName,
-                                statusText = "登录超时",
-                                notifyTitle = "登录超时",
-                                response = response,
                                 reason = "登录超时: $errorCode/$errorMessage",
                                 count = count,
                             )
@@ -614,22 +594,17 @@ class AriverRpcBridge : RpcBridge {
                             if (!io.github.aoguai.sesameag.hook.ApplicationHookConstants.offline) {
                                 var enteredOffline = false
                                 if (currentErrorCount > maxErrorThreshold) {
+                                    // 常驻标题与告警统一由 enterOffline 单点驱动
                                     io.github.aoguai.sesameag.hook.ApplicationHookConstants.enterOffline(
                                         offlineCooldownMs(),
                                         "network_error_threshold",
                                         "current=$currentErrorCount threshold=$maxErrorThreshold",
                                     )
                                     enteredOffline = true
-                                    Notify.updateRunningStatus("网络连接异常，已进入离线模式")
-                                    if (BaseModel.errNotify.value == true) {
-                                        Notify.sendAlert(
-                                            "${TimeUtil.getTimeStr()} | 网络异常次数超过阈值[$maxErrorThreshold]",
-                                            response,
-                                        )
-                                    }
                                 }
 
-                                if (BaseModel.errNotify.value == true &&
+                                if (!enteredOffline &&
+                                    BaseModel.errNotify.value == true &&
                                     shouldNotifyNow(lastErrorNotifyAtMs, errorNotifyIntervalMs)
                                 ) {
                                     Notify.sendAlert(

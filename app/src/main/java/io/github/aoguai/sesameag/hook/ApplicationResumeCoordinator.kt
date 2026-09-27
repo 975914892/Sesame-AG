@@ -5,6 +5,7 @@ import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.task.ModelTask.Companion.stopAllTask
 import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Log.record
+import io.github.aoguai.sesameag.util.Notify
 import io.github.aoguai.sesameag.util.Notify.updateRunningStatus
 
 internal object ApplicationResumeCoordinator {
@@ -98,6 +99,8 @@ internal object ApplicationResumeCoordinator {
     }
 
     fun tryRecoverOffline(resumeSource: String): Boolean {
+        // 用户回到目标应用的时机同时探测通知权限补授权，自愈常驻通知
+        Notify.ensureStarted()
         if (!ApplicationHookConstants.isOffline()) return false
 
         val reason = ApplicationHookConstants.offlineReason

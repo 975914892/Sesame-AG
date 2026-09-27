@@ -249,6 +249,7 @@ object ApplicationHookConstants {
                     when (reason) {
                         "auth_like" -> "检测到风控/验证，已暂停"
                         "rpc_error_threshold" -> "RPC 连续失败，已暂停"
+                        "network_error_threshold" -> "网络异常次数超过阈值，已暂停"
                         else -> "模块已进入离线，已暂停"
                     }
                 runCatching {
