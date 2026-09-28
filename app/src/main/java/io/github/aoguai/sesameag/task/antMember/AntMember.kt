@@ -32,6 +32,8 @@ import io.github.aoguai.sesameag.model.modelFieldExt.SelectModelField
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antOrchard.UrlUtil
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
@@ -118,16 +120,7 @@ private fun stopMemberCoreTasksForRpcRisk(source: String, code: String, message:
     if (!isMemberMarketingRpcRisk(source, code, message)) {
         return false
     }
-    val riskStopFlag = StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY
-    val wasStopped = hasFlagToday(riskStopFlag)
-    setFlagToday(riskStopFlag)
-    if (!wasStopped && hasFlagToday(riskStopFlag)) {
-        val detail = listOf(code, message.take(160))
-            .filter { it.isNotBlank() }
-            .joinToString("/")
-        val detailSuffix = detail.takeIf { it.isNotBlank() }?.let { ":$it" }.orEmpty()
-        Log.member("会员签到/任务[$source]#检测到风控/验证，今日停止会员签到和会员任务$detailSuffix")
-    }
+    Log.member("会员签到/任务[$source]#检测到风控/验证，停止当前执行:$code/${message.take(160)}")
     return true
 }
 
@@ -899,7 +892,7 @@ class AntMember : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            refreshMemberPointExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { refreshMemberPointExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshMemberPointExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -947,15 +940,17 @@ class AntMember : ModelTask() {
     }
 
     internal fun refreshMemberPointExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        refreshMemberPointExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { refreshMemberPointExchangeOptionsFromRpc() }
 
     private fun queryMemberExchangeCandidates(
         userId: String?,
         pointBalance: String,
         sleepMillis: Long = 0L,
+        stopAfterSelectedIds: Set<String>? = null,
         onFailure: ((TaskFlowActionResult) -> Unit)? = null,
     ): LinkedHashMap<String, MemberExchangeCandidate> {
         val candidateMap = LinkedHashMap<String, MemberExchangeCandidate>()
+        var totalPages = 0
         var currentPage = 1
         var hasNextPage = true
         while (hasNextPage) {
@@ -964,6 +959,7 @@ class AntMember : ModelTask() {
             }
             val responseStr = AntMemberRpcCall.queryShandieEntityList(userId.orEmpty(), pointBalance, currentPage, 18)
             if (responseStr.isEmpty()) {
+                RequestManager.failExchangeSettingsRefresh()
                 onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.RETRYABLE_RPC,
                     rpc = "queryShandieEntityList", message = "空响应", raw = responseStr))
                 if (onFailure != null) return candidateMap
@@ -971,11 +967,19 @@ class AntMember : ModelTask() {
             }
             val jo = JSONObject(responseStr)
             if (!ResChecker.checkRes(TAG, "会员积分闪兑列表查询失败:", jo)) {
+                RequestManager.failExchangeSettingsRefresh()
                 onFailure?.invoke(memberDomainTaskFailureResult(null, jo, responseStr, "queryShandieEntityList", "缺货补兑查询失败"))
                 if (onFailure != null) return candidateMap
                 break
             }
             addMemberExchangeCandidates(jo.optJSONArray("benefits"), candidateMap)
+            totalPages++
+            if (!stopAfterSelectedIds.isNullOrEmpty() &&
+                stopAfterSelectedIds.all { candidateMap.containsKey(it) }
+            ) {
+                Log.member("会员积分🎐目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
+                return candidateMap
+            }
             val nextPageNum = jo.optInt("nextPageNum", 0)
             hasNextPage = nextPageNum > currentPage
             currentPage = if (hasNextPage) nextPageNum else currentPage
@@ -997,16 +1001,25 @@ class AntMember : ModelTask() {
                 )
             )
             if (!ResChecker.checkRes(TAG, "会员积分专区列表查询失败:", jo)) {
+                RequestManager.failExchangeSettingsRefresh()
                 onFailure?.invoke(memberDomainTaskFailureResult(null, jo, jo.toString(), "queryDeliveryZoneDetail", "缺货补兑查询失败"))
                 break
             }
             val uniqueId = jo.optString("uniqueId", deliveryUniqueId)
             addMemberExchangeCandidates(jo.optJSONArray("briefConfigInfos"), candidateMap, currentPage, 18, uniqueId)
             addMemberExchangeEntityCandidates(jo.optJSONArray("entityInfoList"), candidateMap, currentPage, 18, uniqueId)
+            totalPages++
+            if (!stopAfterSelectedIds.isNullOrEmpty() &&
+                stopAfterSelectedIds.all { candidateMap.containsKey(it) }
+            ) {
+                Log.member("会员积分🎐目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
+                return candidateMap
+            }
             val nextPageNum = jo.optInt("nextPageNum", 0)
             hasNextPage = nextPageNum > currentPage
             currentPage = if (hasNextPage) nextPageNum else currentPage
         }
+        if (hasNextPage && currentPage > 10) RequestManager.failExchangeSettingsRefresh()
         return candidateMap
     }
 
@@ -1103,7 +1116,7 @@ class AntMember : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            refreshBeanExchangeRightOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { refreshBeanExchangeRightOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshBeanExchangeRightOptionsForSettings.currentRpc err:", it)
         }
@@ -1145,7 +1158,7 @@ class AntMember : ModelTask() {
     }
 
     internal fun refreshBeanExchangeRightOptionsForRemote(): List<ExchangeOptionRow> =
-        refreshBeanExchangeRightOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { refreshBeanExchangeRightOptionsFromRpc() }
 
     private fun queryBeanBizProperties(): List<String> {
         val fallbackBizProperties = listOf(
@@ -1180,9 +1193,13 @@ class AntMember : ModelTask() {
             .distinct()
     }
 
-    private fun queryBeanExchangeCandidates(beanBalance: Int?): LinkedHashMap<String, BeanExchangeCandidate> {
+    private fun queryBeanExchangeCandidates(
+        beanBalance: Int?,
+        stopAfterSelectedIds: Set<String>? = null
+    ): LinkedHashMap<String, BeanExchangeCandidate> {
         val candidateMap = LinkedHashMap<String, BeanExchangeCandidate>()
-        for (bizProperty in queryBeanBizProperties()) {
+        var totalPages = 0
+        outer@ for (bizProperty in queryBeanBizProperties()) {
             var pageStartIndex = 0
             var pageCount = 0
             while (pageCount < 10) {
@@ -1194,16 +1211,25 @@ class AntMember : ModelTask() {
                     )
                 )
                 if (!ResChecker.checkRes(TAG, "安心豆权益推荐列表查询失败:", response)) {
+                    RequestManager.failExchangeSettingsRefresh()
                     break
                 }
                 addBeanExchangeCandidates(response, candidateMap, fromHistory = false, beanBalance = beanBalance)
+                totalPages++
+                if (!stopAfterSelectedIds.isNullOrEmpty() &&
+                    stopAfterSelectedIds.all { candidateMap.containsKey(it) }
+                ) {
+                    Log.member("安心豆🫘目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
+                    return candidateMap
+                }
                 val result = extractBeanExchangeResult(response)
                 if (!result.optBoolean("hasNext", false)) {
                     break
                 }
                 val nextStartIndex = result.optInt("pageEndIndex", pageStartIndex)
-                if (nextStartIndex <= pageStartIndex) {
-                    break
+                if (nextStartIndex <= pageStartIndex || pageCount >= 10) {
+                    RequestManager.failExchangeSettingsRefresh()
+                    if (nextStartIndex <= pageStartIndex) break
                 }
                 pageStartIndex = nextStartIndex
                 ExchangeFetchPacing.pageTurnDelay()
@@ -1239,6 +1265,11 @@ class AntMember : ModelTask() {
             setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
             return
         }
+        if (selectedIds.isEmpty()) {
+            Log.member("会员积分🎐未勾选目标，跳过列表拉取")
+            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
+            return
+        }
         try {
             val userId = UserMap.currentUid
             val memberInfo = JSONObject(AntMemberRpcCall.queryMemberInfo())
@@ -1254,7 +1285,7 @@ class AntMember : ModelTask() {
             }
             val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
             Log.member("会员积分🎐兑换列表刷新..")
-            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L)
+            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L, stopAfterSelectedIds = selectedIds)
             candidateMap.values.forEach { candidate ->
                 memberBenefitMap.add(candidate.item.id, candidate.item.displayName())
                 if (!selectedIds.contains(candidate.item.id)) {
@@ -1757,7 +1788,7 @@ class AntMember : ModelTask() {
                 }
 
                 MemberFloatingBallTaskProcessState.UNKNOWN -> {
-                    if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)) return@run
+                    if (ApplicationHookConstants.isOffline()) return@run
                     Log.error(TAG, "会员浮球状态未确认，继续处理独立会员任务")
                 }
 
@@ -2055,9 +2086,6 @@ class AntMember : ModelTask() {
             val stopScene = response.optString("_taskFlowStopScene").ifBlank { "unknown" }
             val stopObject = response.optJSONObject("_taskFlowStopObject") ?: response
             if (stopReason.isNotBlank()) {
-                if (!isOfflineMemberTaskStopReason(stopReason)) {
-                    setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)
-                }
                 Log.member("会员任务[$stopScene]#${buildMemberTaskQueryStopMessage(stopReason, stopObject)}")
                 return
             }
@@ -2197,6 +2225,7 @@ class AntMember : ModelTask() {
     }
 
     private fun resolveMemberTaskQueryStopReason(jsonObject: JSONObject): String? {
+        if (RpcDailyCircuit.isStopResponse(jsonObject)) return "RPC_DAILY_RISK_STOP"
         if (stopMemberCoreTasksForRpcRisk("AntMember.memberTask", jsonObject)) {
             return "AUTH_LIKE"
         }
@@ -2211,10 +2240,6 @@ class AntMember : ModelTask() {
         return null
     }
 
-    private fun isOfflineMemberTaskStopReason(stopReason: String): Boolean {
-        return stopReason == "OFFLINE_MODE" || ApplicationHookConstants.isOffline()
-    }
-
     private fun buildMemberTaskQueryStopMessage(stopReason: String, jsonObject: JSONObject): String {
         val detail = sequenceOf(
             jsonObject.optString("resultDesc"),
@@ -2224,9 +2249,10 @@ class AntMember : ModelTask() {
             jsonObject.optString("errorMsg")
         ).firstOrNull { it.isNotBlank() }.orEmpty()
         return when (stopReason) {
-            "AUTH_LIKE" -> "检测到验证/访问异常($detail)，停止今日继续刷新"
-            "OFFLINE_MODE" -> "检测到离线模式($detail)，停止今日继续刷新"
-            else -> "检测到异常($detail)，停止今日继续刷新"
+            "RPC_DAILY_RISK_STOP" -> "该 RPC 今日因硬阻塞停止，结束当前执行($detail)"
+            "AUTH_LIKE" -> "检测到验证/访问异常($detail)，停止当前执行"
+            "OFFLINE_MODE" -> "检测到离线模式($detail)，停止当前执行"
+            else -> "检测到异常($detail)，停止当前执行"
         }
     }
 
@@ -2465,9 +2491,6 @@ class AntMember : ModelTask() {
             val floatingBallObject = JSONObject(floatingBallResponse)
             val stopReason = resolveMemberTaskQueryStopReason(floatingBallObject)
             if (stopReason != null) {
-                if (!isOfflineMemberTaskStopReason(stopReason)) {
-                    setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)
-                }
                 Log.error(TAG, "会员任务[浮球]#${buildMemberTaskQueryStopMessage(stopReason, floatingBallObject)}")
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
@@ -2594,8 +2617,7 @@ class AntMember : ModelTask() {
                 try {
                     val result = memberFloatingBallMutex.withLock {
                         if (!AccountSessionCoordinator.isCurrentSession(ownerUserId, sessionEpoch) ||
-                            !isEnable() || memberTask?.value != true ||
-                            hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)
+                            !isEnable() || memberTask?.value != true || ApplicationHookConstants.isOffline()
                         ) null else processMemberFloatingBallTaskCompat()
                     }
                     if (result == MemberFloatingBallTaskProcessState.UNKNOWN) {
@@ -8036,7 +8058,11 @@ class AntMember : ModelTask() {
                 Log.member("安心豆🫘TTL内跳过列表拉取")
                 return
             }
-            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance())
+            if (selectedIds.isEmpty()) {
+                Log.member("安心豆🫘未勾选目标，跳过列表拉取")
+                return
+            }
+            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance(), stopAfterSelectedIds = selectedIds)
             val beanRightMap = IdMapManager.getInstance(BeanExchangeRightMap::class.java)
             if (candidateMap.isEmpty()) {
                 beanRightMap.save(userId)
@@ -8119,7 +8145,7 @@ class AntMember : ModelTask() {
                 failure = result
                 onFailure?.invoke(result)
             }
-            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, report)
+            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, stopAfterSelectedIds = selectedIds, onFailure = report)
             if (failure != null) return@runCatching ExchangeReplenishResult.RETRY_LATER
             var matchedSelected = false
             var exchangedCount = 0
@@ -8178,7 +8204,7 @@ class AntMember : ModelTask() {
             return ExchangeReplenishResult.NOT_SELECTED
         }
         return runCatching {
-            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance())
+            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance(), stopAfterSelectedIds = selectedIds)
             var matchedSelected = false
             var attempted = false
             var exchangedCount = 0

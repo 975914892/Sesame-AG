@@ -122,10 +122,6 @@ object ModelFieldTodayStateResolver {
 
             "AntMember.memberTask" -> {
                 when {
-                    Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY) -> {
-                        inactive("今日会员任务已止损")
-                    }
-
                     Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY) -> {
                         inactive("今日会员任务已处理")
                     }

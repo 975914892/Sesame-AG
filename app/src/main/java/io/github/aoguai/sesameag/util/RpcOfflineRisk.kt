@@ -10,21 +10,29 @@ object RpcOfflineRisk {
     private const val XLIGHT_TRAFFIC_RESTRICTION_CODE = "217"
     private const val XLIGHT_TRAFFIC_RESTRICTION_SSP_CODE = "61002"
 
-    private val riskKeywords =
+    private val verificationKeywords =
         listOf(
-            "需要验证",
-            "需要驗證",
-            "進行驗證",
-            "进行验证",
-            "保障你的正常存取",
-            "保障你的正常访问",
-            "访问受限",
-            "訪問受限",
-            "访问被拒绝",
-            "訪問被拒絕",
-            "访问异常",
-            "訪問異常",
+            "需要验证", "需要驗證", "進行驗證", "进行验证",
+            "保障你的正常存取", "保障你的正常访问",
         )
+
+    private val recoverableVerificationKeywords = verificationKeywords +
+        listOf("滑块", "滑塊", "验证码", "驗證碼", "captcha")
+
+    private val hardBlockKeywords =
+        listOf("访问受限", "訪問受限", "访问被拒绝", "訪問被拒絕")
+
+    private val riskKeywords = verificationKeywords + hardBlockKeywords + listOf("访问异常", "訪問異常")
+
+    /** 只用于本次真实响应；I07 的历史源错误不能归因到当前 RPC。 */
+    fun isHardBlocked(jsonObject: JSONObject): Boolean {
+        val code = extractCode(jsonObject).trim()
+        val message = extractMessage(jsonObject)
+        if (recoverableVerificationKeywords.any { message.contains(it, ignoreCase = true) }) return false
+        if (code in offlineModeCodes || code == "2000" || message.contains("离线模式") || message.contains("登录超时")) return false
+        if (jsonObject.optBoolean("success", false) || jsonObject.optBoolean("isSuccess", false)) return false
+        return code in directRiskCodes || hardBlockKeywords.any { message.contains(it) }
+    }
 
     fun hasRiskKeyword(message: String): Boolean {
         if (message.isBlank()) {
@@ -52,6 +60,12 @@ object RpcOfflineRisk {
         val code = extractCode(jsonObject)
         val message = extractMessage(jsonObject)
         if (isOfflineRisk(code, message)) {
+            return true
+        }
+        // RPC 触发全局离线后，任务层收到的是 I07 包装响应；真实风控码保存在源错误字段中。
+        val sourceCode = jsonObject.optString("offlineSourceCode")
+        val sourceMessage = jsonObject.optString("offlineSourceMessage")
+        if (sourceCode.isNotBlank() && isOfflineRisk(sourceCode, sourceMessage)) {
             return true
         }
         val stopObject = jsonObject.optJSONObject("_taskFlowStopObject")

@@ -52,6 +52,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
@@ -1805,7 +1806,7 @@ class AntFarm : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshIpChouChouLeExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1830,7 +1831,7 @@ class AntFarm : ModelTask() {
     }
 
     internal fun refreshIpChouChouLeExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc() }
 
 
     private fun buildParadiseCoinExchangeItem(
@@ -1912,7 +1913,7 @@ class AntFarm : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            refreshParadiseCoinExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { refreshParadiseCoinExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshParadiseCoinExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1941,7 +1942,7 @@ class AntFarm : ModelTask() {
                 Log.error(TAG, "小鸡乐园币💸[设置页刷新权益列表失败]")
                 throw IllegalStateException("小鸡乐园币刷新权益列表失败")
             }
-            val mallItemSimpleList = jo.optJSONArray("mallItemSimpleList") ?: return emptyList()
+            val mallItemSimpleList = jo.optJSONArray("mallItemSimpleList") ?: throw IllegalStateException("小鸡乐园币兑换列表缺少 mallItemSimpleList")
             val benefitMap = IdMapManager.getInstance(ParadiseCoinBenefitIdMap::class.java)
             val rows = mutableListOf<ExchangeOptionRow>()
             for (i in 0..<mallItemSimpleList.length()) {
@@ -1968,7 +1969,7 @@ class AntFarm : ModelTask() {
     }
 
     internal fun refreshParadiseCoinExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        refreshParadiseCoinExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { refreshParadiseCoinExchangeOptionsFromRpc() }
 
     internal fun replenishExchangeByNeed(
         need: ExchangeEffectNeed,
@@ -1985,9 +1986,6 @@ class AntFarm : ModelTask() {
             ?.filter { it.isNotEmpty() }
             ?.toSet()
             ?: emptySet()
-        if (selectedIds.isEmpty()) {
-            return ExchangeReplenishResult.NOT_SELECTED
-        }
         return runCatching {
             val jo = JSONObject(AntFarmRpcCall.getMallHome())
             if (!ResChecker.checkRes(TAG, jo)) {

@@ -51,6 +51,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.antFarm.FarmGame
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectTag
@@ -1781,7 +1782,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return emptyList()
         }
         val rowsResult = runCatching {
-            refreshVitalityExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { refreshVitalityExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshVitalityExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1803,12 +1804,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     internal fun refreshVitalityExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        refreshVitalityExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { refreshVitalityExchangeOptionsFromRpc() }
 
     private fun refreshVitalityExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         return runCatching {
             ExchangeFetchPacing.domainStartDelay()
-            Vitality.initVitality("")
+            if (!Vitality.initVitality("")) {
+                throw IllegalStateException("活力兑换列表拉取失败")
+            }
             val rows = buildVitalityExchangeOptionRows()
             ExchangeOptionsCache.save(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, rows)
             rows
@@ -1924,7 +1927,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         try {
 //            JSONObject bag = getBag();
 
-            Vitality.initVitality("")
+            if (!Vitality.initVitality("")) {
+                return false
+            }
             val exchangeList = vitalityExchangeList?.value ?: emptyMap()
             //            Map<String, Integer> maxLimitList = vitalityExchangeMaxList.value;
             for (entry in exchangeList.entries) {
@@ -1972,7 +1977,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return ExchangeReplenishResult.NOT_SELECTED
         }
         return runCatching {
-            Vitality.initVitality("")
+            if (!Vitality.initVitality("")) {
+                return@runCatching ExchangeReplenishResult.RETRY_LATER
+            }
             val safeMaxCount = maxCount.coerceAtLeast(1)
             var matchedSelected = false
             var attempted = false

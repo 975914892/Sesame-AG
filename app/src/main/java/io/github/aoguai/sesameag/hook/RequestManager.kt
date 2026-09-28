@@ -3,11 +3,14 @@ package io.github.aoguai.sesameag.hook
 import android.Manifest
 import androidx.annotation.RequiresPermission
 import io.github.aoguai.sesameag.entity.RpcEntity
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.NetworkUtils
+import io.github.aoguai.sesameag.util.RpcOfflineRisk
+import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -17,6 +20,28 @@ import java.util.concurrent.atomic.AtomicLong
 object RequestManager {
 
     private const val TAG = "RequestManager"
+    private val settingsRefreshContext = ThreadLocal<ExchangeSettingsRefreshContext>()
+
+    internal fun <T> withExchangeSettingsRefresh(block: () -> T): T {
+        val previous = settingsRefreshContext.get()
+        if (previous != null) return block()
+        val context = ExchangeSettingsRefreshContext(RpcDailyCircuit.captureIdentity())
+        settingsRefreshContext.set(context)
+        return try {
+            val result = block()
+            context.complete()
+            result
+        } finally {
+            settingsRefreshContext.remove()
+        }
+    }
+
+    internal fun failExchangeSettingsRefresh() {
+        val context = settingsRefreshContext.get() ?: return
+        context.failed = true
+        throw IllegalStateException("兑换列表未完整刷新，保留 RPC 每日停止标识")
+    }
+
     // reOpenApp() 会通过 SmartScheduler 延迟 20s 拉起 Activity。
     // 若恢复冷却时间小于 20s，会导致“每 15s 触发一次恢复 -> 取消并重新调度 20s 任务”，
     // 从而永远无法真正执行 reOpenApp（日志表现为反复 RPC 拦截 + 20s 延迟，直到用户手动重启 App）。
@@ -71,13 +96,20 @@ object RequestManager {
 
     private fun normalizeTryCount(value: Int): Int = value.coerceAtLeast(1)
 
-    private inline fun executeRpcOnce(methodLog: String?, block: (RpcBridge) -> String?): RpcRequestOutcome {
+    private inline fun executeRpcOnce(
+        methodLog: String?,
+        identity: AccountSessionIdentity,
+        block: (RpcBridge) -> String?
+    ): RpcRequestOutcome {
         val blocked = tryBlockByOffline(methodLog)
         if (blocked != null) return blocked
 
         // 2. 获取 Bridge (包含网络检查)
         // 如果这里获取失败，也视为一次错误
         val bridge = getRpcBridge()
+        if (!RpcDailyCircuit.isCurrent(identity)) {
+            return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("账号会话已变化", methodLog))
+        }
         if (bridge == null) {
             rpcBridgeNullCount.incrementAndGet()
             if (rpcBridgeNullLogLimiter.shouldLog()) {
@@ -97,11 +129,18 @@ object RequestManager {
         }
 
         // 4. 结果校验与状态维护
+        if (!RpcDailyCircuit.isCurrent(identity)) {
+            return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("账号会话已变化", methodLog))
+        }
         if (result.isNullOrBlank()) {
             // 失败：增加计数，检查兜底
             handleFailure(methodLog ?: "Unknown", "返回数据为空")
             return RpcRequestOutcome.Failure("返回数据为空")
         } else {
+            val response = runCatching { JSONObject(result) }.getOrNull()
+            if (response != null && (RpcDailyCircuit.isStopResponse(response) || RpcOfflineRisk.isHardBlocked(response))) {
+                return RpcRequestOutcome.Stopped(result)
+            }
             // 成功：重置计数器
             if (errorCount.get() > 0) {
                 errorCount.set(0)
@@ -188,53 +227,59 @@ object RequestManager {
         )
     }
 
-    private inline fun requestStringWithPolicy(
-        method: String?,
+    private fun requestStringWithPolicy(
+        rpcEntity: RpcEntity,
         tryCount: Int,
         retryInterval: Int,
-        crossinline block: (RpcBridge, Int, Int) -> String?
     ): String {
         rpcRequestCount.incrementAndGet()
+        val method = rpcEntity.requestMethod
+        val identity = RpcDailyCircuit.captureIdentity()
+        val refresh = settingsRefreshContext.get()
+        check(refresh?.failed != true) { "兑换列表刷新已失败，停止后续请求" }
+        rpcEntity.requestIdentity = identity
+        rpcEntity.settingsRefresh = refresh
 
-        // 离线优先：避免“脚本暂停”时仍继续执行业务
+        if (!RpcDailyCircuit.isCurrent(identity) || (refresh != null && !RpcDailyCircuit.isCurrent(refresh.identity))) {
+            refresh?.failed = true
+            return RpcFallbackJsonFactory.build("账号会话已变化或未就绪", method)
+        }
+        if (refresh == null && RpcDailyCircuit.isBlockedToday(identity.userId, method)) {
+            rpcBlockedCount.incrementAndGet()
+            return RpcFallbackJsonFactory.buildDailyRiskStop(method)
+        }
         val blocked = tryBlockByOffline(method)
         if (blocked != null) {
+            refresh?.failed = true
             return RpcFallbackJsonFactory.build(blocked.reason, method)
         }
 
-        val normalizedTryCount = normalizeTryCount(tryCount)
-
-        val result = executeRpcOnce(method) { bridge ->
-            block(bridge, normalizedTryCount, retryInterval)
-        }
-        return when (result) {
+        return when (val result = executeRpcOnce(method, identity) { bridge ->
+            bridge.requestString(rpcEntity, normalizeTryCount(tryCount), retryInterval)
+        }) {
             is RpcRequestOutcome.Success -> result.body
-            is RpcRequestOutcome.Failure -> RpcFallbackJsonFactory.build(result.reason, method)
+            is RpcRequestOutcome.Stopped -> {
+                refresh?.failed = true
+                result.body
+            }
+            is RpcRequestOutcome.Failure -> {
+                refresh?.failed = true
+                RpcFallbackJsonFactory.build(result.reason, method)
+            }
         }
     }
 
     @JvmStatic
-    fun requestString(rpcEntity: RpcEntity): String {
-        val method = rpcEntity.requestMethod
-        return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, tc, ri ->
-            bridge.requestString(rpcEntity, tc, ri)
-        }
-    }
+    fun requestString(rpcEntity: RpcEntity): String =
+        requestStringWithPolicy(rpcEntity, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL)
 
     @JvmStatic
-    fun requestString(rpcEntity: RpcEntity, tryCount: Int, retryInterval: Int): String {
-        val method = rpcEntity.requestMethod
-        return requestStringWithPolicy(method, tryCount, retryInterval) { bridge, tc, ri ->
-            bridge.requestString(rpcEntity, tc, ri)
-        }
-    }
+    fun requestString(rpcEntity: RpcEntity, tryCount: Int, retryInterval: Int): String =
+        requestStringWithPolicy(rpcEntity, tryCount, retryInterval)
 
     @JvmStatic
-    fun requestString(method: String?, data: String?): String {
-        return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, tc, ri ->
-            bridge.requestString(RpcEntity(method, data), tc, ri)
-        }
-    }
+    fun requestString(method: String?, data: String?): String =
+        requestString(RpcEntity(method, data))
 
     @JvmStatic
     fun requestString(
@@ -243,17 +288,10 @@ object RequestManager {
         appName: String?,
         methodName: String?,
         facadeName: String?
-    ): String {
-        return requestStringWithPolicy(method, RpcBridge.DEFAULT_TRY_COUNT, RpcBridge.DEFAULT_RETRY_INTERVAL) { bridge, tc, ri ->
-            bridge.requestString(RpcEntity(method, data, appName, methodName, facadeName), tc, ri)
-        }
-    }
+    ): String = requestString(RpcEntity(method, data, appName, methodName, facadeName))
 
     @JvmStatic
-    fun requestString(method: String?, data: String?, tryCount: Int, retryInterval: Int): String {
-        return requestStringWithPolicy(method, tryCount, retryInterval) { bridge, tc, ri ->
-            bridge.requestString(RpcEntity(method, data), tc, ri)
-        }
-    }
+    fun requestString(method: String?, data: String?, tryCount: Int, retryInterval: Int): String =
+        requestStringWithPolicy(RpcEntity(method, data), tryCount, retryInterval)
 }
 

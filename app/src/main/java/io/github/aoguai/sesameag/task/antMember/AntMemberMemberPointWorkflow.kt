@@ -18,16 +18,13 @@ internal fun AntMember.prepareMemberPointWorkflows(
     scope: CoroutineScope,
     deferredTasks: MutableList<Deferred<Unit>>
 ): AntMemberPointWorkflowPlan {
-    val riskStoppedToday = hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY)
     val plan = AntMemberPointWorkflowPlan(
-        claimTaskAwards = memberTask?.value == true && !riskStoppedToday,
-        claimMemberPoints = (memberSign?.value == true || memberTask?.value == true) && !riskStoppedToday
+        claimTaskAwards = memberTask?.value == true,
+        claimMemberPoints = memberSign?.value == true || memberTask?.value == true
     )
 
     if (memberSign?.value == true) {
-        if (riskStoppedToday) {
-            Log.member("⏭️ 今天会员营销链路已因风控止损，跳过会员签到")
-        } else if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_SIGN_DONE)) {
+        if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_SIGN_DONE)) {
             Log.member("⏭️ 今天已处理过会员签到，跳过执行")
         } else {
             deferredTasks.add(scope.async(Dispatchers.IO) { doMemberSign() })
@@ -35,16 +32,14 @@ internal fun AntMember.prepareMemberPointWorkflows(
     }
 
     if (memberTask?.value == true) {
-        if (riskStoppedToday) {
-            Log.member("⏭️ 今天会员任务已因风控/离线止损，停止执行")
-        } else if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY)) {
+        if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY)) {
             Log.member("⏭️ 今日会员任务已处理，跳过执行")
         } else {
             deferredTasks.add(scope.async(Dispatchers.IO) { doAllMemberAvailableTaskCompat() })
         }
     }
 
-    if ((memberSign?.value == true || memberTask?.value == true) && !riskStoppedToday &&
+    if ((memberSign?.value == true || memberTask?.value == true) &&
         !hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY)
     ) {
         deferredTasks.add(scope.async(Dispatchers.IO) { doMemberGameEntrance() })

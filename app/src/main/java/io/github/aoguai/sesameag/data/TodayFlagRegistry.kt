@@ -68,7 +68,7 @@ object TodayFlagRegistry {
         binding("YouthPrivilege", "youthPrivilegeCheckIn", patterns = listOf(exact(StatusFlags.FLAG_YOUTH_PRIVILEGE_CHECK_IN_DONE))),
         binding("YouthPrivilege", "youthPrivilegeTasks", patterns = listOf(exact(StatusFlags.FLAG_YOUTH_PRIVILEGE_TASKS_DONE))),
         binding("AntMember", "memberSign", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_MEMBER_SIGN_DONE))),
-        binding("AntMember", "memberTask", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY), exact(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY))),
+        binding("AntMember", "memberTask", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY))),
         binding("AntMember", "yebExpGold", patterns = listOf(prefix(StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_TASK_PREFIX), exact(StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_SIGN_DONE), exact(StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_VOUCHER_CONVERT_DONE), exact(StatusFlags.FLAG_ANTMEMBER_YEB_EXP_GOLD_EXCHANGE_DONE))),
         binding("AntMember", "CollectStickers", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_STICKERS_DONE))),
         binding("AntMember", "billBlockWorld", patterns = listOf(exact(StatusFlags.FLAG_ANTMEMBER_BILL_BLOCK_WORLD_DONE))),

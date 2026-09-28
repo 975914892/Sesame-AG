@@ -19,7 +19,7 @@ package io.github.aoguai.sesameag.data
  *
  * 使用约束：
  * - 只有成功闭环或明确业务终态才能落完成/止损标记。
- * - 完成态/止损态必须通过 Status.setFlagToday() 写入，以继承全局离线后的今日标识保护。
+ * - 完成态/止损态通常通过 Status.setFlagToday() 写入，以继承全局离线后的今日标识保护；需要在 offline 后记录的兑换风控止损态使用受控的 Status.setFlagTodayWhileOffline()。
  * - 计数态只记录进度、次数或触发槽，不应复用为“今日已完成/停止”的闭环标识。
  * - 参数错误、RPC 未验证、抓包不足不应伪装成完成态；需要保留日志上下文或进入待支持/补抓流程。
  * - 新增 flag 时优先使用“模块名::业务名::状态”的值格式；是否保留历史 key 由对应重构策略决定。
@@ -129,8 +129,8 @@ object StatusFlags {
     /** 今日会员任务已处理到无需继续刷新 */
     const val FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY: String = "AntMember::memberTaskEmptyToday"
 
-    /** 今日会员任务因风控/离线止损，不再继续刷新 */
-    const val FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY: String = "AntMember::memberTaskRiskStopToday"
+    /** RPC 今日硬阻塞停止标识；后缀为完整 RPC 方法名。 */
+    const val FLAG_RPC_DAILY_RISK_STOP_PREFIX: String = "Rpc::dailyRiskStop::"
 
     /** 会员积分权益兑换：今日已完成权益列表刷新/扫描 */
     const val FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE: String = "memberBenefit::refresh"

@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.entity
 
+import io.github.aoguai.sesameag.hook.AccountSessionIdentity
+import io.github.aoguai.sesameag.hook.ExchangeSettingsRefreshContext
 import io.github.aoguai.sesameag.hook.internal.SecurityBodyHelper
 import org.json.JSONException
 import org.json.JSONObject
@@ -18,6 +20,10 @@ class RpcEntity @JvmOverloads constructor(
     val headers: Map<String, String>? = null,
     val relationLocal: JSONObject? = null
 ) {
+    // 仅在客户端传递所属会话和设置页上下文，不进入 rpcFullRequestData。
+    internal var requestIdentity: AccountSessionIdentity? = null
+    internal var settingsRefresh: ExchangeSettingsRefreshContext? = null
+
     @Volatile
     var hasResult = false
     @Volatile

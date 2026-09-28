@@ -2,6 +2,9 @@ package io.github.aoguai.sesameag.hook.rpc.bridge
 
 import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.RpcEntity
+import io.github.aoguai.sesameag.hook.RpcFallbackJsonFactory
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
+import org.json.JSONObject
 import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit
 import io.github.aoguai.sesameag.model.BaseModel
@@ -339,6 +342,18 @@ class AriverRpcBridge : RpcBridge {
         tryCount: Int,
         retryInterval: Int,
     ): RpcEntity? {
+        val identity = rpcEntity.requestIdentity ?: RpcDailyCircuit.captureIdentity().also {
+            rpcEntity.requestIdentity = it
+        }
+        if (!RpcDailyCircuit.isCurrent(identity)) {
+            rpcEntity.settingsRefresh?.failed = true
+            return null
+        }
+        if (rpcEntity.settingsRefresh == null && RpcDailyCircuit.isBlockedToday(identity.userId, rpcEntity.requestMethod)) {
+            rpcEntity.setResponseObject(null, RpcFallbackJsonFactory.buildDailyRiskStop(rpcEntity.requestMethod))
+            rpcEntity.setError()
+            return rpcEntity
+        }
         if (!WorkflowRootGuard.isExecutionAllowed()) {
             Log.record(TAG, "必需权限或使用协议未就绪，已拒绝 RPC 请求")
             return null
@@ -357,6 +372,7 @@ class AriverRpcBridge : RpcBridge {
         var captureNote: String? = null
         var captureAttemptId: String? = null
         var captureAttemptResponseRecorded = false
+        var hardBlocked = false
 
         if (captureModuleTraffic) {
             RpcTrafficCapture.recordModuleRequest(captureMethodName, rpcEntity.requestData, captureRequestId!!)
@@ -423,11 +439,27 @@ class AriverRpcBridge : RpcBridge {
                         )
                     }
                     RpcIntervalLimit.enterIntervalLimit(requestMethod)
+                    if (!RpcDailyCircuit.isCurrent(identity)) {
+                        rpcEntity.settingsRefresh?.failed = true
+                        return null
+                    }
+                    if (rpcEntity.settingsRefresh == null && RpcDailyCircuit.isBlockedToday(identity.userId, requestMethod)) {
+                        captureNote = "blocked_by_daily_risk_stop"
+                        rpcEntity.setResponseObject(null, RpcFallbackJsonFactory.buildDailyRiskStop(requestMethod))
+                        rpcEntity.setError()
+                        return rpcEntity
+                    }
+                    if (io.github.aoguai.sesameag.hook.ApplicationHookConstants.shouldBlockRpc()) {
+                        rpcEntity.settingsRefresh?.failed = true
+                        captureNote = "blocked_by_offline"
+                        return null
+                    }
                     if (!WorkflowRootGuard.isExecutionAllowed()) {
                         captureNote = "blocked_by_execution_prerequisites"
                         return null
                     }
                     val finalLocalBridgeCallbackClazzArray = localBridgeCallbackClazzArray
+                    rpcEntity.settingsRefresh?.recordMethod(requestMethod)
                     localRpcCallMethod.invoke(
                         localRpcBridgeExtensionInstance,
                         rpcEntity.requestMethod,
@@ -547,12 +579,33 @@ class AriverRpcBridge : RpcBridge {
                     )
 
                     if (!rpcEntity.hasResult) {
+                        rpcEntity.settingsRefresh?.failed = true
                         logNullResponse(rpcEntity, "无响应结果", count)
                         if (count < normalizedTryCount) {
                             CoroutineUtils.sleepCompat(computeRetryDelayMs(retryInterval, count))
                             continue@requestLoop
                         }
                         return null
+                    }
+
+                    if (!RpcDailyCircuit.isCurrent(identity)) {
+                        rpcEntity.settingsRefresh?.failed = true
+                        return null
+                    }
+                    val rawResponse = JSONObject(rpcEntity.responseString.orEmpty())
+                    rpcEntity.settingsRefresh?.observeResponse(rawResponse)
+                    if (RpcOfflineRisk.isHardBlocked(rawResponse)) {
+                        hardBlocked = true
+                        RpcDailyCircuit.markBlockedToday(identity, requestMethod)
+                        rpcEntity.setError()
+                        val code = RpcOfflineRisk.extractCode(rawResponse)
+                        val message = RpcOfflineRisk.extractMessage(rawResponse)
+                        handleAuthLikeError(
+                            rpcEntity, requestMethod, "硬阻塞: $code/$message",
+                            buildOfflineDetail(requestMethod, code, message, "访问受限"), count,
+                        )
+                        // 保留本次真实响应，不依赖随后 I07 包装中的全局历史来源。
+                        return rpcEntity
                     }
 
                     if (!rpcEntity.hasError) {
@@ -647,6 +700,8 @@ class AriverRpcBridge : RpcBridge {
                         CoroutineUtils.sleepCompat(computeRetryDelayMs(retryInterval, count))
                     }
                 } catch (t: Throwable) {
+                    rpcEntity.settingsRefresh?.failed = true
+                    if (hardBlocked) return rpcEntity
                     Log.error(
                         TAG,
                         "rpc request | id: ${rpcEntity.hashCode()} | method: ${rpcEntity.requestMethod} err:",
