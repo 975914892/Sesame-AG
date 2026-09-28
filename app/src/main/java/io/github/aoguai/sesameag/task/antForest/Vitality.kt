@@ -26,13 +26,13 @@ object Vitality {
     val skuInfo = HashMap<String, JSONObject>()
 
     @JvmStatic
-    fun ItemListByType(labelType: String, startIndex: Int = 0, pageSize: Int = 10): JSONArray? {
+    fun ItemListByType(labelType: String, startIndex: Int = 0, pageSize: Int = 10): JSONObject? {
         try {
             val jo = JsonUtil.parseJSONObjectOrNull(
                 AntForestRpcCall.itemList(labelType, startIndex, pageSize)
             ) ?: return null
             if (ResChecker.checkRes("${TAG}查询森林活力值商品列表失败:", jo)) {
-                return jo.optJSONArray("itemInfoVOList")
+                return jo
             }
         } catch (th: Throwable) {
             Log.runtime(TAG, "ItemListByType err")
@@ -65,15 +65,32 @@ object Vitality {
                 val index = JSONObject(AntForestRpcCall.queryVitalityStoreIndex())
                 check(ResChecker.checkRes(TAG, index)) { "森林活力值商城首页查询失败" }
                 val items = JSONArray()
+                val seenItemIds = linkedSetOf<String>()
                 val pageSize = 10
                 var startIndex = 0
                 while (true) {
-                    val page = ItemListByType(labelType, startIndex, pageSize)
-                        ?: error("森林活力值商品列表查询失败")
-                    for (i in 0 until page.length()) items.put(page.getJSONObject(i))
-                    if (page.length() < pageSize) break
-                    startIndex += pageSize
-                    check(startIndex <= 100) { "森林活力值商品列表尚有未拉取页面" }
+                    val response = ItemListByType(labelType, startIndex, pageSize)
+                        ?: error("森林活力值商品列表查询失败: startIndex=$startIndex")
+                    val page = response.optJSONArray("itemInfoVOList")
+                        ?: error("森林活力值商品列表缺少 itemInfoVOList: startIndex=$startIndex count=missing hasMore=${response.opt("hasMore")} nextStartIndex=${response.opt("nextStartIndex")}")
+                    val seenCount = seenItemIds.size
+                    for (i in 0 until page.length()) {
+                        val item = page.getJSONObject(i)
+                        items.put(item)
+                        item.optString("spuId").takeIf { it.isNotBlank() }?.let { seenItemIds.add("spu:$it") }
+                        val skus = item.optJSONArray("skuModelList") ?: continue
+                        for (j in 0 until skus.length()) {
+                            skus.optJSONObject(j)?.optString("skuId")?.takeIf { it.isNotBlank() }
+                                ?.let { seenItemIds.add("sku:$it") }
+                        }
+                    }
+                    val hasMore = if (response.has("hasMore")) response.getBoolean("hasMore") else page.length() >= pageSize
+                    if (!hasMore) break
+                    val nextStartIndex = if (response.has("nextStartIndex")) response.optInt("nextStartIndex", -1) else startIndex + page.length()
+                    check(page.length() > 0 && seenItemIds.size > seenCount && nextStartIndex > startIndex) {
+                        "森林活力值商品列表分页未前进: startIndex=$startIndex count=${page.length()} hasMore=$hasMore nextStartIndex=$nextStartIndex"
+                    }
+                    startIndex = nextStartIndex
                     ExchangeFetchPacing.pageTurnDelay()
                 }
                 val skus = HashMap<String, JSONObject>()

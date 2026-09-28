@@ -241,6 +241,7 @@ class MyBankWelfare : ModelTask() {
 
     private fun queryMyBankRightsCandidates(): JSONArray {
         val items = JSONArray()
+        val seenItemIds = linkedSetOf<String>()
         var pageNum = 1
         var totalCount = Int.MAX_VALUE
         val pageSize = 20
@@ -250,13 +251,26 @@ class MyBankWelfare : ModelTask() {
             val pageItems = response.getJSONObject("result").getJSONObject("pageItems")
             val dataList = pageItems.getJSONArray("dataList")
             totalCount = pageItems.optInt("totalCount", totalCount)
-            for (i in 0 until dataList.length()) items.put(dataList.getJSONObject(i))
+            val seenCount = seenItemIds.size
+            for (i in 0 until dataList.length()) {
+                val item = dataList.getJSONObject(i)
+                items.put(item)
+                val itemId = item.optString("itemId").trim()
+                    .ifBlank { item.optJSONObject("itemConfigDTO")?.optString("itemId").orEmpty().trim() }
+                    .ifBlank { parseNestedItemInfo(item)?.optString("itemId").orEmpty().trim() }
+                if (itemId.isNotBlank()) seenItemIds.add(itemId)
+            }
             if (dataList.length() < pageSize) {
                 check(totalCount == Int.MAX_VALUE || items.length() >= totalCount) { "网商银行福利金列表尚有未拉取商品" }
                 break
             }
             pageNum++
-            if ((pageNum - 1) * pageSize < totalCount) ExchangeFetchPacing.pageTurnDelay()
+            if ((pageNum - 1) * pageSize < totalCount) {
+                check(seenItemIds.size > seenCount) {
+                    "网商银行福利金分页未前进: pageNum=${pageNum - 1} count=${dataList.length()} totalCount=$totalCount"
+                }
+                ExchangeFetchPacing.pageTurnDelay()
+            }
         }
         return items
     }

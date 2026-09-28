@@ -707,6 +707,7 @@ class AntSports : ModelTask() {
             }
             val items = JSONArray()
             for (categoryType in categoryTypes) {
+                val seenItemIds = linkedSetOf<String>()
                 var pageNum = 1
                 var adSession = ""
                 while (true) {
@@ -716,9 +717,18 @@ class AntSports : ModelTask() {
                     check(ResChecker.checkRes(TAG, "运动能量兑换列表查询失败:", response)) { "运动能量兑换列表查询失败" }
                     val data = extractSportsItemMallData(response)
                     val itemList = data.getJSONArray("itemVOList")
-                    for (i in 0 until itemList.length()) items.put(itemList.getJSONObject(i))
+                    val seenCount = seenItemIds.size
+                    for (i in 0 until itemList.length()) {
+                        val item = itemList.getJSONObject(i)
+                        items.put(item)
+                        val itemId = listOf(item.optString("benefitId").trim(), item.optString("itemId").trim())
+                            .filter { it.isNotBlank() }.joinToString("|")
+                        if (itemId.isNotBlank()) seenItemIds.add(itemId)
+                    }
                     if (!data.optBoolean("hasMore", false)) break
-                    check(itemList.length() > 0 && pageNum < 20) { "运动能量兑换列表尚有未拉取页面" }
+                    check(itemList.length() > 0 && seenItemIds.size > seenCount) {
+                        "运动能量兑换分页未前进: categoryType=$categoryType pageNum=$pageNum count=${itemList.length()} hasMore=true"
+                    }
                     adSession = data.optString("adSession", adSession)
                     pageNum++
                     ExchangeFetchPacing.pageTurnDelay()

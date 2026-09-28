@@ -1388,7 +1388,13 @@ data object AntFarmFamily {
                     currentBalance = holdingCount.optInt("cent")
 
                     val items = itemJo.optJSONArray("itemInfoVOList")
-                    if (items == null || items.length() == 0) break
+                    val hasMoreField = itemJo.optBoolean("hasMore", false)
+                    if (items == null || items.length() == 0 && hasMoreField) {
+                        scanCompleted = false
+                        Log.error(TAG, "[家庭装扮] 商品列表缺失或非末页为空: label=$label startIndex=$startIndex count=${items?.length()} hasMore=$hasMoreField，今日不落完成标识")
+                        break@labelLoop
+                    }
+                    if (items.length() == 0) break
 
                     for (j in 0 until items.length()) {
                         val item = items.getJSONObject(j)
@@ -1448,9 +1454,13 @@ data object AntFarmFamily {
                         }
                     }
 
-                    val nextIndex = itemJo.optInt("nextStartIndex", 0)
-                    val hasMoreField = itemJo.optBoolean("hasMore", false)
-                    if (hasMoreField && nextIndex > startIndex) {
+                    val nextIndex = itemJo.optInt("nextStartIndex", -1)
+                    if (hasMoreField) {
+                        if (nextIndex <= startIndex) {
+                            scanCompleted = false
+                            Log.error(TAG, "[家庭装扮] 分页未前进: label=$label startIndex=$startIndex nextStartIndex=$nextIndex hasMore=$hasMoreField，今日不落完成标识")
+                            break@labelLoop
+                        }
                         startIndex = nextIndex
                     } else {
                         hasMore = false

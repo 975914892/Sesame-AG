@@ -971,11 +971,12 @@ class AntMember : ModelTask() {
                     onFailure?.invoke(memberDomainTaskFailureResult(null, response, raw, "queryShandieEntityList", "缺货补兑查询失败"))
                     error("会员积分闪兑列表查询失败")
                 }
-                check(response.optJSONArray("benefits") != null) { "会员积分闪兑列表缺少 benefits" }
+                val benefits = response.optJSONArray("benefits") ?: error("会员积分闪兑列表缺少 benefits")
                 shandie.put(response)
                 val next = response.optInt("nextPageNum", 0)
-                check(next <= 0 || next > currentPage) { "会员积分闪兑分页未前进" }
+                check(next <= 0 || next > currentPage) { "会员积分闪兑分页未前进: currentPage=$currentPage nextPageNum=$next" }
                 hasNextPage = next > currentPage
+                check(!hasNextPage || benefits.length() > 0) { "会员积分闪兑分页未返回商品: currentPage=$currentPage nextPageNum=$next" }
                 if (hasNextPage) currentPage = next
             } while (hasNextPage)
 
@@ -990,16 +991,18 @@ class AntMember : ModelTask() {
                     onFailure?.invoke(memberDomainTaskFailureResult(null, response, response.toString(), "queryDeliveryZoneDetail", "缺货补兑查询失败"))
                     error("会员积分专区列表查询失败")
                 }
-                check(response.optJSONArray("briefConfigInfos") != null || response.optJSONArray("entityInfoList") != null) {
-                    "会员积分专区列表缺少商品数据"
-                }
+                val briefConfigInfos = response.optJSONArray("briefConfigInfos")
+                val entityInfoList = response.optJSONArray("entityInfoList")
+                check(briefConfigInfos != null || entityInfoList != null) { "会员积分专区列表缺少商品数据" }
                 delivery.put(JSONObject().put("response", response).put("pageNum", currentPage)
                     .put("uniqueId", response.optString("uniqueId", deliveryUniqueId)))
                 val next = response.optInt("nextPageNum", 0)
-                check(next <= 0 || next > currentPage) { "会员积分专区分页未前进" }
+                check(next <= 0 || next > currentPage) { "会员积分专区分页未前进: currentPage=$currentPage nextPageNum=$next" }
                 hasNextPage = next > currentPage
+                check(!hasNextPage || (briefConfigInfos?.length() ?: 0) + (entityInfoList?.length() ?: 0) > 0) {
+                    "会员积分专区分页未返回商品: currentPage=$currentPage nextPageNum=$next"
+                }
                 if (hasNextPage) currentPage = next
-                check(!hasNextPage || currentPage <= 10) { "会员积分专区列表尚有未拉取页面" }
             } while (hasNextPage)
             val payload = JSONObject().put("shandie", shandie).put("delivery", delivery)
             ExchangeOptionsSnapshot(parse(payload).values.map { it.item.toOptionRow() }, payload)
@@ -1190,33 +1193,39 @@ class AntMember : ModelTask() {
             val responses = JSONArray()
             for (bizProperty in queryBeanBizProperties()) {
                 var pageStartIndex = 0
-                var pageCount = 0
                 while (true) {
                     val response = JSONObject(AntMemberRpcCall.rightsRecommend(
                         pageStartIndex = pageStartIndex, bizProperty = bizProperty
                     ))
                     check(ResChecker.checkRes(TAG, "安心豆权益推荐列表查询失败:", response)) { "安心豆权益推荐列表查询失败" }
                     responses.put(response)
-                    pageCount++
                     val result = extractBeanExchangeResult(response)
+                    val lists = listOfNotNull(result.optJSONArray("preExchangeDetailList"), result.optJSONArray("couponRightsDTOList"),
+                        result.optJSONArray("rightsList"), result.optJSONArray("flowList"))
+                    check(lists.isNotEmpty()) { "安心豆权益列表缺少商品数据: bizProperty=$bizProperty pageStartIndex=$pageStartIndex" }
                     if (!result.optBoolean("hasNext", false)) break
-                    val nextStartIndex = result.optInt("pageEndIndex", pageStartIndex)
-                    check(nextStartIndex > pageStartIndex && pageCount < 10) { "安心豆权益列表未完整拉取" }
+                    val nextStartIndex = result.optInt("pageEndIndex", -1)
+                    check(lists.any { it.length() > 0 } && nextStartIndex > pageStartIndex) {
+                        "安心豆权益分页未前进: bizProperty=$bizProperty pageStartIndex=$pageStartIndex pageEndIndex=$nextStartIndex"
+                    }
                     pageStartIndex = nextStartIndex
                     ExchangeFetchPacing.pageTurnDelay()
                 }
             }
             var pageStartIndex = 0
-            var pageCount = 0
             while (true) {
                 val response = JSONObject(AntMemberRpcCall.queryRightsPreExchangeFlows(pageStartIndex = pageStartIndex, pageSize = 99))
                 check(ResChecker.checkRes(TAG, "安心豆预兑换列表查询失败:", response)) { "安心豆预兑换列表查询失败" }
                 responses.put(response)
-                pageCount++
                 val result = extractBeanExchangeResult(response)
+                val lists = listOfNotNull(result.optJSONArray("preExchangeDetailList"), result.optJSONArray("couponRightsDTOList"),
+                    result.optJSONArray("rightsList"), result.optJSONArray("flowList"))
+                check(lists.isNotEmpty()) { "安心豆预兑换列表缺少商品数据: pageStartIndex=$pageStartIndex" }
                 if (!result.optBoolean("hasNext", false)) break
-                val nextStartIndex = result.optInt("pageEndIndex", pageStartIndex)
-                check(nextStartIndex > pageStartIndex && pageCount < 10) { "安心豆预兑换列表未完整拉取" }
+                val nextStartIndex = result.optInt("pageEndIndex", -1)
+                check(lists.any { it.length() > 0 } && nextStartIndex > pageStartIndex) {
+                    "安心豆预兑换分页未前进: pageStartIndex=$pageStartIndex pageEndIndex=$nextStartIndex"
+                }
                 pageStartIndex = nextStartIndex
                 ExchangeFetchPacing.pageTurnDelay()
             }

@@ -6197,7 +6197,6 @@ class AntSesameCredit : ModelTask() {
         }
         val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN, forceRefresh) {
             ExchangeFetchPacing.domainStartDelay()
-            val maxPage = 10
             val pageSize = 20
             val pendingTabs = mutableListOf<String?>(null)
             val scannedTabs = LinkedHashSet<String>()
@@ -6207,9 +6206,9 @@ class AntSesameCredit : ModelTask() {
                 val tab = pendingTabs[tabIndex++]
                 val tabKey = tab ?: ""
                 if (!scannedTabs.add(tabKey)) continue
+                val seenItemIds = linkedSetOf<String>()
                 var currentPage = 1
-                var hasNextPage = true
-                while (hasNextPage && currentPage <= maxPage) {
+                while (true) {
                     val jo = JSONObject(AntSesameCreditRpcCall.queryExchangeList(currentPage, pageSize, tab))
                     check(ResChecker.checkRes(TAG, jo)) { "芝麻粒兑换列表查询失败" }
                     val data = jo.getJSONObject("data")
@@ -6226,13 +6225,19 @@ class AntSesameCredit : ModelTask() {
                         }
                     }
                     val list = data.getJSONArray("awardTemplateList")
-                    for (i in 0 until list.length()) items.put(list.getJSONObject(i))
-                    hasNextPage = data.optBoolean("hasNext", false)
-                    check(!hasNextPage || list.length() > 0) { "芝麻粒兑换列表分页未返回商品" }
+                    val seenCount = seenItemIds.size
+                    for (i in 0 until list.length()) {
+                        val item = list.getJSONObject(i)
+                        items.put(item)
+                        item.optString("awardTemplateId").trim().takeIf { it.isNotBlank() }?.let { seenItemIds.add(it) }
+                    }
+                    if (!data.optBoolean("hasNext", false)) break
+                    check(list.length() > 0 && seenItemIds.size > seenCount) {
+                        "芝麻粒兑换分页未前进: tab=$tabKey currentPage=$currentPage count=${list.length()} hasNext=true"
+                    }
                     currentPage++
-                    if (hasNextPage && currentPage <= maxPage) ExchangeFetchPacing.pageTurnDelay()
+                    ExchangeFetchPacing.pageTurnDelay()
                 }
-                check(!hasNextPage) { "芝麻粒兑换列表尚有未拉取页面" }
             }
             val payload = JSONObject().put("items", items)
             ExchangeOptionsSnapshot(parse(payload).map { it.item.toOptionRow() }, payload)

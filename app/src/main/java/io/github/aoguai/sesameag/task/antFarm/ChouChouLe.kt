@@ -938,7 +938,6 @@ class ChouChouLe {
     private fun queryIpDrawMallSnapshot(
         activity: IpDrawActivity,
         pageSize: Int = 10,
-        maxPages: Int = 20,
     ): IpDrawMallSnapshot? {
         if (activity.activityId.isBlank()) {
             Log.farm("IP抽抽乐商店💸[缺少 activityId，无法查询]")
@@ -950,12 +949,11 @@ class ChouChouLe {
         val items = mutableListOf<IpDrawMallItem>()
         val rawItems = JSONArray()
         val seenSkuIds = linkedSetOf<String>()
-        val seenStartIndexes = linkedSetOf<Int>()
+        val seenItemIds = linkedSetOf<String>()
         var balanceCent = 0
         var startIndex = 0
-        var pageCount = 0
 
-        while (pageCount < maxPages && seenStartIndexes.add(startIndex)) {
+        while (true) {
             val jo =
                 runCatching {
                     JSONObject(AntFarmRpcCall.getItemList(activity.activityId, pageSize, startIndex))
@@ -975,35 +973,30 @@ class ChouChouLe {
                 ?.let { balanceCent = it.optInt("cent", balanceCent) }
 
             val itemInfoVOList = jo.optJSONArray("itemInfoVOList") ?: return null
-            if (itemInfoVOList.length() == 0) {
-                if (jo.optBoolean("hasMore", false)) return null
-                break
-            }
-
-            var newItemCount = 0
+            val seenCount = seenItemIds.size
             for (i in 0 until itemInfoVOList.length()) {
                 val itemJo = itemInfoVOList.optJSONObject(i) ?: return null
                 rawItems.put(itemJo)
+                itemJo.optString("spuId").trim().takeIf { it.isNotBlank() }?.let { seenItemIds.add("spu:$it") }
+                val skuList = itemJo.optJSONArray("skuModelList")
+                if (skuList != null) {
+                    for (j in 0 until skuList.length()) {
+                        skuList.optJSONObject(j)?.optString("skuId")?.trim()?.takeIf { it.isNotBlank() }
+                            ?.let { seenItemIds.add("sku:$it") }
+                    }
+                }
                 parseIpDrawMallItems(itemJo).forEach { item ->
                     if (seenSkuIds.add(item.skuId)) {
                         items.add(item)
-                        newItemCount++
                     }
                 }
             }
 
-            pageCount++
-            if (newItemCount == 0) {
-                Log.farm("IP抽抽乐商店💸[分页未发现新商品，停止继续查询: startIndex=$startIndex]")
-                return null
-            }
-
-            val responseNextIndex = if (jo.has("nextStartIndex")) jo.optInt("nextStartIndex", -1) else -1
-            val nextStartIndex = if (jo.has("nextStartIndex")) responseNextIndex else startIndex + itemInfoVOList.length()
             val hasMore = if (jo.has("hasMore")) jo.optBoolean("hasMore", false) else itemInfoVOList.length() >= pageSize
             if (!hasMore) break
-            if (nextStartIndex <= startIndex || pageCount >= maxPages || seenStartIndexes.contains(nextStartIndex)) {
-                Log.farm("IP抽抽乐商店💸[列表未完整拉取: startIndex=$startIndex nextStartIndex=$nextStartIndex pageCount=$pageCount]")
+            val nextStartIndex = if (jo.has("nextStartIndex")) jo.optInt("nextStartIndex", -1) else startIndex + itemInfoVOList.length()
+            if (itemInfoVOList.length() == 0 || seenItemIds.size == seenCount || nextStartIndex <= startIndex) {
+                Log.farm("IP抽抽乐商店💸[列表分页未前进: startIndex=$startIndex count=${itemInfoVOList.length()} hasMore=$hasMore nextStartIndex=$nextStartIndex]")
                 return null
             }
             startIndex = nextStartIndex
