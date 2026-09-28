@@ -90,8 +90,7 @@ object PersistentScheduleRegistry {
             return existing
         }
 
-        // 先把候选计划同步写入注册表，再让 AlarmManager 根据整个快照规划唯一的下一次物理唤醒。
-        // 这样同窗计划不会各自注册闹钟，同时失败时仍可原子恢复旧快照。
+        // 先持久化候选快照，再重排两个精度通道；失败时恢复旧快照。
         val previousSchedules = schedules.toList()
         schedules.removeAll(removed.toSet())
         schedules.add(effectiveSchedule)
@@ -249,8 +248,7 @@ object PersistentScheduleRegistry {
                 .asSequence()
                 .filter { schedule ->
                     schedule.state == PersistentScheduleState.SCHEDULED &&
-                        schedule.triggerAtMs <= now &&
-                        now - schedule.triggerAtMs <= schedule.toleranceMs.coerceAtLeast(0L)
+                        schedule.triggerAtMs <= now
                 }.sortedWith(
                     compareBy<PersistentSchedule> {
                         when (it.effectivePrecisionPolicy()) {
@@ -260,8 +258,12 @@ object PersistentScheduleRegistry {
                         }
                     }.thenBy { it.triggerAtMs },
                 ).toList()
-        due.forEach { schedule -> ScheduledTaskRouter.fire(context, schedule, source) }
-        return due.size
+        try {
+            due.forEach { schedule -> ScheduledTaskRouter.fire(context, schedule, source) }
+            return due.size
+        } finally {
+            SystemWakeScheduler.schedule(context, PersistentSchedule(), silent = true)
+        }
     }
 
     fun clearAll(context: Context?) = withRegistryLock { clearAllUnlocked(context) }
@@ -362,13 +364,15 @@ object PersistentScheduleRegistry {
         id: String,
         now: Long = System.currentTimeMillis(),
         source: String = "registry",
-    ): Boolean {
-        if (id.isBlank()) return false
-        val schedule = get(id) ?: return false
-        if (schedule.state != PersistentScheduleState.SCHEDULED) return false
+    ): Boolean = withRegistryLock {
+        val schedule = get(id) ?: return@withRegistryLock false
+        if (schedule.state != PersistentScheduleState.SCHEDULED ||
+            schedule.triggerAtMs > now || now > schedule.deadlineAtMs() ||
+            schedule.lastError == "launch_pending" || schedule.lastError == "delivery_pending"
+        ) return@withRegistryLock false
         updateSchedule(id, source) { it.withQueued(now) }
         context?.let { SystemWakeScheduler.schedule(it, schedule, silent = true) }
-        return true
+        true
     }
 
     fun markRunning(
@@ -385,21 +389,46 @@ object PersistentScheduleRegistry {
         }
     }
 
+    fun beginDeliveryWait(
+        context: Context,
+        expected: PersistentSchedule,
+        launching: Boolean,
+        now: Long = System.currentTimeMillis(),
+    ): PersistentSchedule? = withRegistryLock {
+        val current = get(expected.id) ?: return@withRegistryLock null
+        if (current != expected || current.state != PersistentScheduleState.SCHEDULED ||
+            current.triggerAtMs > now || now > current.deadlineAtMs()
+        ) return@withRegistryLock null
+        val waiting = current.copy(
+            triggerAtMs = minOf(now + 30_000L, current.deadlineAtMs()),
+            lastFireAtMs = current.firstDueAtMs(),
+            updatedAtMs = now,
+            lastError = if (launching) "launch_pending" else "delivery_pending",
+        )
+        updateSchedule(current.id) { waiting }
+        if (!SystemWakeScheduler.schedule(context, waiting, silent = true)) {
+            rescheduleDeferred(context, waiting.id, "confirmation_alarm_failed", now)
+            return@withRegistryLock null
+        }
+        waiting
+    }
+
     fun confirmTargetLaunch(
         id: String,
+        confirmationAtMs: Long,
         now: Long = System.currentTimeMillis(),
-    ) {
-        updateSchedule(id) { schedule ->
-            if (schedule.state == PersistentScheduleState.SCHEDULED) {
-                schedule.copy(
-                    triggerAtMs = now,
-                    updatedAtMs = now,
-                    lastError = null,
-                )
-            } else {
-                schedule
-            }
+    ): Boolean = withRegistryLock {
+        val schedule = get(id) ?: return@withRegistryLock false
+        if (schedule.state != PersistentScheduleState.SCHEDULED ||
+            confirmationAtMs <= 0L || schedule.updatedAtMs != confirmationAtMs ||
+            schedule.lastError !in setOf("launch_pending", "delivery_pending") ||
+            now < schedule.firstDueAtMs() || now > schedule.deadlineAtMs() ||
+            !AccountSessionCoordinator.isScheduleRoutable(schedule)
+        ) return@withRegistryLock false
+        updateSchedule(id) {
+            it.copy(triggerAtMs = it.firstDueAtMs(), updatedAtMs = now, lastError = null)
         }
+        true
     }
 
     fun rescheduleDeferred(
@@ -407,7 +436,11 @@ object PersistentScheduleRegistry {
         id: String,
         reason: String,
         now: Long = System.currentTimeMillis(),
-    ): Boolean = withRegistryLock { rescheduleDeferredUnlocked(context, id, reason, now) }
+        expected: PersistentSchedule? = null,
+    ): Boolean = withRegistryLock {
+        if (expected != null && get(id) != expected) return@withRegistryLock false
+        rescheduleDeferredUnlocked(context, id, reason, now)
+    }
 
     private fun rescheduleDeferredUnlocked(
         context: Context?,
@@ -421,7 +454,6 @@ object PersistentScheduleRegistry {
             return false
         }
 
-        val firstDueAt = schedule.lastFireAtMs.takeIf { it > 0L } ?: schedule.triggerAtMs
         val nextAttempt = schedule.attemptCount + 1
         val delayMs =
             when (nextAttempt) {
@@ -430,7 +462,7 @@ object PersistentScheduleRegistry {
                 else -> 60_000L
             }
         val nextTriggerAt = now + delayMs
-        val deadline = firstDueAt + schedule.toleranceMs.coerceAtLeast(0L)
+        val deadline = schedule.deadlineAtMs()
         if (nextAttempt > MAX_DEFERRED_ATTEMPTS || nextTriggerAt > deadline) {
             markFailed(context, id, "deferred_exhausted:$reason", now)
             return false
@@ -500,8 +532,10 @@ object PersistentScheduleRegistry {
         error: String,
         now: Long = System.currentTimeMillis(),
         source: String = "registry",
-    ) {
+        expected: PersistentSchedule? = null,
+    ) = withRegistryLock {
         val schedule = get(id)
+        if (expected != null && schedule != expected) return@withRegistryLock
         markFailed(id, error, now, source)
         if (context != null && schedule != null) {
             SystemWakeScheduler.schedule(context, schedule, silent = true)
@@ -518,7 +552,9 @@ object PersistentScheduleRegistry {
         val shouldDispatch = schedule?.kind == PersistentScheduleKind.MODULE_CHILD &&
             schedule.state !in terminalScheduleStates
         updateSchedule(id, source) { current ->
-            if (current.state in terminalScheduleStates) current else current.withScheduleState(PersistentScheduleState.EXPIRED, now)
+            if (current.state == PersistentScheduleState.SCHEDULED && now > current.deadlineAtMs()) {
+                current.withScheduleState(PersistentScheduleState.EXPIRED, now)
+            } else current
         }
         if (context != null && schedule != null) {
             SystemWakeScheduler.schedule(context, schedule, silent = true)
@@ -577,8 +613,7 @@ object PersistentScheduleRegistry {
             }
 
             if (schedule.triggerAtMs <= now) {
-                val graceMs = schedule.toleranceMs.coerceAtLeast(0L)
-                if (now - schedule.triggerAtMs <= graceMs) {
+                if (now <= schedule.deadlineAtMs()) {
                     if (mode == PersistentReconcileMode.FIRE_ALARM_DUE) {
                         due.add(schedule)
                         retained.add(schedule)
@@ -630,6 +665,7 @@ object PersistentScheduleRegistry {
             left.kind == right.kind &&
             left.triggerAtMs == right.triggerAtMs &&
             left.toleranceMs == right.toleranceMs &&
+            left.effectivePrecisionPolicy() == right.effectivePrecisionPolicy() &&
             left.dedupeKey == right.dedupeKey &&
             canonicalPayloadJson(left.payloadJson) == canonicalPayloadJson(right.payloadJson) &&
             left.ownerUserId?.trim().orEmpty() == right.ownerUserId?.trim().orEmpty() &&
@@ -742,6 +778,7 @@ object PersistentScheduleRegistry {
         synchronized(cacheLock) {
             cache = snapshot
         }
+        SystemWakeScheduler.onRegistryChanged()
     }
 
     private fun ensureStorage(): Boolean {
@@ -759,7 +796,10 @@ object PersistentScheduleRegistry {
                 // 跨进程：当底层 DataStore 文件被其它进程改动并重载时，失效本地缓存，
                 // 下次读取重新从 DataStore 取最新数据，避免缓存陈旧导致调度丢失/误取消。
                 runCatching {
-                    DataStore.setOnChangeListener { invalidateCache() }
+                    DataStore.setOnChangeListener {
+                        invalidateCache()
+                        SystemWakeScheduler.onRegistryChanged()
+                    }
                 }
             }
             initialized

@@ -24,7 +24,6 @@ import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.task.youthPrivilege.YouthPrivilege
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.Notify.updateRunningTaskOrder
-import io.github.aoguai.sesameag.util.Notify.updateRunningNextExec
 import io.github.aoguai.sesameag.util.TimeUtil
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -529,8 +528,9 @@ class CoroutineTaskRunner(allModels: List<Model>) {
     private fun scheduleNext() {
         try {
             ApplicationHook.scheduleNextExecutionInternal(System.currentTimeMillis())
-            updateRunningNextExec(ApplicationHook.nextExecutionTime)
-            Log.record(TAG, "📅 已调度下次执行")
+            if (ApplicationHook.nextExecutionTime > 0L) {
+                Log.record(TAG, "📅 下次有效计划: ${TimeUtil.getCommonDate(ApplicationHook.nextExecutionTime)}")
+            }
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "调度失败", e)
         }

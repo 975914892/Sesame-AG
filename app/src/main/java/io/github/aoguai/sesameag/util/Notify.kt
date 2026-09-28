@@ -16,6 +16,9 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.keepalive.PersistentSchedule
+import io.github.aoguai.sesameag.hook.keepalive.PersistentSchedulePrecisionPolicy
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
 import io.github.aoguai.sesameag.hook.Toast
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.task.ModelTask
@@ -46,6 +49,7 @@ object Notify {
 
     private var lastUpdateTime: Long = 0
     private var nextExecTimeCache: Long = 0
+    private var persistentScheduleText: String? = null
     @Volatile
     private var globalStatusText: String? = null
     @Volatile
@@ -208,6 +212,7 @@ object Notify {
         globalStatusText = null
         lastExecText = ""
         nextExecTimeCache = 0
+        persistentScheduleText = null
         clearRunningTasks()
         clearRunningTaskDisplayOrder()
         lastUpdateTime = System.currentTimeMillis()
@@ -253,6 +258,7 @@ object Notify {
             globalStatusText = null
             lastExecText = ""
             nextExecTimeCache = 0
+            persistentScheduleText = null
             clearRunningTasks()
             clearRunningTaskDisplayOrder()
             isNotificationStarted = false
@@ -311,6 +317,36 @@ object Notify {
         }
     }
 
+    fun updatePersistentSchedule(
+        schedule: PersistentSchedule?,
+        backgroundScheduled: Boolean = true,
+        exactAlarmAvailable: Boolean = true,
+    ) {
+        if (!isNotificationStarted) {
+            ensureStarted()
+            if (!isNotificationStarted) return
+        }
+        nextExecTimeCache = schedule?.takeIf { it.state == PersistentScheduleState.SCHEDULED }?.triggerAtMs ?: 0L
+        persistentScheduleText = when (schedule?.state) {
+            PersistentScheduleState.SCHEDULED -> when {
+                schedule.lastError == "launch_pending" -> "正在唤醒，等待任务接收"
+                schedule.lastError == "delivery_pending" -> "已投递，等待任务接收"
+                schedule.lastError != null -> "已延期，预计 ${TimeUtil.getTimeStr(schedule.triggerAtMs)} 重试"
+                !backgroundScheduled -> "应用运行时执行 ${TimeUtil.getTimeStr(schedule.triggerAtMs)}"
+                schedule.effectivePrecisionPolicy() == PersistentSchedulePrecisionPolicy.FLEXIBLE_POLL ->
+                    "预计执行 ${TimeUtil.getTimeStr(schedule.triggerAtMs)} 至 ${TimeUtil.getTimeStr(schedule.deadlineAtMs())}"
+                !exactAlarmAvailable -> "预计执行 ${TimeUtil.getTimeStr(schedule.triggerAtMs)}（未获精确闹钟权限）"
+                else -> "下次执行 ${TimeUtil.getTimeStr(schedule.triggerAtMs)}"
+            }
+            PersistentScheduleState.QUEUED -> "已到期，等待执行"
+            PersistentScheduleState.RUNNING -> "本次计划执行中"
+            PersistentScheduleState.FAILED -> "本次计划未能执行"
+            PersistentScheduleState.EXPIRED -> "本次计划已失效"
+            else -> null
+        }
+        render(force = true)
+    }
+
     @JvmStatic
     fun updateRunningNextExec(nextExecTime: Long) {
         if (!isNotificationStarted) {
@@ -322,6 +358,7 @@ object Notify {
         try {
             if (nextExecTime != -1L) {
                 nextExecTimeCache = nextExecTime
+                persistentScheduleText = null
             }
             render(force = false)
         } catch (e: Exception) {
@@ -406,6 +443,7 @@ object Notify {
                     explicitStatus
                 }
                 nextExecTimeCache > 0 -> WAITING_TITLE
+                persistentScheduleText != null -> persistentScheduleText!!
                 else -> STARTUP_TITLE
             }
 
@@ -416,7 +454,9 @@ object Notify {
                 if (runningTasks.size > 1) {
                     add(runningSummary!!)
                 }
-                if (nextExecTimeCache > 0) {
+                if (persistentScheduleText != null) {
+                    add(persistentScheduleText!!)
+                } else if (nextExecTimeCache > 0) {
                     add("下次执行 ${TimeUtil.getTimeStr(nextExecTimeCache)}")
                 }
                 if (lastExecText.isNotBlank()) {

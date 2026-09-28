@@ -1,9 +1,7 @@
 package io.github.aoguai.sesameag.hook.keepalive
 
 import android.content.Context
-import android.os.Process
 import io.github.aoguai.sesameag.data.Config
-import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
 import io.github.aoguai.sesameag.hook.AccountSlotRegistry
 import io.github.aoguai.sesameag.model.BaseModel
@@ -27,13 +25,10 @@ internal object PersistentLaunchPolicy {
         context: Context,
         schedule: PersistentSchedule,
     ): PreparationResult {
-        if (canUseModuleReceiverContext(context)) {
-            return PreparationResult(schedule.copy(payloadJson = sanitizeLaunchTarget(schedule.payloadJson, false)))
-        }
-        if (isForegroundLaunchEnabled(schedule.ownerUserId)) {
-            return PreparationResult(schedule.copy(payloadJson = sanitizeLaunchTarget(schedule.payloadJson, true)))
-        }
-        return PreparationResult(schedule = schedule, blockedReason = FRONT_LAUNCH_DISABLED_ERROR)
+        // 投递组件固定为模块 Receiver；此字段只表达是否允许无回复后的冷启动。
+        return PreparationResult(schedule.copy(
+            payloadJson = sanitizeLaunchTarget(schedule.payloadJson, isForegroundLaunchEnabled(schedule.ownerUserId)),
+        ))
     }
 
     fun shouldLaunchTarget(schedule: PersistentSchedule): Boolean =
@@ -95,17 +90,5 @@ internal object PersistentLaunchPolicy {
     private fun payloadToJson(payloadJson: String): JSONObject {
         val normalized = payloadJson.trim().ifBlank { "{}" }
         return runCatching { JSONObject(normalized) }.getOrElse { JSONObject() }
-    }
-
-    private fun canUseModuleReceiverContext(context: Context): Boolean {
-        val appContext = context.applicationContext ?: context
-        if (appContext.packageName == General.MODULE_PACKAGE_NAME) {
-            return true
-        }
-        return runCatching {
-            @Suppress("DEPRECATION")
-            appContext.packageManager.getPackageUid(General.MODULE_PACKAGE_NAME, 0) == Process.myUid() &&
-                appContext.createPackageContext(General.MODULE_PACKAGE_NAME, Context.CONTEXT_IGNORE_SECURITY) != null
-        }.getOrDefault(false)
     }
 }

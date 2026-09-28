@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.util
 
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import io.github.aoguai.sesameag.BuildConfig
 import io.github.aoguai.sesameag.ICallback
 import io.github.aoguai.sesameag.ICommandService
 import io.github.aoguai.sesameag.IStatusListener
+import io.github.aoguai.sesameag.hook.keepalive.SystemWakeScheduler
 import io.github.aoguai.sesameag.service.CommandService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -18,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 命令服务客户端工具类
@@ -53,10 +56,27 @@ object CommandUtil {
     // AIDL 接口实例
     @Volatile
     private var commandService: ICommandService? = null
+    private val alarmIntents = java.util.concurrent.ConcurrentHashMap<Int, PendingIntent>()
+
+    fun getPersistentScheduleAlarmIntent(lane: Int): PendingIntent? {
+        require(lane == SystemWakeScheduler.LANE_EXACT || lane == SystemWakeScheduler.LANE_FLEXIBLE)
+        alarmIntents[lane]?.let { return it }
+        val service = commandService ?: return null
+        return try {
+            service.getPersistentScheduleAlarmIntent(lane)?.also { alarmIntents[lane] = it }
+        } catch (e: RemoteException) {
+            handleServiceLost()
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "获取持久调度令牌失败", e)
+            null
+        }
+    }
 
     // 连接状态管理
     private val bindMutex = Mutex()
     private val isBound = AtomicBoolean(false)
+    private val pendingCommands = AtomicInteger(0)
     private var connectionDeferred: CompletableDeferred<Boolean>? = null
     @Volatile
     private var bindRequested = false
@@ -97,7 +117,12 @@ object CommandUtil {
 
                 isBound.set(true)
                 connectionDeferred?.complete(true)
-                if (!bindRequested) {
+                boundContext?.let { appContext ->
+                    scope.launch {
+                        SystemWakeScheduler.refresh(appContext)
+                    }
+                }
+                if (!bindRequested && pendingCommands.get() == 0) {
                     boundContext?.let { appContext ->
                         scope.launch {
                             unbind(appContext)
@@ -120,6 +145,7 @@ object CommandUtil {
     private fun handleServiceLost(updateStatus: Boolean = true) {
         ModuleDiagnostics.event("command_bind", "lost", "updateStatus=$updateStatus")
         commandService = null
+        alarmIntents.clear()
         isBound.set(false)
         connectionDeferred = null
         lastStatusType = null
@@ -162,7 +188,7 @@ object CommandUtil {
         boundContext = appContext
         scope.launch {
             val bound = ensureServiceBound(appContext)
-            if (bound && !bindRequested) {
+            if (bound && !bindRequested && pendingCommands.get() == 0) {
                 unbind(appContext)
             }
         }
@@ -237,6 +263,10 @@ object CommandUtil {
                 Log.e(TAG, "command_bind failed reason=$lastFailure $bindContext")
                 _serviceStatus.value = ServiceStatus.Error("服务绑定失败")
                 return@withLock false
+            } catch (e: CancellationException) {
+                runCatching { appContext.unbindService(serviceConnection) }
+                handleServiceLost()
+                throw e
             } catch (e: Exception) {
                 ModuleDiagnostics.event("command_bind", "exception", "$bindContext error=${e.javaClass.simpleName}")
                 Log.e(TAG, "绑定异常 $bindContext", e)
@@ -250,33 +280,32 @@ object CommandUtil {
      * 执行命令
      */
     suspend fun executeCommand(context: Context, command: String): String? = withContext(Dispatchers.IO) {
-        if (!ensureServiceBound(context)) {
-            return@withContext null
-        }
-
-        val service = commandService ?: return@withContext null
-        val resultDeferred = CompletableDeferred<String?>()
-
-        val callback = object : ICallback.Stub() {
-            override fun onSuccess(output: String) {
-                resultDeferred.complete(output)
-            }
-
-            override fun onError(error: String) {
-                Log.e(TAG, "Cmd Error: $error")
-                resultDeferred.complete(null)
-            }
-        }
-
+        pendingCommands.incrementAndGet()
         try {
+            if (!ensureServiceBound(context)) return@withContext null
+            val service = commandService ?: return@withContext null
+            val resultDeferred = CompletableDeferred<String?>()
+            val callback = object : ICallback.Stub() {
+                override fun onSuccess(output: String) {
+                    resultDeferred.complete(output)
+                }
+                override fun onError(error: String) {
+                    Log.e(TAG, "Cmd Error: $error")
+                    resultDeferred.complete(null)
+                }
+            }
             service.executeCommand(command, callback)
             withTimeoutOrNull(EXEC_TIMEOUT_MS) { resultDeferred.await() }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: RemoteException) {
             handleServiceLost()
             null
         } catch (e: Exception) {
             Log.e(TAG, "Cmd Exception", e)
             null
+        } finally {
+            if (pendingCommands.decrementAndGet() == 0 && !bindRequested) unbind(context)
         }
     }
 
@@ -344,6 +373,7 @@ object CommandUtil {
      */
     fun unbind(context: Context) {
         bindRequested = false
+        if (pendingCommands.get() > 0) return
         val appContext = context.applicationContext
         boundContext = appContext
         if (isBound.compareAndSet(true, false)) {

@@ -7,7 +7,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.os.Binder
 import android.os.IBinder
+import android.os.Process
 import android.os.RemoteCallbackList
 import android.os.RemoteException
 import androidx.core.app.NotificationCompat
@@ -17,6 +19,7 @@ import io.github.aoguai.sesameag.IStatusListener
 import io.github.aoguai.sesameag.R
 import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.data.General
+import io.github.aoguai.sesameag.hook.keepalive.SystemWakeScheduler
 import io.github.aoguai.sesameag.ui.MainActivity
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.PermissionUtil
@@ -170,6 +173,22 @@ class CommandService : Service() {
          */
         override fun unregisterListener(listener: IStatusListener?) {
             listeners.unregister(listener)
+        }
+
+        override fun getPersistentScheduleAlarmIntent(lane: Int): PendingIntent {
+            val callerUid = Binder.getCallingUid()
+            @Suppress("DEPRECATION")
+            val targetUid = runCatching { packageManager.getPackageUid(General.PACKAGE_NAME, 0) }.getOrNull()
+            if (callerUid != Process.myUid() && callerUid != targetUid) {
+                throw SecurityException("Untrusted persistent schedule caller")
+            }
+            require(lane == SystemWakeScheduler.LANE_EXACT || lane == SystemWakeScheduler.LANE_FLEXIBLE)
+            val identity = Binder.clearCallingIdentity()
+            return try {
+                SystemWakeScheduler.createAlarmIntent(this@CommandService, lane)
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
         }
 
         override fun isExecutionAllowed(userId: String?): Boolean {
