@@ -511,6 +511,9 @@ fun AccountSettingsScreen(
             value = state.drafts[request.field.key].orEmpty(),
             optionsState = state.fieldOptions[request.field.key] ?: FieldOptionsState.NotRequested,
             onLoad = { accountViewModel.loadFieldOptions(request.field.key) },
+            onRefresh = if (accountViewModel.exchangeTargetFor(request.field.key) != null) {
+                { accountViewModel.loadFieldOptions(request.field.key, forceRefresh = true) }
+            } else null,
             onDismiss = {
                 selectionModelCode = null
                 selectionFieldCode = null
@@ -1097,6 +1100,7 @@ private fun SelectionEditorDialog(
     value: String,
     optionsState: FieldOptionsState,
     onLoad: () -> Unit,
+    onRefresh: (() -> Unit)?,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
 ) {
@@ -1118,6 +1122,22 @@ private fun SelectionEditorDialog(
                     .padding(16.dp)
             ) {
                 Text(request.field.name, style = MaterialTheme.typography.headlineSmall)
+                if (onRefresh != null) {
+                    val refreshing = optionsState is FieldOptionsState.Loading ||
+                        (optionsState as? FieldOptionsState.Ready)?.isRefreshing == true
+                    TextButton(
+                        onClick = onRefresh,
+                        enabled = !refreshing && optionsState !is FieldOptionsState.NotRequested,
+                        modifier = Modifier.align(Alignment.End).heightIn(min = 48.dp),
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (refreshing) "刷新中…" else "刷新列表")
+                    }
+                }
+                (optionsState as? FieldOptionsState.Ready)?.refreshError?.let { message ->
+                    Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+                }
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = search,
@@ -1133,7 +1153,7 @@ private fun SelectionEditorDialog(
                         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                             DelayedLoadingIndicator()
                         }
-                    is FieldOptionsState.Error -> BlockingMessage("选项加载失败", optionsState.message, "重试", onLoad)
+                    is FieldOptionsState.Error -> BlockingMessage("选项加载失败", optionsState.message, "重试", onRefresh ?: onLoad)
                     is FieldOptionsState.Ready -> LazyColumn(Modifier.weight(1f)) {
                         items(filtered, key = { it.id }) { option ->
                             SelectionOptionRow(

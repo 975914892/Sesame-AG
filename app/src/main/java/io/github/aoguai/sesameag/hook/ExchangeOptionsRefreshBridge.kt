@@ -44,7 +44,8 @@ object ExchangeOptionsRefreshBridge {
     fun requestRefreshOptions(
         target: String,
         userId: String?,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        forceRefresh: Boolean = false
     ): RefreshResult {
         val context = SesameApplication.appContext ?: ApplicationHook.appContext
             ?: return RefreshResult(false, "模块上下文未就绪")
@@ -106,6 +107,7 @@ object ExchangeOptionsRefreshBridge {
                 putExtra("requestId", requestId)
                 putExtra("target", target)
                 putExtra("userId", userId.orEmpty())
+                putExtra("forceRefresh", forceRefresh)
             })
             latch.await(timeoutMs.coerceAtLeast(500L), TimeUnit.MILLISECONDS)
             resultRef.get()

@@ -51,14 +51,12 @@ import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.antFarm.FarmGame
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
-import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectTag
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
-import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
@@ -1748,12 +1746,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun refreshVitalityExchangeOptionsForSettings(): List<MapperEntity> {
-        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
-            UserMap.currentUid,
-            ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY,
-            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
-        )
-        if (freshRows.isNotEmpty()) {
+        val freshRows = ExchangeOptionsCache.loadTodaySnapshot(
+            UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY
+        )?.rows
+        if (freshRows != null) {
             Log.forest("活力兑换🍃设置页使用新鲜缓存#${freshRows.size}")
             return freshRows
         }
@@ -1782,7 +1778,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return emptyList()
         }
         val rowsResult = runCatching {
-            RequestManager.withExchangeSettingsRefresh { refreshVitalityExchangeOptionsFromRpc() }
+            refreshVitalityExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshVitalityExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1803,18 +1799,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         return rows
     }
 
-    internal fun refreshVitalityExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        RequestManager.withExchangeSettingsRefresh { refreshVitalityExchangeOptionsFromRpc() }
+    internal fun refreshVitalityExchangeOptionsForRemote(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+        refreshVitalityExchangeOptionsFromRpc(forceRefresh)
 
-    private fun refreshVitalityExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
+    private fun refreshVitalityExchangeOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> {
         return runCatching {
-            ExchangeFetchPacing.domainStartDelay()
-            if (!Vitality.initVitality("")) {
+            if (!Vitality.initVitality("", forceRefresh)) {
                 throw IllegalStateException("活力兑换列表拉取失败")
             }
-            val rows = buildVitalityExchangeOptionRows()
-            ExchangeOptionsCache.save(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, rows)
-            rows
+            buildVitalityExchangeOptionRows()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshVitalityExchangeOptionsFromRpc err:", it)
         }.getOrElse {
@@ -1822,8 +1815,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         }
     }
 
-    private fun buildVitalityExchangeOptionRows(): List<ExchangeOptionRow> {
-        return Vitality.skuInfo.entries
+    internal fun buildVitalityExchangeOptionRows(skus: Map<String, JSONObject> = Vitality.skuInfo): List<ExchangeOptionRow> {
+        return skus.entries
             .mapNotNull { (skuId, skuModel) -> buildVitalityExchangeItem(skuId, skuModel).toOptionRow() }
     }
 

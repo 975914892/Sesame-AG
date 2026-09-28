@@ -538,7 +538,8 @@ internal object ApplicationBroadcastDispatcher {
             val requestId = safeIntent.getStringExtra("requestId").orEmpty()
             val target = safeIntent.getStringExtra("target").orEmpty()
             val targetUserId = safeIntent.getStringExtra("userId")?.trim().orEmpty()
-            val result = refreshExchangeOptionsInTarget(target, targetUserId)
+            val forceRefresh = safeIntent.getBooleanExtra("forceRefresh", false)
+            val result = refreshExchangeOptionsInTarget(target, targetUserId, forceRefresh)
             sendRefreshExchangeOptionsResult(
                 ctx,
                 requestId = requestId,
@@ -561,6 +562,7 @@ internal object ApplicationBroadcastDispatcher {
     private fun refreshExchangeOptionsInTarget(
         target: String,
         targetUserId: String,
+        forceRefresh: Boolean,
     ): ExchangeOptionsRefreshResult {
         val loader =
             ApplicationHook.classLoader
@@ -585,52 +587,54 @@ internal object ApplicationBroadcastDispatcher {
 
         return try {
             UserMap.setCurrentUserId(currentUserId)
-            val options =
+            val refresh = {
                 when (target) {
                     ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE -> {
-                        Model.getModel(MyBankWelfare::class.java)?.refreshMyBankWelfareExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "网商银行模块未初始化", currentUserId)
+                        Model.getModel(MyBankWelfare::class.java)?.refreshMyBankWelfareExchangeOptionsForRemote(forceRefresh)
+                            ?: error("网商银行模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT -> {
-                        Model.getModel(AntMember::class.java)?.refreshMemberPointExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)
+                        Model.getModel(AntMember::class.java)?.refreshMemberPointExchangeOptionsForRemote(forceRefresh)
+                            ?: error("会员模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT -> {
-                        Model.getModel(AntMember::class.java)?.refreshBeanExchangeRightOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)
+                        Model.getModel(AntMember::class.java)?.refreshBeanExchangeRightOptionsForRemote(forceRefresh)
+                            ?: error("会员模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE -> {
-                        Model.getModel(AntFarm::class.java)?.refreshParadiseCoinExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "庄园模块未初始化", currentUserId)
+                        Model.getModel(AntFarm::class.java)?.refreshParadiseCoinExchangeOptionsForRemote(forceRefresh)
+                            ?: error("庄园模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE -> {
-                        Model.getModel(AntFarm::class.java)?.refreshIpChouChouLeExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "庄园模块未初始化", currentUserId)
+                        Model.getModel(AntFarm::class.java)?.refreshIpChouChouLeExchangeOptionsForRemote(forceRefresh)
+                            ?: error("庄园模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY -> {
-                        Model.getModel(AntSports::class.java)?.refreshSportsEnergyExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "运动模块未初始化", currentUserId)
+                        Model.getModel(AntSports::class.java)?.refreshSportsEnergyExchangeOptionsForRemote(forceRefresh)
+                            ?: error("运动模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY -> {
-                        Model.getModel(AntForest::class.java)?.refreshVitalityExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "森林模块未初始化", currentUserId)
+                        Model.getModel(AntForest::class.java)?.refreshVitalityExchangeOptionsForRemote(forceRefresh)
+                            ?: error("森林模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN -> {
-                        Model.getModel(AntSesameCredit::class.java)?.refreshSesameGrainExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "芝麻信用模块未初始化", currentUserId)
+                        Model.getModel(AntSesameCredit::class.java)?.refreshSesameGrainExchangeOptionsForRemote(forceRefresh)
+                            ?: error("芝麻信用模块未初始化")
                     }
 
                     else -> {
-                        return ExchangeOptionsRefreshResult(false, "未知兑换列表刷新目标: $target", currentUserId)
+                        error("未知兑换列表刷新目标: $target")
                     }
                 }
+            }
+            val options = if (forceRefresh) RequestManager.withExchangeSettingsRefresh(refresh) else refresh()
             ExchangeOptionsRefreshResult(true, "刷新完成: $target#${options.size}", currentUserId, options)
         } catch (t: Throwable) {
             io.github.aoguai.sesameag.util.Log

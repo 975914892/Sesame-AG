@@ -7,11 +7,13 @@ import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.VitalityStore.ExchangeStatus
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
-import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.maps.VitalityRewardsMap
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
+import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
 import io.github.aoguai.sesameag.util.ResChecker
 
 /**
@@ -56,52 +58,47 @@ object Vitality {
     }
 
     @JvmStatic
-    fun initVitality(labelType: String): Boolean {
+    fun initVitality(labelType: String, forceRefresh: Boolean = false): Boolean {
         try {
+            val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, forceRefresh) {
+                ExchangeFetchPacing.domainStartDelay()
+                val index = JSONObject(AntForestRpcCall.queryVitalityStoreIndex())
+                check(ResChecker.checkRes(TAG, index)) { "森林活力值商城首页查询失败" }
+                val items = JSONArray()
+                val pageSize = 10
+                var startIndex = 0
+                while (true) {
+                    val page = ItemListByType(labelType, startIndex, pageSize)
+                        ?: error("森林活力值商品列表查询失败")
+                    for (i in 0 until page.length()) items.put(page.getJSONObject(i))
+                    if (page.length() < pageSize) break
+                    startIndex += pageSize
+                    check(startIndex <= 100) { "森林活力值商品列表尚有未拉取页面" }
+                    ExchangeFetchPacing.pageTurnDelay()
+                }
+                val skus = HashMap<String, JSONObject>()
+                for (i in 0 until items.length()) handleVitalityItem(items.getJSONObject(i), skus)
+                val rows = AntForest.instance?.buildVitalityExchangeOptionRows(skus) ?: error("森林模块未初始化")
+                ExchangeOptionsSnapshot(rows, JSONObject().put("items", items))
+            }
+            val skus = HashMap<String, JSONObject>()
+            val items = snapshot.payload.getJSONArray("items")
+            for (i in 0 until items.length()) handleVitalityItem(items.getJSONObject(i), skus)
             skuInfo.clear()
-            runCatching { AntForestRpcCall.queryVitalityStoreIndex() }
-                .onFailure { Log.printStackTrace(TAG, "queryVitalityStoreIndex err:", it) }
-            val pageSize = 10
-            var startIndex = 0
-            var loadedAny = false
-            while (startIndex <= 100) {
-                val itemInfoVOList = ItemListByType(labelType, startIndex, pageSize)
-                if (itemInfoVOList == null) {
-                    RequestManager.failExchangeSettingsRefresh()
-                    return false
-                }
-                if (itemInfoVOList.length() == 0) {
-                    break
-                }
-                loadedAny = true
-                for (i in 0 until itemInfoVOList.length()) {
-                    val itemInfoVO = itemInfoVOList.optJSONObject(i) ?: continue
-                    handleVitalityItem(itemInfoVO)
-                }
-                if (itemInfoVOList.length() < pageSize) {
-                    break
-                }
-                startIndex += pageSize
-                if (startIndex > 100) RequestManager.failExchangeSettingsRefresh()
-                ExchangeFetchPacing.pageTurnDelay()
-            }
-            if (!loadedAny) {
-                Log.error(TAG, "活力兑换🍃初始化失败！")
-            }
+            skuInfo.putAll(skus)
             return true
         } catch (th: Throwable) {
             Log.runtime(TAG, "initVitality err")
             Log.printStackTrace(TAG, th)
-            RequestManager.failExchangeSettingsRefresh()
             return false
         }
     }
 
     @Suppress("LoopWithTooManyJumpStatements")
-    private fun handleVitalityItem(vitalityItem: JSONObject) {
+    private fun handleVitalityItem(vitalityItem: JSONObject, skus: MutableMap<String, JSONObject>) {
         try {
             val spuId = vitalityItem.optString("spuId")
-            val skuModelList = vitalityItem.optJSONArray("skuModelList") ?: return
+            val skuModelList = vitalityItem.getJSONArray("skuModelList")
             for (i in 0 until skuModelList.length()) {
                 val skuModel = skuModelList.optJSONObject(i) ?: continue
                 val skuId = skuModel.optString("skuId")
@@ -122,13 +119,14 @@ object Vitality {
                     skuModel.put("spuId", spuId)
                 }
                 copyParentItemFields(skuModel, vitalityItem)
-                skuInfo[skuId] = skuModel
+                skus[skuId] = skuModel
                 IdMapManager.getInstance(VitalityRewardsMap::class.java).add(skuId, oderInfo)
             }
             UserMap.currentUid?.let { IdMapManager.getInstance(VitalityRewardsMap::class.java).save(it) }
         } catch (th: Throwable) {
             Log.runtime(TAG, "handleVitalityItem err")
             Log.printStackTrace(TAG, th)
+            throw th
         }
     }
 

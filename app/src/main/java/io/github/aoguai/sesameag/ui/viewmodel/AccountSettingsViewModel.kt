@@ -20,6 +20,8 @@ import io.github.aoguai.sesameag.entity.friend.FriendSelectionCountSpec
 import io.github.aoguai.sesameag.entity.friend.FriendSelectionSpec
 import io.github.aoguai.sesameag.hook.AccountSlotRegistry
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
+import io.github.aoguai.sesameag.hook.HookReadyChecker
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.model.ModelField
 import io.github.aoguai.sesameag.model.ModelFields
@@ -28,6 +30,7 @@ import io.github.aoguai.sesameag.model.modelFieldExt.EmptyModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.TimeFieldMeta
 import io.github.aoguai.sesameag.task.AnswerAI.AnswerAI
 import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.ui.dto.ModelFieldShowDto
 import io.github.aoguai.sesameag.ui.dto.ModelFieldTodayStateResolver
 import io.github.aoguai.sesameag.util.Files
@@ -68,7 +71,11 @@ data class FieldOptionUiModel(val id: String, val name: String)
 sealed interface FieldOptionsState {
     data object NotRequested : FieldOptionsState
     data object Loading : FieldOptionsState
-    data class Ready(val options: List<FieldOptionUiModel>) : FieldOptionsState
+    data class Ready(
+        val options: List<FieldOptionUiModel>,
+        val isRefreshing: Boolean = false,
+        val refreshError: String? = null,
+    ) : FieldOptionsState
     data class Error(val message: String) : FieldOptionsState
 }
 
@@ -185,34 +192,74 @@ class AccountSettingsViewModel(
         _uiState.update { it.copy(operationMessage = null) }
     }
 
-    fun loadFieldOptions(key: FieldKey) {
+    fun exchangeTargetFor(key: FieldKey): String? = when (key) {
+        FieldKey("AntMember", "memberPointExchangeBenefitList") -> ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT
+        FieldKey("AntMember", "beanExchangeRightList") -> ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT
+        FieldKey("MyBankWelfare", "myBankWelfareExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE
+        FieldKey("AntFarm", "paradiseCoinExchangeBenefitList") -> ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE
+        FieldKey("AntFarm", "autoExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE
+        FieldKey("AntSports", "sportsEnergyExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY
+        FieldKey("AntForest", "vitalityExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY
+        FieldKey("AntSesameCredit", "sesameGrainExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN
+        else -> null
+    }
+
+    fun loadFieldOptions(key: FieldKey, forceRefresh: Boolean = false) {
+        val target = exchangeTargetFor(key)
         val current = _uiState.value.fieldOptions[key]
-        if (current is FieldOptionsState.Loading || current is FieldOptionsState.Ready) return
+        if (current is FieldOptionsState.Loading ||
+            current is FieldOptionsState.Ready && (current.isRefreshing || target == null)
+        ) return
+        if (forceRefresh && target == null) return
         _uiState.update { state ->
-            state.copy(fieldOptions = state.fieldOptions + (key to FieldOptionsState.Loading))
+            state.copy(fieldOptions = state.fieldOptions + (key to (
+                (current as? FieldOptionsState.Ready)?.copy(isRefreshing = true, refreshError = null)
+                    ?: FieldOptionsState.Loading
+            )))
         }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching {
-                loadOptionMaps()
-                val field = fields[key] ?: error("字段不存在：${key.fieldCode}")
-                when (field.getType()) {
-                    "CHOICE" -> field.getExpandKey()
-                        .asStringList()
-                        .mapIndexed { index, name -> FieldOptionUiModel(index.toString(), name) }
-                    else -> field.getExpandValue()
-                        .asMapperList()
-                        .map { FieldOptionUiModel(it.id, it.name.ifBlank { it.id }) }
+                if (target != null) {
+                    val cached = if (forceRefresh) null else ExchangeOptionsCache.loadTodaySnapshot(userId, target)
+                    val rows = cached?.rows ?: run {
+                        check(HookReadyChecker.isTargetAppReadyForRpc(userId)) { "请打开目标应用并登录当前配置账号后再刷新" }
+                        val refreshed = ExchangeOptionsRefreshBridge.requestRefreshOptions(target, userId, forceRefresh = forceRefresh)
+                        check(refreshed.success) { refreshed.message.ifBlank { "兑换列表刷新失败" } }
+                        check(refreshed.userId == userId) { "刷新结果账号与当前配置账号不一致" }
+                        refreshed.options
+                    }
+                    rows.map { FieldOptionUiModel(it.id, it.name.ifBlank { it.id }) }
+                } else {
+                    loadOptionMaps()
+                    val field = fields[key] ?: error("字段不存在：${key.fieldCode}")
+                    when (field.getType()) {
+                        "CHOICE" -> field.getExpandKey()
+                            .asStringList()
+                            .mapIndexed { index, name -> FieldOptionUiModel(index.toString(), name) }
+                        else -> field.getExpandValue()
+                            .asMapperList()
+                            .map { FieldOptionUiModel(it.id, it.name.ifBlank { it.id }) }
+                    }
                 }
             }
+            val optionsState = result.fold(
+                onSuccess = { FieldOptionsState.Ready(it) },
+                onFailure = {
+                    val message = it.message ?: "选项加载失败"
+                    val previous = (current as? FieldOptionsState.Ready)?.options
+                        ?: target?.let { exchangeTarget ->
+                            ExchangeOptionsCache.loadForSettingsCache(userId, exchangeTarget)
+                                .map { row -> FieldOptionUiModel(row.id, row.name.ifBlank { row.id }) }
+                        }
+                    if (previous != null && (previous.isNotEmpty() || current is FieldOptionsState.Ready)) {
+                        FieldOptionsState.Ready(previous, refreshError = message)
+                    } else {
+                        FieldOptionsState.Error(message)
+                    }
+                },
+            )
             _uiState.update { state ->
-                state.copy(
-                    fieldOptions = state.fieldOptions + (
-                        key to result.fold(
-                            onSuccess = { FieldOptionsState.Ready(it) },
-                            onFailure = { FieldOptionsState.Error(it.message ?: "选项加载失败") },
-                        )
-                    ),
-                )
+                state.copy(fieldOptions = state.fieldOptions + (key to optionsState))
             }
         }
     }
