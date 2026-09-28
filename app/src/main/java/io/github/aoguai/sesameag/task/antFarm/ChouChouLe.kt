@@ -14,10 +14,12 @@ import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
@@ -26,6 +28,7 @@ import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.ResChecker
+import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONArray
@@ -704,7 +707,9 @@ class ChouChouLe {
         if (farm.enableChouchoule?.value != true || farm.autoExchange?.value != true || ApplicationHookConstants.isOffline()) return
         try {
             val response = JSONObject(AntFarmRpcCall.queryDrawMachineActivity_New("ipDrawMachine", "dailyDrawMachine"))
-            if (!ResChecker.checkRes(TAG, response)) return
+            if (!ResChecker.checkRes(TAG, response)) {
+                return
+            }
             val activity = response.optJSONObject("drawMachineActivity") ?: return
             val activityId = activity.optString("activityId")
             if (activityId.isNotBlank()) batchExchangeRewards(activityId, activity.optLong("endTime", 0))
@@ -895,6 +900,7 @@ class ChouChouLe {
     }
 
     fun refreshIpChouChouLeExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
+        ExchangeFetchPacing.domainStartDelay()
         val activity = queryActiveIpDrawActivity() ?: throw IllegalStateException("未获取到有效的IP抽抽乐活动")
         val snapshot = queryIpDrawMallSnapshot(activity) ?: throw IllegalStateException("未获取到IP抽抽乐商店快照")
         syncIpDrawShopSnapshot(snapshot)
@@ -962,6 +968,7 @@ class ChouChouLe {
                 ?.let { balanceCent = it.optInt("cent", balanceCent) }
 
             val itemInfoVOList = jo.optJSONArray("itemInfoVOList")
+            if (itemInfoVOList == null) RequestManager.failExchangeSettingsRefresh()
             if (itemInfoVOList == null || itemInfoVOList.length() == 0) {
                 break
             }
@@ -979,6 +986,7 @@ class ChouChouLe {
 
             pageCount++
             if (newItemCount == 0) {
+                RequestManager.failExchangeSettingsRefresh()
                 Log.farm("IP抽抽乐商店💸[分页未发现新商品，停止继续查询: startIndex=$startIndex]")
                 break
             }
@@ -988,11 +996,16 @@ class ChouChouLe {
             val hasMore = if (jo.has("hasMore")) jo.optBoolean("hasMore", false) else itemInfoVOList.length() >= pageSize
             if (!hasMore || nextStartIndex <= startIndex) {
                 if (hasMore && nextStartIndex <= startIndex) {
+                    RequestManager.failExchangeSettingsRefresh()
                     Log.farm("IP抽抽乐商店💸[分页 nextStartIndex 未前进，停止继续查询: startIndex=$startIndex]")
                 }
                 break
             }
+            if (pageCount >= maxPages || seenStartIndexes.contains(nextStartIndex)) {
+                RequestManager.failExchangeSettingsRefresh()
+            }
             startIndex = nextStartIndex
+            ExchangeFetchPacing.pageTurnDelay()
         }
 
         if (pageCount >= maxPages) {

@@ -52,11 +52,13 @@ import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
@@ -1762,6 +1764,15 @@ class AntFarm : ModelTask() {
 
     private fun refreshIpChouChouLeExchangeOptionsForSettings(): List<MapperEntity> {
         val legacyRows = AntFarmIPChouChouLeBenefit.getList()
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.farm("IP抽抽乐商店💸设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -1795,7 +1806,7 @@ class AntFarm : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshIpChouChouLeExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1820,25 +1831,39 @@ class AntFarm : ModelTask() {
     }
 
     internal fun refreshIpChouChouLeExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { ChouChouLe().refreshIpChouChouLeExchangeOptionsFromRpc() }
 
 
     private fun buildParadiseCoinExchangeItem(
         spuId: String,
         spuName: String,
         minPrice: Int,
+        moneyPrice: Int,
+        outSpuId: String,
         controlTag: String,
         itemStatusList: JSONArray?
     ): ExchangeItem {
         val statusText = formatFarmPropStatusList(itemStatusList)
         val blocked = hasBlockingFarmPropStatus(itemStatusList)
-        val safety = if (blocked) ExchangeSafety.UNAVAILABLE else ExchangeSafety.AUTO
-        val safetyReason = if (blocked) statusText else ""
+        val mixedPayment = moneyPrice > 0 || outSpuId.isNotBlank()
+        val safety = when {
+            blocked -> ExchangeSafety.UNAVAILABLE
+            mixedPayment -> ExchangeSafety.LOG_ONLY
+            else -> ExchangeSafety.AUTO
+        }
+        val safetyReason = when {
+            blocked -> statusText
+            mixedPayment -> "乐园币+现金混合支付"
+            else -> ""
+        }
         val effectTags = ExchangeEffectCatalog.tagsFor(ExchangeEffectCatalog.SOURCE_FARM_PARADISE, spuName)
         return ExchangeItem(
             id = spuId,
             name = spuName.ifBlank { spuId },
-            cost = ExchangeCost(pointText = "${minPrice}乐园币"),
+            cost = ExchangeCost(
+                pointText = "${minPrice}乐园币",
+                cashText = if (moneyPrice > 0) "${String.format(Locale.US, "%.2f", moneyPrice / 100.0)}元" else ""
+            ),
             limit = ExchangeLimit(statusText = listOf(controlTag, statusText).filter { it.isNotBlank() }.joinToString("、")),
             safety = safety,
             safetyReason = safetyReason,
@@ -1854,6 +1879,15 @@ class AntFarm : ModelTask() {
     }
 
     private fun refreshParadiseCoinExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.farm("小鸡乐园币💸设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -1879,7 +1913,7 @@ class AntFarm : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            refreshParadiseCoinExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { refreshParadiseCoinExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshParadiseCoinExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1902,12 +1936,13 @@ class AntFarm : ModelTask() {
 
     private fun refreshParadiseCoinExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         try {
+            ExchangeFetchPacing.domainStartDelay()
             val jo = JSONObject(AntFarmRpcCall.getMallHome())
             if (!ResChecker.checkRes(TAG, jo)) {
                 Log.error(TAG, "小鸡乐园币💸[设置页刷新权益列表失败]")
                 throw IllegalStateException("小鸡乐园币刷新权益列表失败")
             }
-            val mallItemSimpleList = jo.optJSONArray("mallItemSimpleList") ?: return emptyList()
+            val mallItemSimpleList = jo.optJSONArray("mallItemSimpleList") ?: throw IllegalStateException("小鸡乐园币兑换列表缺少 mallItemSimpleList")
             val benefitMap = IdMapManager.getInstance(ParadiseCoinBenefitIdMap::class.java)
             val rows = mutableListOf<ExchangeOptionRow>()
             for (i in 0..<mallItemSimpleList.length()) {
@@ -1920,7 +1955,7 @@ class AntFarm : ModelTask() {
                     continue
                 }
                 val itemStatusList = mallItemInfo.optJSONArray("itemStatusList")
-                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName.ifBlank { spuId }, minPrice, controlTag, itemStatusList)
+                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName.ifBlank { spuId }, minPrice, mallItemInfo.optInt("moneyPrice"), mallItemInfo.optString("outSpuId"), controlTag, itemStatusList)
                 benefitMap.add(spuId, exchangeItem.displayName())
                 rows.add(exchangeItem.toOptionRow())
             }
@@ -1934,7 +1969,7 @@ class AntFarm : ModelTask() {
     }
 
     internal fun refreshParadiseCoinExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        refreshParadiseCoinExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { refreshParadiseCoinExchangeOptionsFromRpc() }
 
     internal fun replenishExchangeByNeed(
         need: ExchangeEffectNeed,
@@ -1951,9 +1986,6 @@ class AntFarm : ModelTask() {
             ?.filter { it.isNotEmpty() }
             ?.toSet()
             ?: emptySet()
-        if (selectedIds.isEmpty()) {
-            return ExchangeReplenishResult.NOT_SELECTED
-        }
         return runCatching {
             val jo = JSONObject(AntFarmRpcCall.getMallHome())
             if (!ResChecker.checkRes(TAG, jo)) {
@@ -1968,6 +2000,8 @@ class AntFarm : ModelTask() {
                     spuId = mallItemInfo.optString("spuId"),
                     spuName = mallItemInfo.optString("spuName"),
                     minPrice = mallItemInfo.optInt("minPrice"),
+                    moneyPrice = mallItemInfo.optInt("moneyPrice"),
+                    outSpuId = mallItemInfo.optString("outSpuId"),
                     controlTag = mallItemInfo.optString("controlTag"),
                     itemStatusList = mallItemInfo.optJSONArray("itemStatusList")
                 )
@@ -2036,7 +2070,7 @@ class AntFarm : ModelTask() {
                 val controlTag = mallItemInfo.getString("controlTag")
                 val spuId = mallItemInfo.getString("spuId")
                 val itemStatusList = mallItemInfo.optJSONArray("itemStatusList")
-                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName, minPrice, controlTag, itemStatusList)
+                val exchangeItem = buildParadiseCoinExchangeItem(spuId, spuName, minPrice, mallItemInfo.optInt("moneyPrice"), mallItemInfo.optString("outSpuId"), controlTag, itemStatusList)
                 oderInfo = exchangeItem.displayName()
                 IdMapManager.getInstance(ParadiseCoinBenefitIdMap::class.java)
                     .add(spuId, oderInfo)

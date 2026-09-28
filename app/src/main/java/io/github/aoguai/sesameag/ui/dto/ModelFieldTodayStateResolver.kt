@@ -122,10 +122,6 @@ object ModelFieldTodayStateResolver {
 
             "AntMember.memberTask" -> {
                 when {
-                    Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY) -> {
-                        inactive("今日会员任务已止损")
-                    }
-
                     Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY) -> {
                         inactive("今日会员任务已处理")
                     }
@@ -191,6 +187,10 @@ object ModelFieldTodayStateResolver {
 
             "AntMember.beanSignIn" -> {
                 flag(StatusFlags.FLAG_ANTMEMBER_BEAN_SIGN_DONE, "今日安心豆签到已处理")
+            }
+
+            "AntMember.beanDrawPrize" -> {
+                flag(StatusFlags.FLAG_ANTMEMBER_BEAN_DRAW_PRIZE_DONE, "今日安心豆抽奖已处理")
             }
 
             "AntMember.collectInsuredGold" -> {

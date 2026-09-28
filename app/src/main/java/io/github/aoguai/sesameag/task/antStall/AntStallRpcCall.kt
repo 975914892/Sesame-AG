@@ -16,7 +16,7 @@ import java.util.UUID
 object AntStallRpcCall {
 
     /** 接口版本号 */
-    private const val VERSION = "0.1.2607061424.40"
+    private const val VERSION = "0.1.2609021051.58"
     private const val BASE_SOURCE = "ch_appcenter__chsub_9patch"
     private const val IEP_SOURCE = "AST"
     private const val SHARE_SOURCE = "ANTSTALL"
@@ -30,7 +30,6 @@ object AntStallRpcCall {
     private const val METHOD_TASK_LIST = "com.alipay.antstall.task.list"
     private const val METHOD_SIGN_TODAY = "com.alipay.antstall.sign.today"
     private const val METHOD_FINISH_TASK = "com.alipay.antiep.finishTask"
-    private const val METHOD_GENERATE_TOKEN = "com.alipay.antiep.generateToken"
     private const val METHOD_RECEIVE_TASK_AWARD = "com.alipay.antiep.receiveTaskAward"
 
     /**
@@ -114,7 +113,7 @@ object AntStallRpcCall {
      */
     fun rankDonateCount(startNum: Int): String =
         RequestManager.requestString(
-            "com.alipay.antstall.rank.donate.count",
+            "com.alipay.antstall.rank.coin.donate",
             "[{\"source\":\"$BASE_SOURCE\",\"startNum\":$startNum,\"systemType\":\"android\",\"version\":\"$VERSION\"}]",
         )
 
@@ -165,18 +164,6 @@ object AntStallRpcCall {
             "[{\"outBizNo\":\"$outBizNo\",\"requestType\":\"RPC\",\"sceneCode\":\"ANTSTALL_TASK\",\"source\":\"$IEP_SOURCE\",\"systemType\":\"android\",\"taskType\":\"$taskType\",\"version\":\"$VERSION\"}]"
         )
         return response
-    }
-
-    /**
-     * @brief 生成外跳任务 token
-     * @param taskType 任务类型
-     * @return 响应字符串
-     */
-    fun generateToken(taskType: String): String {
-        return RequestManager.requestString(
-            METHOD_GENERATE_TOKEN,
-            "[{\"requestType\":\"RPC\",\"sceneCode\":\"ANTSTALL_TASK\",\"source\":\"$IEP_SOURCE\",\"systemType\":\"android\",\"taskType\":\"$taskType\",\"version\":\"$VERSION\"}]"
-        )
     }
 
     /**

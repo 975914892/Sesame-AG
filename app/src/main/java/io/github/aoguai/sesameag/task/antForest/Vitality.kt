@@ -7,9 +7,11 @@ import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.VitalityStore.ExchangeStatus
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.maps.VitalityRewardsMap
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.util.ResChecker
 
 /**
@@ -54,7 +56,7 @@ object Vitality {
     }
 
     @JvmStatic
-    fun initVitality(labelType: String) {
+    fun initVitality(labelType: String): Boolean {
         try {
             skuInfo.clear()
             runCatching { AntForestRpcCall.queryVitalityStoreIndex() }
@@ -64,7 +66,11 @@ object Vitality {
             var loadedAny = false
             while (startIndex <= 100) {
                 val itemInfoVOList = ItemListByType(labelType, startIndex, pageSize)
-                if (itemInfoVOList == null || itemInfoVOList.length() == 0) {
+                if (itemInfoVOList == null) {
+                    RequestManager.failExchangeSettingsRefresh()
+                    return false
+                }
+                if (itemInfoVOList.length() == 0) {
                     break
                 }
                 loadedAny = true
@@ -76,13 +82,18 @@ object Vitality {
                     break
                 }
                 startIndex += pageSize
+                if (startIndex > 100) RequestManager.failExchangeSettingsRefresh()
+                ExchangeFetchPacing.pageTurnDelay()
             }
             if (!loadedAny) {
                 Log.error(TAG, "活力兑换🍃初始化失败！")
             }
+            return true
         } catch (th: Throwable) {
             Log.runtime(TAG, "initVitality err")
             Log.printStackTrace(TAG, th)
+            RequestManager.failExchangeSettingsRefresh()
+            return false
         }
     }
 

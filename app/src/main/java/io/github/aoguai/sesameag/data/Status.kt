@@ -756,14 +756,31 @@ class Status {
         @JvmStatic
         @JvmOverloads
         fun setFlagToday(flag: String, retryTimes: String? = null) {
-            // RPC 桥先进入离线，会员随后仍须保存当天风险停止标识，避免恢复后重复触发。
-            if (ApplicationHookConstants.isOffline() && flag != StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_RISK_STOP_TODAY) {
+            if (ApplicationHookConstants.isOffline()) {
                 if (offlineSkippedTodayFlags.add(flag)) {
                     Log.record(TAG, "离线模式跳过今日标识: $flag")
                 }
                 return
             }
 
+            setFlagTodayInternal(flag, retryTimes)
+        }
+
+        /**
+         * 写入 RPC 硬阻塞停止标识，允许在全局 offline 后持久化。
+         * 普通任务的完成标识仍受离线写入限制。
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun setFlagTodayWhileOffline(flag: String, retryTimes: String? = null) {
+            if (!flag.startsWith(StatusFlags.FLAG_RPC_DAILY_RISK_STOP_PREFIX)) {
+                Log.record(TAG, "拒绝写入非 RPC 风控离线标识: $flag")
+                return
+            }
+            setFlagTodayInternal(flag, retryTimes)
+        }
+
+        private fun setFlagTodayInternal(flag: String, retryTimes: String?) {
             val (module, name) = parseFlag(flag)
             val flags = INSTANCE.moduleFlags.getOrPut(module) { HashMap() }
             val oldCount = flags[name] ?: 0

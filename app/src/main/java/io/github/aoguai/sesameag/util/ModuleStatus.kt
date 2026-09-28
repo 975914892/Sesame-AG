@@ -27,7 +27,8 @@ object ModuleStatus {
     }
 
     fun classifyFrameworkName(frameworkName: String?): FrameworkCategory {
-        return if (frameworkName?.trim() == "LSPosed") {
+        val officialName = frameworkName?.trim()
+        return if (officialName == "LSPosed" || officialName == "Vector") {
             FrameworkCategory.LSPOSED
         } else {
             FrameworkCategory.UNSUPPORTED

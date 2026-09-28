@@ -15,4 +15,7 @@ internal fun AntMember.scheduleBeanWorkflows(
     if (beanExchangeRight?.value == true) {
         deferredTasks.add(scope.async(Dispatchers.IO) { beanExchangeRight() })
     }
+    if (beanDrawPrize?.value == true) {
+        deferredTasks.add(scope.async(Dispatchers.IO) { beanDrawPrize() })
+    }
 }

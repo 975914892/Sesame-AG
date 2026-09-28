@@ -3,11 +3,14 @@ package io.github.aoguai.sesameag.task.common
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.Status.TodayFlagState
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
+import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import kotlin.math.max
+import kotlin.random.Random
 
 enum class TaskRpcFailureType {
     TERMINAL_DONE,
@@ -351,6 +354,7 @@ class TaskFlowEngine(
     private companion object {
         const val MAX_DYNAMIC_ROUND_LIMIT = 64
         const val DYNAMIC_ROUND_LIMIT_EXTRA = 6
+        const val ROUND_SLEEP_JITTER_MS = 1500L
     }
 
     fun run(): TaskFlowRunResult {
@@ -371,6 +375,10 @@ class TaskFlowEngine(
         var failureStoppedActions = false
 
         while (round <= roundLimit) {
+            if (round > 1) {
+                // 轮间停顿：基础间隔叠加随机抖动，避免匀速连续回查形成机器节奏
+                CoroutineUtils.sleepCompat(roundSleepMs + Random.nextLong(0, ROUND_SLEEP_JITTER_MS))
+            }
             if (adapter.isFlowHandledToday()) {
                 adapter.onFlowHandledToday()
                 return finishRunResult(
@@ -425,8 +433,10 @@ class TaskFlowEngine(
                 }
 
             RpcOfflineRisk.enterOfflineIfNeeded(adapter.flowName, response)
-            if (ApplicationHookConstants.isOffline()) {
-                adapter.logInfo("${adapter.flowName}[查询后检测到离线模式，中断任务流]")
+            val dailyRiskStopped = RpcDailyCircuit.isStopResponse(response)
+            if (dailyRiskStopped || ApplicationHookConstants.isOffline()) {
+                adapter.logInfo(if (dailyRiskStopped) "${adapter.flowName}[RPC 今日硬阻塞停止，中断当前任务流]"
+                    else "${adapter.flowName}[查询后检测到离线模式，中断任务流]")
                 return finishRunResult(
                     completed = false,
                     progressed = progressedAny,
@@ -530,6 +540,21 @@ class TaskFlowEngine(
 
                 val result = executeAction(item, action)
                 actionAttemptedAny = true
+                if (runCatching { RpcDailyCircuit.isStopResponse(JSONObject(result.raw)) }.getOrDefault(false)) {
+                    adapter.logInfo("${adapter.flowName}[RPC 今日硬阻塞停止，中断当前任务流]")
+                    return finishRunResult(
+                        completed = false,
+                        progressed = progressedAny,
+                        stopped = true,
+                        rounds = round,
+                        actionAttempted = actionAttemptedAny,
+                        noProgressSuccess = noProgressSuccessAny,
+                        interrupted = true,
+                        deferredCount = deferredCountAny,
+                        deferredReasonCounts = deferredReasonCountsAny,
+                        failureCount = failureCountAny,
+                    )
+                }
                 val deferredReason = result.deferredReason
                 val requiresStateConfirmation = deferredReason == DeferredReason.STATE_CONFIRMATION
                 val failureType = result.failureType ?: TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW

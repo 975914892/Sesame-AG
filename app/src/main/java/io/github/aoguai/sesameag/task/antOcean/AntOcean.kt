@@ -1058,13 +1058,10 @@ class AntOcean : ModelTask() {
                         detail = aiFishTaskActionDetail(item, "playDuration"),
                     )
                 }
-                return TaskFlowActionResult.defer(
-                    deferredReason = DeferredReason.STATE_CONFIRMATION,
-                    message = "摸鱼游戏时长已受理，回查摸鱼任务及奖励",
-                    rpc = "GameCenterPlayRpcCall.submit",
-                    raw = duration.raw,
-                    refreshAfterAction = true,
-                )
+                Log.ocean("摸鱼任务🧾️[${item.title}]时长上报已接受，继续任务完成闭环")
+                // 时长 ACK 后显式完成摸鱼任务（抓包证实真实闭环为 submitUserPlayDurationAction → antiep.finishTask），
+                // 与同文件海洋任务路径 finishOceanGameTask 的融合模式一致
+                return handleAiFishFinishTask(item)
             }
             if (gameDecision.action == GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT && mappedTask != null) {
                 val report = kotlinx.coroutines.runBlocking { mappedTask.reportDetailed(1, logger = Log::ocean) }
@@ -1084,6 +1081,10 @@ class AntOcean : ModelTask() {
                     )
                 }
             }
+            return handleAiFishFinishTask(item)
+        }
+
+        private fun handleAiFishFinishTask(item: TaskFlowItem): TaskFlowActionResult {
             val response = AntOceanRpcCall.aiFishFinishTask(item.type)
             val result =
                 JsonUtil.parseJSONObjectOrNull(response) ?: return TaskFlowActionResult.failure(
@@ -1095,8 +1096,14 @@ class AntOcean : ModelTask() {
                     stopCurrentRound = true,
                 )
             if (isOceanTaskRpcSuccess(result)) {
-                Log.ocean("摸鱼任务🧾️[${item.title}]")
-                return TaskFlowActionResult.success()
+                Log.ocean("摸鱼任务🧾️[${item.title}]完成请求已受理，等待任务列表确认")
+                return TaskFlowActionResult.defer(
+                    deferredReason = DeferredReason.STATE_CONFIRMATION,
+                    message = "摸鱼任务完成请求已受理，回查摸鱼任务及奖励",
+                    rpc = "AntOceanRpcCall.aiFishFinishTask",
+                    raw = response,
+                    refreshAfterAction = true,
+                )
             }
             return aiFishTaskActionFailureResult(
                 item = item,
@@ -2825,8 +2832,8 @@ class AntOcean : ModelTask() {
             }
 
             code == "400000040" -> {
-                // 仅当前动作被明确拒绝，不据此永久封禁任务及领奖。
-                TaskRpcFailureType.NON_RETRYABLE_INVALID
+                // 当前任务类型不支持该RPC完成，自动加入黑名单；领奖阶段不受黑名单影响。
+                TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
             }
 
             code in setOf("20020012", "TASK_ID_INVALID", "ILLEGAL_ARGUMENT", "PROMISE_TEMPLATE_NOT_EXIST") -> {

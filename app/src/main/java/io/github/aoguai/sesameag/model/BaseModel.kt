@@ -41,6 +41,7 @@ class BaseModel : Model() {
         modelFields.addField(timedTaskModel) // 定时任务模式选择
         modelFields.addField(timeoutRestart) // 超时是否重启
         modelFields.addField(waitWhenException) // 异常发生时的等待时间
+        modelFields.addField(exceptionPauseThreshold) // 连续失败自动挂起阈值
         modelFields.addField(errNotify) // 异常通知开关
         modelFields.addField(setMaxErrorCount) // 异常次数阈值
         modelFields.addField(customRpcScheduleEnable) // 自定义RPC(配置文件+定时执行)
@@ -209,6 +210,18 @@ class BaseModel : Model() {
             )
 
         /**
+         * 连续失败自动挂起阈值（次），0 表示关闭自动挂起
+         */
+        val exceptionPauseThreshold: IntegerModelField =
+            IntegerModelField(
+                "exceptionPauseThreshold",
+                "连续失败挂起阈值(次)",
+                3,
+                0,
+                10,
+            ).withDesc("任务连续执行异常达到该次数后自动挂起一段「异常等待时间」；填 0 关闭连续失败自动挂起。")
+
+        /**
          * 异常发生时的等待时间（分钟）
          */
         val waitWhenException: MultiplyIntegerModelField =
@@ -219,7 +232,7 @@ class BaseModel : Model() {
                 0,
                 24 * 60,
                 60000,
-            ).withDesc("任务运行异常后的额外等待时间；填 0 表示异常后不额外挂起。")
+            ).withDesc("任务触发服务端限流或连续失败等异常保护后的挂起时长；填 0 表示异常后不额外挂起。")
 
         /**
          * 异常通知开关

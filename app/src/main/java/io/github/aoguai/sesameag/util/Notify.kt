@@ -15,9 +15,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
-import io.github.aoguai.sesameag.data.RuntimeInfo
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.hook.Toast
 import io.github.aoguai.sesameag.model.BaseModel
+import io.github.aoguai.sesameag.task.ModelTask
 import kotlin.concurrent.Volatile
 
 @SuppressLint("StaticFieldLeak")
@@ -47,6 +48,10 @@ object Notify {
     private var nextExecTimeCache: Long = 0
     @Volatile
     private var globalStatusText: String? = null
+    @Volatile
+    private var globalStatusAtMs: Long = 0L
+    @Volatile
+    private var globalStatusTtlMs: Long = 0L
     private var lastExecText: String = ""
     private val runningTaskLock = Any()
     private val runningTaskNames = LinkedHashSet<String>()
@@ -57,17 +62,24 @@ object Notify {
     private const val WAITING_TITLE = "等待下次执行"
     private const val MULTI_RUNNING_PREFIX = "多个任务运行中："
 
-    private fun checkPermission(context: Context): Boolean {
+    /** 瞬态状态文案（如恢复成功提示）的默认展示时长，过期后回落到实时状态标题 */
+    private const val TRANSIENT_STATUS_TTL_MS = 10 * 60_000L
+
+    private fun checkPermission(context: Context, silent: Boolean = false): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                Log.error(TAG, "Missing POST_NOTIFICATIONS permission to send notification: $context")
-                Toast.show("请在设置中开启目标应用通知权限")
+                if (!silent) {
+                    Log.error(TAG, "Missing POST_NOTIFICATIONS permission to send notification: $context")
+                    Toast.show("请在设置中开启目标应用通知权限")
+                }
                 return false
             }
         }
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
-            Log.error(TAG, "Notifications are disabled for this app: $context")
-            Toast.show("请在设置中开启目标应用通知权限")
+            if (!silent) {
+                Log.error(TAG, "Notifications are disabled for this app: $context")
+                Toast.show("请在设置中开启目标应用通知权限")
+            }
             return false
         }
         return true
@@ -162,47 +174,70 @@ object Notify {
             if (!checkPermission(context)) {
                 return
             }
-
-            Notify.context = context
-            notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            createChannels(notificationManager!!)
-
-            globalStatusText = null
-            lastExecText = ""
-            nextExecTimeCache = 0
-            clearRunningTasks()
-            clearRunningTaskDisplayOrder()
-            lastUpdateTime = System.currentTimeMillis()
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                data = "alipays://platformapi/startapp?appId=".toUri()
-            }
-            val pendingIntent = PendingIntent.getActivity(
-                context,
-                0,
-                intent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-
-            runningBuilder = NotificationCompat.Builder(context, RUNNING_CHANNEL_ID)
-                .setCategory(NotificationCompat.CATEGORY_STATUS)
-                .setSmallIcon(android.R.drawable.sym_def_app_icon)
-                .setLargeIcon(BitmapFactory.decodeResource(context.resources, android.R.drawable.sym_def_app_icon))
-                .setContentTitle(STARTUP_TITLE)
-                .setContentText("暂无执行记录")
-                .setSubText(SUB_TEXT)
-                .setAutoCancel(false)
-                .setContentIntent(pendingIntent)
-                .setOnlyAlertOnce(true)
-
-            if (BaseModel.enableOnGoing.value == true) {
-                runningBuilder!!.setOngoing(true)
-            }
-
-            isNotificationStarted = true
-            render(force = true)
+            startRunningInternal(context)
         } catch (e: Exception) {
             Log.printStackTrace(e)
         }
+    }
+
+    /**
+     * 常驻通知自愈入口：目标应用通知权限被拒导致链路未启动时，在后续状态更新或
+     * 用户回到目标应用时静默重试，授权后自动恢复，无需等待目标进程重启。
+     */
+    @JvmStatic
+    fun ensureStarted() {
+        if (isNotificationStarted) {
+            return
+        }
+        try {
+            val ctx = context ?: return
+            if (!checkPermission(ctx, silent = true)) {
+                return
+            }
+            startRunningInternal(ctx)
+        } catch (e: Exception) {
+            Log.printStackTrace(e)
+        }
+    }
+
+    private fun startRunningInternal(context: Context) {
+        Notify.context = context
+        notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        createChannels(notificationManager!!)
+
+        globalStatusText = null
+        lastExecText = ""
+        nextExecTimeCache = 0
+        clearRunningTasks()
+        clearRunningTaskDisplayOrder()
+        lastUpdateTime = System.currentTimeMillis()
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            data = "alipays://platformapi/startapp?appId=".toUri()
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        runningBuilder = NotificationCompat.Builder(context, RUNNING_CHANNEL_ID)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setSmallIcon(android.R.drawable.sym_def_app_icon)
+            .setLargeIcon(BitmapFactory.decodeResource(context.resources, android.R.drawable.sym_def_app_icon))
+            .setContentTitle(STARTUP_TITLE)
+            .setContentText("暂无执行记录")
+            .setSubText(SUB_TEXT)
+            .setAutoCancel(false)
+            .setContentIntent(pendingIntent)
+            .setOnlyAlertOnce(true)
+
+        if (BaseModel.enableOnGoing.value == true) {
+            runningBuilder!!.setOngoing(true)
+        }
+
+        isNotificationStarted = true
+        render(force = true)
     }
 
     @JvmStatic
@@ -227,12 +262,17 @@ object Notify {
     }
 
     @JvmStatic
-    fun updateRunningStatus(status: String?) {
+    fun updateRunningStatus(status: String?, ttlMs: Long = TRANSIENT_STATUS_TTL_MS) {
         if (!isNotificationStarted) {
-            return
+            ensureStarted()
+            if (!isNotificationStarted) {
+                return
+            }
         }
         try {
             globalStatusText = status?.takeIf { it.isNotBlank() }
+            globalStatusAtMs = System.currentTimeMillis()
+            globalStatusTtlMs = ttlMs
             render(force = true)
         } catch (e: Exception) {
             Log.printStackTrace(e)
@@ -242,7 +282,10 @@ object Notify {
     @JvmStatic
     fun startTaskRunning(taskName: String?) {
         if (!isNotificationStarted) {
-            return
+            ensureStarted()
+            if (!isNotificationStarted) {
+                return
+            }
         }
         try {
             addRunningTask(taskName)
@@ -255,7 +298,10 @@ object Notify {
     @JvmStatic
     fun finishTaskRunning(taskName: String?) {
         if (!isNotificationStarted) {
-            return
+            ensureStarted()
+            if (!isNotificationStarted) {
+                return
+            }
         }
         try {
             removeRunningTask(taskName)
@@ -268,7 +314,10 @@ object Notify {
     @JvmStatic
     fun updateRunningNextExec(nextExecTime: Long) {
         if (!isNotificationStarted) {
-            return
+            ensureStarted()
+            if (!isNotificationStarted) {
+                return
+            }
         }
         try {
             if (nextExecTime != -1L) {
@@ -283,7 +332,10 @@ object Notify {
     @JvmStatic
     fun updateRunningLastExec(content: String?) {
         if (!isNotificationStarted) {
-            return
+            ensureStarted()
+            if (!isNotificationStarted) {
+                return
+            }
         }
         try {
             val body = content?.trim().orEmpty()
@@ -299,8 +351,10 @@ object Notify {
     }
 
     /**
-     * 统一合成常驻通知：标题反映当前运行/暂停状态，内容用 BigTextStyle 同时展示
-     * “下次执行”和“上次执行”，三个来源字段互不覆盖。
+     * 统一合成常驻通知：标题按「任务异常暂停（多任务聚合） > 离线 > 任务运行中 > 瞬态状态 > 等待下次执行 >
+     * 启动中」的优先级实时合成，暂停/离线直接读实时状态源，不依赖粘滞文本；瞬态状态
+     * （如恢复成功提示）带 TTL 自动过期。内容用 BigTextStyle 同时展示“下次执行”和
+     * “上次执行”，三个来源字段互不覆盖。
      */
     @JvmStatic
     private fun render(force: Boolean) {
@@ -315,8 +369,12 @@ object Notify {
             }
             lastUpdateTime = System.currentTimeMillis()
 
-            val pauseTime = RuntimeInfo.getInstance().getLong(RuntimeInfo.RuntimeInfoKey.ForestPauseTime)
-            val explicitStatus = globalStatusText?.takeIf { it.isNotBlank() }
+            val now = System.currentTimeMillis()
+            val pausedTasks = ModelTask.activeTaskPauseMap().entries.sortedBy { it.value }
+            val explicitStatus = globalStatusText?.takeIf {
+                it.isNotBlank() && (globalStatusTtlMs <= 0L || now - globalStatusAtMs < globalStatusTtlMs)
+            }
+            val offlinePaused = ApplicationHookConstants.isOffline()
             val runningTasks = snapshotRunningTasks()
             val runningSummary = when {
                 runningTasks.isEmpty() -> null
@@ -324,11 +382,18 @@ object Notify {
                 else -> MULTI_RUNNING_PREFIX + runningTasks.joinToString("、")
             }
             val title = when {
-                pauseTime > System.currentTimeMillis() -> {
-                    "异常暂停，恢复时间 ${TimeUtil.getCommonDate(pauseTime)}"
+                pausedTasks.size == 1 -> {
+                    pausedTasks.first().key + " 异常暂停，恢复时间 " + TimeUtil.getCommonDate(pausedTasks.first().value)
                 }
-                explicitStatus != null -> {
-                    explicitStatus
+                pausedTasks.size > 1 -> {
+                    pausedTasks.size.toString() + " 个任务异常暂停"
+                }
+                offlinePaused -> {
+                    when (ApplicationHookConstants.offlineReason) {
+                        "auth_like" -> "已暂停（风控/验证）"
+                        "rpc_error_threshold", "network_error_threshold" -> "已暂停（网络离线）"
+                        else -> "已暂停（离线冷却）"
+                    }
                 }
                 runningTasks.isNotEmpty() -> {
                     if (runningTasks.size == 1) {
@@ -337,11 +402,17 @@ object Notify {
                         "$RUNNING_TITLE（${runningTasks.size}）"
                     }
                 }
+                explicitStatus != null -> {
+                    explicitStatus
+                }
                 nextExecTimeCache > 0 -> WAITING_TITLE
                 else -> STARTUP_TITLE
             }
 
             val lines = buildList {
+                if (pausedTasks.size > 1) {
+                    add("暂停: " + pausedTasks.joinToString("、") { it.key + "(" + TimeUtil.getCommonDate(it.value) + ")" })
+                }
                 if (runningTasks.size > 1) {
                     add(runningSummary!!)
                 }

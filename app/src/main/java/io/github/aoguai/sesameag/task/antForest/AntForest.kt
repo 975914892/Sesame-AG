@@ -1,7 +1,6 @@
 package io.github.aoguai.sesameag.task.antForest
 
 import android.annotation.SuppressLint
-import io.github.aoguai.sesameag.data.RuntimeInfo
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.data.Statistics
@@ -52,12 +51,14 @@ import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.antFarm.FarmGame
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectTag
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
@@ -71,7 +72,6 @@ import io.github.aoguai.sesameag.util.FriendGuard
 import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.Notify.updateRunningLastExec
-import io.github.aoguai.sesameag.util.Notify.updateRunningStatus
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.TimeCounter
@@ -851,17 +851,6 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             "任务开始时输出当前森林背包道具清单。"
         ).also { showBagList = it })
         return modelFields
-    }
-
-    override fun check(): Boolean {
-        if (!super.check()) return false
-        val currentTime = System.currentTimeMillis()
-        val forestPauseTime = RuntimeInfo.getInstance().getLong(RuntimeInfo.RuntimeInfoKey.ForestPauseTime)
-        if (forestPauseTime > currentTime) {
-            Log.forest(getName() + "任务-异常等待中，暂不执行检测！")
-            return false
-        }
-        return true
     }
 
     /**
@@ -1759,6 +1748,15 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun refreshVitalityExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
+            UserMap.currentUid,
+            ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY,
+            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
+        )
+        if (freshRows.isNotEmpty()) {
+            Log.forest("活力兑换🍃设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows = ExchangeOptionsCache.loadForSettingsCache(
                 UserMap.currentUid,
@@ -1784,7 +1782,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return emptyList()
         }
         val rowsResult = runCatching {
-            refreshVitalityExchangeOptionsFromRpc()
+            RequestManager.withExchangeSettingsRefresh { refreshVitalityExchangeOptionsFromRpc() }
         }.onFailure {
             Log.printStackTrace(TAG, "refreshVitalityExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -1806,11 +1804,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     internal fun refreshVitalityExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        refreshVitalityExchangeOptionsFromRpc()
+        RequestManager.withExchangeSettingsRefresh { refreshVitalityExchangeOptionsFromRpc() }
 
     private fun refreshVitalityExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         return runCatching {
-            Vitality.initVitality("")
+            ExchangeFetchPacing.domainStartDelay()
+            if (!Vitality.initVitality("")) {
+                throw IllegalStateException("活力兑换列表拉取失败")
+            }
             val rows = buildVitalityExchangeOptionRows()
             ExchangeOptionsCache.save(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, rows)
             rows
@@ -1926,7 +1927,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         try {
 //            JSONObject bag = getBag();
 
-            Vitality.initVitality("")
+            if (!Vitality.initVitality("")) {
+                return false
+            }
             val exchangeList = vitalityExchangeList?.value ?: emptyMap()
             //            Map<String, Integer> maxLimitList = vitalityExchangeMaxList.value;
             for (entry in exchangeList.entries) {
@@ -1974,7 +1977,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return ExchangeReplenishResult.NOT_SELECTED
         }
         return runCatching {
-            Vitality.initVitality("")
+            if (!Vitality.initVitality("")) {
+                return@runCatching ExchangeReplenishResult.RETRY_LATER
+            }
             val safeMaxCount = maxCount.coerceAtLeast(1)
             var matchedSelected = false
             var attempted = false
@@ -3511,9 +3516,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         if (waitWhenExceptionMs > 0) {
                             val waitTime =
                                 System.currentTimeMillis() + waitWhenExceptionMs
-                            RuntimeInfo.getInstance()
-                                .put(RuntimeInfo.RuntimeInfoKey.ForestPauseTime, waitTime)
-                            updateRunningStatus("异常")
+                            pauseSelfUntil(waitTime)
                             Log.forest("触发异常,等待至" + TimeUtil.getCommonDate(waitTime))
                             errorWait = true
                             return@Runnable
@@ -4260,6 +4263,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         val code = extractForestTaskFailureCode(response)
         val message = extractForestTaskFailureMessage(response)
         return when {
+            code == "400000008" || // 完成任务幂等id重复，服务端已受理该次完成
             isForestTaskAlreadyHandled(response) ||
                 containsAnyForest(message, "已领取", "已经领取", "重复领取", "重复领奖", "重复完成", "已完成", "任务已完结", "任务已结束") ->
                 TaskRpcFailureType.TERMINAL_DONE

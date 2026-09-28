@@ -25,8 +25,8 @@ class RuntimeInfo private constructor() {
      * 枚举类型，定义所有可以存储和获取的运行时信息的键
      */
     enum class RuntimeInfoKey {
-        /** 森林暂停时间 */
-        ForestPauseTime
+        /** 任务级异常暂停表，JSON 字符串 {"任务名": 恢复时间毫秒}，按用户隔离 */
+        TaskPauseMap
     }
 
     init {
@@ -77,6 +77,14 @@ class RuntimeInfo private constructor() {
      * @return 对应的 long 值
      */
     fun getLong(key: RuntimeInfoKey): Long = joCurrent.optLong(key.name, 0L)
+
+    /**
+     * 根据枚举键获取对应的字符串值。如果键不存在，返回空字符串。
+     *
+     * @param key 键（枚举值）
+     * @return 对应的字符串值
+     */
+    fun getString(key: RuntimeInfoKey): String = joCurrent.optString(key.name, "")
 
     /**
      * 使用枚举键将值存储到当前用户的运行时信息中。

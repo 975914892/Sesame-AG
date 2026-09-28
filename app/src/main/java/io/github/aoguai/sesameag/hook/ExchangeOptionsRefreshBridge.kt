@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference
  */
 object ExchangeOptionsRefreshBridge {
     private const val TAG = "ExchangeOptionsRefreshBridge"
-    private const val DEFAULT_TIMEOUT_MS = 12_000L
+    private const val DEFAULT_TIMEOUT_MS = 120_000L
 
     const val TARGET_MEMBER_POINT = "member_point"
     const val TARGET_MYBANK_WELFARE = "mybank_welfare"

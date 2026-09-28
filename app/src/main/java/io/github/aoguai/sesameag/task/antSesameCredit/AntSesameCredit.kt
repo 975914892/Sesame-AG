@@ -34,10 +34,12 @@ import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
@@ -6122,6 +6124,16 @@ class AntSesameCredit : ModelTask() {
      * 仿照会员积分兑换逻辑：遍历列表更新Map，同时匹配用户设置进行兑换
      */
     private fun refreshSesameGrainExchangeOptionsForSettings(): List<MapperEntity> {
+        val freshRows =
+            ExchangeOptionsCache.loadFreshForSettingsCache(
+                UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN,
+                ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS,
+            )
+        if (freshRows.isNotEmpty()) {
+            Log.sesame("芝麻粒兑换🛒设置页使用新鲜缓存#${freshRows.size}")
+            return freshRows
+        }
         if (!HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
             val cachedRows =
                 ExchangeOptionsCache.loadForSettingsCache(
@@ -6150,7 +6162,7 @@ class AntSesameCredit : ModelTask() {
         }
         val rowsResult =
             runCatching {
-                refreshSesameGrainExchangeOptionsFromRpc()
+                RequestManager.withExchangeSettingsRefresh { refreshSesameGrainExchangeOptionsFromRpc() }
             }.onFailure {
                 Log.printStackTrace(TAG, "refreshSesameGrainExchangeOptionsForSettings.currentRpc err:", it)
             }
@@ -6175,6 +6187,7 @@ class AntSesameCredit : ModelTask() {
 
     private fun refreshSesameGrainExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
         try {
+            ExchangeFetchPacing.domainStartDelay()
             val userId = UserMap.currentUid
             val maxPage = 10
             val pageSize = 20
@@ -6196,9 +6209,9 @@ class AntSesameCredit : ModelTask() {
                 while (hasNextPage && currentPage <= maxPage) {
                     val jo = JSONObject(AntSesameCreditRpcCall.queryExchangeList(currentPage, pageSize, tab))
                     if (!ResChecker.checkRes(TAG, jo)) {
-                        break
+                        throw IllegalStateException("芝麻粒兑换列表查询失败")
                     }
-                    val data = jo.optJSONObject("data") ?: break
+                    val data = jo.optJSONObject("data") ?: throw IllegalStateException("芝麻粒兑换列表缺少 data")
                     val tabList = data.optJSONArray("tabList")
                     if (tabList != null) {
                         for (i in 0 until tabList.length()) {
@@ -6217,7 +6230,7 @@ class AntSesameCredit : ModelTask() {
                             }
                         }
                     }
-                    val list = data.optJSONArray("awardTemplateList") ?: break
+                    val list = data.optJSONArray("awardTemplateList") ?: throw IllegalStateException("芝麻粒兑换列表缺少 awardTemplateList")
                     for (i in 0 until list.length()) {
                         val candidate = buildSesameExchangeCandidate(list.optJSONObject(i) ?: continue) ?: continue
                         if (!seenTemplateIds.add(candidate.item.id)) {
@@ -6229,7 +6242,11 @@ class AntSesameCredit : ModelTask() {
                     }
                     hasNextPage = data.optBoolean("hasNext", false)
                     currentPage++
+                    if (hasNextPage && currentPage <= maxPage) {
+                        ExchangeFetchPacing.pageTurnDelay()
+                    }
                 }
+                if (hasNextPage) throw IllegalStateException("芝麻粒兑换列表尚有未拉取页面")
             }
             sesameGiftMap.save(userId)
             ExchangeOptionsCache.save(userId, ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN, rows)
@@ -6241,7 +6258,8 @@ class AntSesameCredit : ModelTask() {
         }
     }
 
-    internal fun refreshSesameGrainExchangeOptionsForRemote(): List<ExchangeOptionRow> = refreshSesameGrainExchangeOptionsFromRpc()
+    internal fun refreshSesameGrainExchangeOptionsForRemote(): List<ExchangeOptionRow> =
+        RequestManager.withExchangeSettingsRefresh { refreshSesameGrainExchangeOptionsFromRpc() }
 
     internal suspend fun doSesameGrainExchange(): Unit =
         CoroutineUtils.run {
@@ -6260,6 +6278,10 @@ class AntSesameCredit : ModelTask() {
                         ?.filter { it.isNotEmpty() }
                         ?.toSet()
                         ?: emptySet()
+                if (targetIds.isEmpty()) {
+                    Log.sesame("芝麻粒兑换🛒未勾选目标，跳过列表拉取")
+                    return@run
+                }
                 val maxPage = 10
                 val pageSize = 20
                 val pendingTabs = mutableListOf<String?>(null)
@@ -6271,8 +6293,9 @@ class AntSesameCredit : ModelTask() {
                 var refreshedCount = 0
                 var scanCompleted = true
                 var allSelectedTargetsHandled = true
+                var totalPages = 0
 
-                while (tabIndex < pendingTabs.size) {
+                outer@ while (tabIndex < pendingTabs.size) {
                     val tab = pendingTabs[tabIndex++]
                     val tabKey = tab ?: ""
                     if (!scannedTabs.add(tabKey)) {
@@ -6347,6 +6370,11 @@ class AntSesameCredit : ModelTask() {
                         }
                         hasNextPage = data.optBoolean("hasNext", false)
                         currentPage++
+                        totalPages++
+                        if (remainingTargetIds.isNullOrEmpty()) {
+                            Log.sesame("芝麻粒兑换🛒目标全部命中，提前结束拉取#命中${targetIds.size}/翻${totalPages}页")
+                            break@outer
+                        }
                     }
                     if (hasNextPage && currentPage > maxPage) {
                         scanCompleted = false
