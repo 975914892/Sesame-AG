@@ -15,7 +15,7 @@ import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 
-const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 2
+const val MAX_EXECUTABLE_ACCOUNT_SLOTS = 10
 
 enum class AccountSlotMigrationState {
     READY,
@@ -531,8 +531,14 @@ object AccountSlotRegistry {
         }
         val parsedRecord = runCatching {
             JsonUtil.parseObject(Files.readFromFile(recordFile), AccountSlotRecord::class.java)
-        }.getOrNull() ?: return null
-        val validatedRecord = validateRecord(parsedRecord) ?: return null
+        }.getOrNull() ?: run {
+            recordFile.delete()
+            return LoadedRecord(bootstrapRecord(), needsWrite = true)
+        }
+        val validatedRecord = validateRecord(parsedRecord) ?: run {
+            recordFile.delete()
+            return LoadedRecord(bootstrapRecord(), needsWrite = true)
+        }
         val recoveredRecord = recoverRecord(validatedRecord, recoverExpiredPending)
         return LoadedRecord(recoveredRecord, needsWrite = recoveredRecord != validatedRecord)
     }
