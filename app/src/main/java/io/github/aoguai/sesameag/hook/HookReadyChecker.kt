@@ -6,11 +6,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
 import io.github.aoguai.sesameag.SesameApplication
+import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.maps.UserMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 复用好友中心的目标应用就绪判定。
@@ -30,7 +32,7 @@ object HookReadyChecker {
             return true
         }
         val context = SesameApplication.appContext ?: ApplicationHook.appContext ?: return false
-        return isReadyByHookReadyBroadcast(context, normalizedExpectedUserId, timeoutMs)
+        return probe(context, normalizedExpectedUserId, timeoutMs).ready
     }
 
     @JvmStatic
@@ -50,22 +52,37 @@ object HookReadyChecker {
         return expectedUserId.isEmpty() || expectedUserId == currentUserId
     }
 
-    private fun isReadyByHookReadyBroadcast(context: Context, expectedUserId: String, timeoutMs: Long): Boolean {
-        val appContext = context.applicationContext
-        val ready = AtomicBoolean(false)
-        val received = AtomicBoolean(false)
+    data class ReadinessResult(
+        val replied: Boolean = false,
+        val ready: Boolean = false,
+        val workflowReady: Boolean = false,
+        val currentUserId: String = "",
+        val sessionEpoch: Long = 0L,
+        val message: String = "no_reply",
+    )
+
+    fun probe(
+        context: Context,
+        expectedUserId: String,
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    ): ReadinessResult {
+        val appContext = context.applicationContext ?: context
+        val requestToken = UUID.randomUUID().toString()
+        val result = AtomicReference(ReadinessResult())
         val latch = CountDownLatch(1)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action != ApplicationHookConstants.BroadcastActions.HOOK_READY_RESULT) {
-                    return
-                }
-                val resultUserId = intent.getStringExtra("userId").orEmpty().trim()
-                if (expectedUserId.isNotEmpty() && resultUserId.isNotEmpty() && expectedUserId != resultUserId) {
-                    return
-                }
-                ready.set(intent.getBooleanExtra("ready", false))
-                received.set(true)
+                if (intent?.action != ApplicationHookConstants.BroadcastActions.HOOK_READY_RESULT ||
+                    intent.getStringExtra("requestToken") != requestToken
+                ) return
+                result.set(ReadinessResult(
+                    replied = true,
+                    ready = intent.getBooleanExtra("ready", false),
+                    workflowReady = intent.getBooleanExtra("workflowReady", false),
+                    currentUserId = intent.getStringExtra("currentUserId").orEmpty().trim(),
+                    sessionEpoch = intent.getLongExtra("sessionEpoch", 0L),
+                    message = intent.getStringExtra("message").orEmpty(),
+                ))
                 latch.countDown()
             }
         }
@@ -77,13 +94,16 @@ object HookReadyChecker {
                 ContextCompat.RECEIVER_EXPORTED
             )
             appContext.sendBroadcast(Intent(ApplicationHookConstants.BroadcastActions.HOOK_READY).apply {
+                setPackage(General.PACKAGE_NAME)
                 putExtra("userId", expectedUserId)
+                putExtra("requestToken", requestToken)
+                putExtra("replyPackage", appContext.packageName)
             })
             latch.await(timeoutMs.coerceAtLeast(100L), TimeUnit.MILLISECONDS)
-            received.get() && ready.get()
+            result.get()
         } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "isReadyByHookReadyBroadcast err:", t)
-            false
+            Log.printStackTrace(TAG, "HookReady probe failed", t)
+            result.get()
         } finally {
             runCatching { appContext.unregisterReceiver(receiver) }
         }

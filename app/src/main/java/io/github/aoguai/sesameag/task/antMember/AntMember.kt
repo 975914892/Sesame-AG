@@ -32,7 +32,6 @@ import io.github.aoguai.sesameag.model.modelFieldExt.SelectModelField
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antOrchard.UrlUtil
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
-import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
@@ -41,6 +40,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
@@ -858,12 +858,10 @@ class AntMember : ModelTask() {
      * 会员积分0元兑，权益道具兑换
      */
     private fun refreshMemberPointExchangeOptionsForSettings(): List<MapperEntity> {
-        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
-            UserMap.currentUid,
-            ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT,
-            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
-        )
-        if (freshRows.isNotEmpty()) {
+        val freshRows = ExchangeOptionsCache.loadTodaySnapshot(
+            UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT
+        )?.rows
+        if (freshRows != null) {
             Log.member("会员积分🎐设置页使用新鲜缓存#${freshRows.size}")
             return freshRows
         }
@@ -892,7 +890,7 @@ class AntMember : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            RequestManager.withExchangeSettingsRefresh { refreshMemberPointExchangeOptionsFromRpc() }
+            refreshMemberPointExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshMemberPointExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -913,114 +911,103 @@ class AntMember : ModelTask() {
         return rows
     }
 
-    private fun refreshMemberPointExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
-        try {
-            ExchangeFetchPacing.domainStartDelay()
-            val userId = UserMap.currentUid
-            val memberInfo = JSONObject(AntMemberRpcCall.queryMemberInfo())
-            if (!ResChecker.checkRes(TAG, "会员积分兑换列表刷新失败:", memberInfo)) {
-                throw IllegalStateException("会员积分兑换列表刷新失败")
-            }
-            val pointBalance = memberInfo.optString("pointBalance")
-                .ifEmpty { memberInfo.optInt("pointBalance", 0).toString() }
-            val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
-            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L)
-            candidateMap.values.forEach { candidate ->
-                memberBenefitMap.add(candidate.item.id, candidate.item.displayName())
-            }
-            memberBenefitMap.save(userId)
-            val rows = candidateMap.values.map { it.item.toOptionRow() }
-            ExchangeOptionsCache.save(userId, ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT, rows)
-            Log.member("会员积分🎐刷新兑换列表#${rows.size}")
-            return rows
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "refreshMemberPointExchangeOptionsFromRpc err:", t)
-            throw t
-        }
+    private fun refreshMemberPointExchangeOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> {
+        val userId = UserMap.currentUid
+        val candidateMap = queryMemberExchangeCandidates(userId, null, 1000L, forceRefresh = forceRefresh)
+        val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
+        candidateMap.values.forEach { memberBenefitMap.add(it.item.id, it.item.displayName()) }
+        memberBenefitMap.save(userId)
+        return candidateMap.values.map { it.item.toOptionRow() }
     }
 
-    internal fun refreshMemberPointExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        RequestManager.withExchangeSettingsRefresh { refreshMemberPointExchangeOptionsFromRpc() }
+    internal fun refreshMemberPointExchangeOptionsForRemote(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+        refreshMemberPointExchangeOptionsFromRpc(forceRefresh)
 
     private fun queryMemberExchangeCandidates(
         userId: String?,
-        pointBalance: String,
+        pointBalance: String?,
         sleepMillis: Long = 0L,
-        stopAfterSelectedIds: Set<String>? = null,
+        forceRefresh: Boolean = false,
         onFailure: ((TaskFlowActionResult) -> Unit)? = null,
     ): LinkedHashMap<String, MemberExchangeCandidate> {
-        val candidateMap = LinkedHashMap<String, MemberExchangeCandidate>()
-        var totalPages = 0
-        var currentPage = 1
-        var hasNextPage = true
-        while (hasNextPage) {
-            if (sleepMillis > 0L) {
-                ExchangeFetchPacing.pageTurnDelay(baseMillis = sleepMillis)
+        fun parse(payload: JSONObject): LinkedHashMap<String, MemberExchangeCandidate> {
+            val candidates = LinkedHashMap<String, MemberExchangeCandidate>()
+            val shandie = payload.getJSONArray("shandie")
+            for (i in 0 until shandie.length()) {
+                addMemberExchangeCandidates(shandie.getJSONObject(i).getJSONArray("benefits"), candidates)
             }
-            val responseStr = AntMemberRpcCall.queryShandieEntityList(userId.orEmpty(), pointBalance, currentPage, 18)
-            if (responseStr.isEmpty()) {
-                RequestManager.failExchangeSettingsRefresh()
-                onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.RETRYABLE_RPC,
-                    rpc = "queryShandieEntityList", message = "空响应", raw = responseStr))
-                if (onFailure != null) return candidateMap
-                break
+            val delivery = payload.getJSONArray("delivery")
+            for (i in 0 until delivery.length()) {
+                val page = delivery.getJSONObject(i)
+                val response = page.getJSONObject("response")
+                val pageNum = page.getInt("pageNum")
+                val uniqueId = page.getString("uniqueId")
+                addMemberExchangeCandidates(response.optJSONArray("briefConfigInfos"), candidates, pageNum, 18, uniqueId)
+                addMemberExchangeEntityCandidates(response.optJSONArray("entityInfoList"), candidates, pageNum, 18, uniqueId)
             }
-            val jo = JSONObject(responseStr)
-            if (!ResChecker.checkRes(TAG, "会员积分闪兑列表查询失败:", jo)) {
-                RequestManager.failExchangeSettingsRefresh()
-                onFailure?.invoke(memberDomainTaskFailureResult(null, jo, responseStr, "queryShandieEntityList", "缺货补兑查询失败"))
-                if (onFailure != null) return candidateMap
-                break
-            }
-            addMemberExchangeCandidates(jo.optJSONArray("benefits"), candidateMap)
-            totalPages++
-            if (!stopAfterSelectedIds.isNullOrEmpty() &&
-                stopAfterSelectedIds.all { candidateMap.containsKey(it) }
-            ) {
-                Log.member("会员积分🎐目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
-                return candidateMap
-            }
-            val nextPageNum = jo.optInt("nextPageNum", 0)
-            hasNextPage = nextPageNum > currentPage
-            currentPage = if (hasNextPage) nextPageNum else currentPage
+            return candidates
         }
+        val snapshot = ExchangeOptionsCache.getOrFetch(userId, ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT, forceRefresh) {
+            ExchangeFetchPacing.domainStartDelay()
+            val balance = pointBalance ?: run {
+                val info = JSONObject(AntMemberRpcCall.queryMemberInfo())
+                check(ResChecker.checkRes(TAG, "会员积分兑换列表刷新失败:", info)) { "会员积分信息查询失败" }
+                info.optString("pointBalance").ifEmpty { info.optInt("pointBalance", 0).toString() }
+            }
+            val shandie = JSONArray()
+            val delivery = JSONArray()
+            var currentPage = 1
+            var hasNextPage: Boolean
+            do {
+                if (sleepMillis > 0L) ExchangeFetchPacing.pageTurnDelay(baseMillis = sleepMillis)
+                val raw = AntMemberRpcCall.queryShandieEntityList(userId.orEmpty(), balance, currentPage, 18)
+                if (raw.isEmpty()) {
+                    onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.RETRYABLE_RPC,
+                        rpc = "queryShandieEntityList", message = "空响应", raw = raw))
+                    error("会员积分闪兑列表为空响应")
+                }
+                val response = JSONObject(raw)
+                if (!ResChecker.checkRes(TAG, "会员积分闪兑列表查询失败:", response)) {
+                    onFailure?.invoke(memberDomainTaskFailureResult(null, response, raw, "queryShandieEntityList", "缺货补兑查询失败"))
+                    error("会员积分闪兑列表查询失败")
+                }
+                val benefits = response.optJSONArray("benefits") ?: error("会员积分闪兑列表缺少 benefits")
+                shandie.put(response)
+                val next = response.optInt("nextPageNum", 0)
+                check(next <= 0 || next > currentPage) { "会员积分闪兑分页未前进: currentPage=$currentPage nextPageNum=$next" }
+                hasNextPage = next > currentPage
+                check(!hasNextPage || benefits.length() > 0) { "会员积分闪兑分页未返回商品: currentPage=$currentPage nextPageNum=$next" }
+                if (hasNextPage) currentPage = next
+            } while (hasNextPage)
 
-        val deliveryUniqueId = "${System.currentTimeMillis()}and99999999INTELLIGENT_SORT5000551494000SR2024110510425045,94000SR2025091714812006,94000SR2023102305988003"
-        currentPage = 1
-        hasNextPage = true
-        while (hasNextPage && currentPage <= 10) {
-            if (sleepMillis > 0L) {
-                ExchangeFetchPacing.pageTurnDelay(baseMillis = sleepMillis)
-            }
-            val jo = JSONObject(
-                AntMemberRpcCall.queryDeliveryZoneDetail(
-                    pointBalance = pointBalance,
-                    pageNum = currentPage,
-                    pageSize = 18,
-                    uniqueId = deliveryUniqueId
-                )
-            )
-            if (!ResChecker.checkRes(TAG, "会员积分专区列表查询失败:", jo)) {
-                RequestManager.failExchangeSettingsRefresh()
-                onFailure?.invoke(memberDomainTaskFailureResult(null, jo, jo.toString(), "queryDeliveryZoneDetail", "缺货补兑查询失败"))
-                break
-            }
-            val uniqueId = jo.optString("uniqueId", deliveryUniqueId)
-            addMemberExchangeCandidates(jo.optJSONArray("briefConfigInfos"), candidateMap, currentPage, 18, uniqueId)
-            addMemberExchangeEntityCandidates(jo.optJSONArray("entityInfoList"), candidateMap, currentPage, 18, uniqueId)
-            totalPages++
-            if (!stopAfterSelectedIds.isNullOrEmpty() &&
-                stopAfterSelectedIds.all { candidateMap.containsKey(it) }
-            ) {
-                Log.member("会员积分🎐目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
-                return candidateMap
-            }
-            val nextPageNum = jo.optInt("nextPageNum", 0)
-            hasNextPage = nextPageNum > currentPage
-            currentPage = if (hasNextPage) nextPageNum else currentPage
+            val deliveryUniqueId = "${System.currentTimeMillis()}and99999999INTELLIGENT_SORT5000551494000SR2024110510425045,94000SR2025091714812006,94000SR2023102305988003"
+            currentPage = 1
+            do {
+                if (sleepMillis > 0L) ExchangeFetchPacing.pageTurnDelay(baseMillis = sleepMillis)
+                val response = JSONObject(AntMemberRpcCall.queryDeliveryZoneDetail(
+                    pointBalance = balance, pageNum = currentPage, pageSize = 18, uniqueId = deliveryUniqueId
+                ))
+                if (!ResChecker.checkRes(TAG, "会员积分专区列表查询失败:", response)) {
+                    onFailure?.invoke(memberDomainTaskFailureResult(null, response, response.toString(), "queryDeliveryZoneDetail", "缺货补兑查询失败"))
+                    error("会员积分专区列表查询失败")
+                }
+                val briefConfigInfos = response.optJSONArray("briefConfigInfos")
+                val entityInfoList = response.optJSONArray("entityInfoList")
+                check(briefConfigInfos != null || entityInfoList != null) { "会员积分专区列表缺少商品数据" }
+                delivery.put(JSONObject().put("response", response).put("pageNum", currentPage)
+                    .put("uniqueId", response.optString("uniqueId", deliveryUniqueId)))
+                val next = response.optInt("nextPageNum", 0)
+                check(next <= 0 || next > currentPage) { "会员积分专区分页未前进: currentPage=$currentPage nextPageNum=$next" }
+                hasNextPage = next > currentPage
+                check(!hasNextPage || (briefConfigInfos?.length() ?: 0) + (entityInfoList?.length() ?: 0) > 0) {
+                    "会员积分专区分页未返回商品: currentPage=$currentPage nextPageNum=$next"
+                }
+                if (hasNextPage) currentPage = next
+            } while (hasNextPage)
+            val payload = JSONObject().put("shandie", shandie).put("delivery", delivery)
+            ExchangeOptionsSnapshot(parse(payload).values.map { it.item.toOptionRow() }, payload)
         }
-        if (hasNextPage && currentPage > 10) RequestManager.failExchangeSettingsRefresh()
-        return candidateMap
+        return parse(snapshot.payload)
     }
 
     private fun addMemberExchangeCandidates(
@@ -1082,12 +1069,10 @@ class AntMember : ModelTask() {
     }
 
     private fun refreshBeanExchangeRightOptionsForSettings(): List<MapperEntity> {
-        val freshBeanRows = ExchangeOptionsCache.loadFreshForSettingsCache(
-            UserMap.currentUid,
-            ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT,
-            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
-        )
-        if (freshBeanRows.isNotEmpty()) {
+        val freshBeanRows = ExchangeOptionsCache.loadTodaySnapshot(
+            UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT
+        )?.rows
+        if (freshBeanRows != null) {
             Log.member("安心豆🫘设置页使用新鲜缓存#${freshBeanRows.size}")
             return freshBeanRows
         }
@@ -1116,7 +1101,7 @@ class AntMember : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            RequestManager.withExchangeSettingsRefresh { refreshBeanExchangeRightOptionsFromRpc() }
+            refreshBeanExchangeRightOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshBeanExchangeRightOptionsForSettings.currentRpc err:", it)
         }
@@ -1137,18 +1122,16 @@ class AntMember : ModelTask() {
         return rows
     }
 
-    private fun refreshBeanExchangeRightOptionsFromRpc(): List<ExchangeOptionRow> {
+    private fun refreshBeanExchangeRightOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> {
         try {
-            ExchangeFetchPacing.domainStartDelay()
             val userId = UserMap.currentUid
-            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance())
+            val candidateMap = queryBeanExchangeCandidates(null, forceRefresh)
             val beanRightMap = IdMapManager.getInstance(BeanExchangeRightMap::class.java)
             candidateMap.values.forEach { candidate ->
                 beanRightMap.add(candidate.item.id, candidate.item.displayName())
             }
             beanRightMap.save(userId)
             val rows = candidateMap.values.map { it.item.toOptionRow() }
-            ExchangeOptionsCache.save(userId, ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT, rows)
             Log.member("安心豆🫘刷新兑换列表#${rows.size}")
             return rows
         } catch (t: Throwable) {
@@ -1157,8 +1140,8 @@ class AntMember : ModelTask() {
         }
     }
 
-    internal fun refreshBeanExchangeRightOptionsForRemote(): List<ExchangeOptionRow> =
-        RequestManager.withExchangeSettingsRefresh { refreshBeanExchangeRightOptionsFromRpc() }
+    internal fun refreshBeanExchangeRightOptionsForRemote(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+        refreshBeanExchangeRightOptionsFromRpc(forceRefresh)
 
     private fun queryBeanBizProperties(): List<String> {
         val fallbackBizProperties = listOf(
@@ -1174,12 +1157,9 @@ class AntMember : ModelTask() {
         )
         return runCatching {
             val response = JSONObject(AntMemberRpcCall.filterValidBizProperty())
-            if (!ResChecker.checkRes(TAG, response)) {
-                Log.member("安心豆🫘[权益分类]#动态分类查询失败，继续使用保守分类列表")
-                return@runCatching listOf("") + fallbackBizProperties
-            }
-            val validBizPropertyList = extractBeanExchangeResult(response).optJSONArray("validBizPropertyList")
-            if (validBizPropertyList == null || validBizPropertyList.length() == 0) {
+            check(ResChecker.checkRes(TAG, response)) { "安心豆权益分类查询失败" }
+            val validBizPropertyList = extractBeanExchangeResult(response).getJSONArray("validBizPropertyList")
+            if (validBizPropertyList.length() == 0) {
                 return@runCatching listOf("") + fallbackBizProperties
             }
             val dynamicBizProperties = (0 until validBizPropertyList.length())
@@ -1189,69 +1169,74 @@ class AntMember : ModelTask() {
             listOf("") + dynamicBizProperties
         }.onFailure {
             Log.printStackTrace(TAG, "queryBeanBizProperties err:", it)
-        }.getOrDefault(listOf("") + fallbackBizProperties)
-            .distinct()
+        }.getOrThrow().distinct()
     }
 
     private fun queryBeanExchangeCandidates(
         beanBalance: Int?,
-        stopAfterSelectedIds: Set<String>? = null
+        forceRefresh: Boolean = false
     ): LinkedHashMap<String, BeanExchangeCandidate> {
-        val candidateMap = LinkedHashMap<String, BeanExchangeCandidate>()
-        var totalPages = 0
-        outer@ for (bizProperty in queryBeanBizProperties()) {
-            var pageStartIndex = 0
-            var pageCount = 0
-            while (pageCount < 10) {
-                pageCount++
-                val response = JSONObject(
-                    AntMemberRpcCall.rightsRecommend(
-                        pageStartIndex = pageStartIndex,
-                        bizProperty = bizProperty
-                    )
-                )
-                if (!ResChecker.checkRes(TAG, "安心豆权益推荐列表查询失败:", response)) {
-                    RequestManager.failExchangeSettingsRefresh()
-                    break
-                }
-                addBeanExchangeCandidates(response, candidateMap, fromHistory = false, beanBalance = beanBalance)
-                totalPages++
-                if (!stopAfterSelectedIds.isNullOrEmpty() &&
-                    stopAfterSelectedIds.all { candidateMap.containsKey(it) }
-                ) {
-                    Log.member("安心豆🫘目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
-                    return candidateMap
-                }
+        fun parse(payload: JSONObject): LinkedHashMap<String, BeanExchangeCandidate> {
+            val candidates = LinkedHashMap<String, BeanExchangeCandidate>()
+            val responses = payload.getJSONArray("responses")
+            for (i in 0 until responses.length()) {
+                val response = responses.getJSONObject(i)
                 val result = extractBeanExchangeResult(response)
-                if (!result.optBoolean("hasNext", false)) {
-                    break
+                check(listOf("preExchangeDetailList", "couponRightsDTOList", "rightsList", "flowList")
+                    .any { result.optJSONArray(it) != null }) { "安心豆权益列表缺少商品数据" }
+                addBeanExchangeCandidates(response, candidates, fromHistory = false, beanBalance = beanBalance)
+            }
+            return candidates
+        }
+        val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT, forceRefresh) {
+            ExchangeFetchPacing.domainStartDelay()
+            val responses = JSONArray()
+            for (bizProperty in queryBeanBizProperties()) {
+                var pageStartIndex = 0
+                while (true) {
+                    val response = JSONObject(AntMemberRpcCall.rightsRecommend(
+                        pageStartIndex = pageStartIndex, bizProperty = bizProperty
+                    ))
+                    check(ResChecker.checkRes(TAG, "安心豆权益推荐列表查询失败:", response)) { "安心豆权益推荐列表查询失败" }
+                    responses.put(response)
+                    val result = extractBeanExchangeResult(response)
+                    val lists = listOfNotNull(result.optJSONArray("preExchangeDetailList"), result.optJSONArray("couponRightsDTOList"),
+                        result.optJSONArray("rightsList"), result.optJSONArray("flowList"))
+                    check(lists.isNotEmpty()) { "安心豆权益列表缺少商品数据: bizProperty=$bizProperty pageStartIndex=$pageStartIndex" }
+                    if (!result.optBoolean("hasNext", false)) break
+                    val nextStartIndex = result.optInt("pageEndIndex", -1)
+                    check(lists.any { it.length() > 0 } && nextStartIndex > pageStartIndex) {
+                        "安心豆权益分页未前进: bizProperty=$bizProperty pageStartIndex=$pageStartIndex pageEndIndex=$nextStartIndex"
+                    }
+                    pageStartIndex = nextStartIndex
+                    ExchangeFetchPacing.pageTurnDelay()
                 }
-                val nextStartIndex = result.optInt("pageEndIndex", pageStartIndex)
-                if (nextStartIndex <= pageStartIndex || pageCount >= 10) {
-                    RequestManager.failExchangeSettingsRefresh()
-                    if (nextStartIndex <= pageStartIndex) break
+            }
+            var pageStartIndex = 0
+            while (true) {
+                val response = JSONObject(AntMemberRpcCall.queryRightsPreExchangeFlows(pageStartIndex = pageStartIndex, pageSize = 99))
+                check(ResChecker.checkRes(TAG, "安心豆预兑换列表查询失败:", response)) { "安心豆预兑换列表查询失败" }
+                responses.put(response)
+                val result = extractBeanExchangeResult(response)
+                val lists = listOfNotNull(result.optJSONArray("preExchangeDetailList"), result.optJSONArray("couponRightsDTOList"),
+                    result.optJSONArray("rightsList"), result.optJSONArray("flowList"))
+                check(lists.isNotEmpty()) { "安心豆预兑换列表缺少商品数据: pageStartIndex=$pageStartIndex" }
+                if (!result.optBoolean("hasNext", false)) break
+                val nextStartIndex = result.optInt("pageEndIndex", -1)
+                check(lists.any { it.length() > 0 } && nextStartIndex > pageStartIndex) {
+                    "安心豆预兑换分页未前进: pageStartIndex=$pageStartIndex pageEndIndex=$nextStartIndex"
                 }
                 pageStartIndex = nextStartIndex
                 ExchangeFetchPacing.pageTurnDelay()
             }
+            val payload = JSONObject().put("responses", responses)
+            ExchangeOptionsSnapshot(parse(payload).values.map { it.item.toOptionRow() }, payload)
         }
-        runCatching {
-            val response = JSONObject(AntMemberRpcCall.queryRightsPreExchangeFlows(pageStartIndex = 0, pageSize = 99))
-            if (ResChecker.checkRes(TAG, "安心豆预兑换列表查询失败:", response)) {
-                addBeanExchangeCandidates(response, candidateMap, fromHistory = false, beanBalance = beanBalance)
-            }
-        }.onFailure {
-            Log.printStackTrace(TAG, "queryBeanExchangeCandidates.queryRightsPreExchangeFlows err:", it)
-        }
-        return candidateMap
+        return parse(snapshot.payload)
     }
 
     internal fun memberPointExchangeBenefit() {
         if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)) {
-            return
-        }
-        if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
-            Log.member("会员积分🎐TTL内跳过列表拉取")
             return
         }
         val selectedIds: Set<String> = memberPointExchangeBenefitList?.value
@@ -1285,7 +1270,7 @@ class AntMember : ModelTask() {
             }
             val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
             Log.member("会员积分🎐兑换列表刷新..")
-            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L, stopAfterSelectedIds = selectedIds)
+            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L)
             candidateMap.values.forEach { candidate ->
                 memberBenefitMap.add(candidate.item.id, candidate.item.displayName())
                 if (!selectedIds.contains(candidate.item.id)) {
@@ -8054,15 +8039,11 @@ class AntMember : ModelTask() {
                 ?.toSet()
                 ?: emptySet()
             val userId = UserMap.currentUid
-            if (ExchangeOptionsCache.isFresh(userId, ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
-                Log.member("安心豆🫘TTL内跳过列表拉取")
-                return
-            }
             if (selectedIds.isEmpty()) {
                 Log.member("安心豆🫘未勾选目标，跳过列表拉取")
                 return
             }
-            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance(), stopAfterSelectedIds = selectedIds)
+            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance())
             val beanRightMap = IdMapManager.getInstance(BeanExchangeRightMap::class.java)
             if (candidateMap.isEmpty()) {
                 beanRightMap.save(userId)
@@ -8128,10 +8109,7 @@ class AntMember : ModelTask() {
         if (selectedIds.isEmpty()) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
-        if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
-            Log.member("会员积分🎐TTL内跳过补兑列表拉取#$reason")
-            return ExchangeReplenishResult.NOT_SELECTED
-        }
+        var failure: TaskFlowActionResult? = null
         return runCatching {
             val memberInfo = JSONObject(AntMemberRpcCall.queryMemberInfo())
             if (!ResChecker.checkRes(TAG, "会员积分信息查询失败:", memberInfo)) {
@@ -8140,12 +8118,11 @@ class AntMember : ModelTask() {
             }
             val pointBalance = memberInfo.optString("pointBalance")
                 .ifEmpty { memberInfo.optInt("pointBalance", 0).toString() }
-            var failure: TaskFlowActionResult? = null
             val report: (TaskFlowActionResult) -> Unit = { result ->
                 failure = result
                 onFailure?.invoke(result)
             }
-            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, stopAfterSelectedIds = selectedIds, onFailure = report)
+            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, onFailure = report)
             if (failure != null) return@runCatching ExchangeReplenishResult.RETRY_LATER
             var matchedSelected = false
             var exchangedCount = 0
@@ -8176,7 +8153,7 @@ class AntMember : ModelTask() {
             }
         }.onFailure {
             if (it is CancellationException) throw it
-            onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+            if (failure == null) onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
                 rpc = "replenishMemberPointExchangeByNeed", message = it.message.orEmpty(), raw = it.toString()))
             Log.printStackTrace(TAG, "replenishMemberPointExchangeByNeed err:", it)
         }.getOrDefault(ExchangeReplenishResult.RETRY_LATER)
@@ -8199,12 +8176,8 @@ class AntMember : ModelTask() {
         if (selectedIds.isEmpty()) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
-        if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
-            Log.member("安心豆🫘TTL内跳过补兑列表拉取#$reason")
-            return ExchangeReplenishResult.NOT_SELECTED
-        }
         return runCatching {
-            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance(), stopAfterSelectedIds = selectedIds)
+            val candidateMap = queryBeanExchangeCandidates(queryBlueBeanBalance())
             var matchedSelected = false
             var attempted = false
             var exchangedCount = 0

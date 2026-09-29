@@ -17,6 +17,7 @@ import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
@@ -41,7 +42,6 @@ import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
-import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectNeed
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
@@ -49,6 +49,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
 import io.github.aoguai.sesameag.task.exchange.ExchangeReplenishResult
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
@@ -677,119 +678,80 @@ class AntSports : ModelTask() {
     }
 
     private fun refreshSportsEnergyExchangeCandidatesFromRpc(
-        throwOnError: Boolean = false,
-        stopAfterSelectedIds: Set<String>? = null
+        forceRefresh: Boolean = false
     ): List<SportsEnergyExchangeCandidate> {
-        try {
+        fun parse(payload: JSONObject): List<SportsEnergyExchangeCandidate> {
+            val candidates = LinkedHashMap<String, SportsEnergyExchangeCandidate>()
+            val items = payload.getJSONArray("items")
+            val cityCode = payload.getString("cityCode")
+            for (i in 0 until items.length()) {
+                val candidate = buildSportsEnergyExchangeCandidate(items.getJSONObject(i), cityCode) ?: continue
+                candidates.putIfAbsent(candidate.item.id, candidate)
+            }
+            return candidates.values.toList()
+        }
+        val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY, forceRefresh) {
             ExchangeFetchPacing.domainStartDelay()
             val cityCode = LocationHelper.requireCityCode()
             val categoryTypes = linkedSetOf("")
-            runCatching {
-                AntSportsRpcCall.NeverlandRpcCall.queryCoinCenterPage()
-            }.onFailure {
-                Log.printStackTrace(TAG, "refreshSportsEnergyExchangeOptionsForSettings.queryCoinCenterPage err:", it)
+            val center = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryCoinCenterPage())
+            check(ResChecker.checkRes(TAG, center)) { "运动能量兑换首页查询失败" }
+            val mall = JSONObject(AntSportsRpcCall.NeverlandRpcCall.deliverSportsItemMallPage())
+            check(ResChecker.checkRes(TAG, mall)) { "运动能量兑换商城查询失败" }
+            val categoryResp = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryItemCategoryList())
+            check(ResChecker.checkRes(TAG, "运动能量兑换分类查询失败:", categoryResp)) { "运动能量兑换分类查询失败" }
+            val categoryList = extractSportsItemMallData(categoryResp).getJSONArray("itemCategoryVOList")
+            for (i in 0 until categoryList.length()) {
+                val code = categoryList.getJSONObject(i).optString("categoryCode")
+                if (code.isNotBlank()) categoryTypes.add(code)
             }
-            runCatching {
-                AntSportsRpcCall.NeverlandRpcCall.deliverSportsItemMallPage()
-            }.onFailure {
-                Log.printStackTrace(TAG, "refreshSportsEnergyExchangeOptionsForSettings.deliverByPageId err:", it)
-            }
-            runCatching {
-                val categoryResp = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryItemCategoryList())
-                if (ResChecker.checkRes(TAG, "运动能量兑换分类查询失败:", categoryResp)) {
-                    val categoryList = extractSportsItemMallData(categoryResp).optJSONArray("itemCategoryVOList")
-                    if (categoryList != null) {
-                        for (i in 0 until categoryList.length()) {
-                            val categoryCode = categoryList.optJSONObject(i)?.optString("categoryCode").orEmpty()
-                            if (categoryCode.isNotBlank()) {
-                                categoryTypes.add(categoryCode)
-                            }
-                        }
-                    }
-                }
-            }.onFailure {
-                Log.printStackTrace(TAG, "refreshSportsEnergyExchangeOptionsForSettings.queryItemCategoryList err:", it)
-            }
-
-            val exchangeMap = IdMapManager.getInstance(SportsEnergyExchangeMap::class.java)
-            val candidateMap = LinkedHashMap<String, SportsEnergyExchangeCandidate>()
-            var totalPages = 0
-            outer@ for (categoryType in categoryTypes) {
+            val items = JSONArray()
+            for (categoryType in categoryTypes) {
+                val seenItemIds = linkedSetOf<String>()
                 var pageNum = 1
                 var adSession = ""
-                while (pageNum <= 20) {
-                    val response = JSONObject(
-                        AntSportsRpcCall.NeverlandRpcCall.queryItemList(
-                            categoryType = categoryType,
-                            pageNum = pageNum,
-                            cityCode = cityCode,
-                            adSession = adSession
-                        )
-                    )
-                    if (!ResChecker.checkRes(TAG, "运动能量兑换列表查询失败:", response)) {
-                        if (throwOnError) throw IllegalStateException("运动能量兑换列表查询失败")
-                        break
-                    }
+                while (true) {
+                    val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryItemList(
+                        categoryType = categoryType, pageNum = pageNum, cityCode = cityCode, adSession = adSession
+                    ))
+                    check(ResChecker.checkRes(TAG, "运动能量兑换列表查询失败:", response)) { "运动能量兑换列表查询失败" }
                     val data = extractSportsItemMallData(response)
-                    val itemList = data.optJSONArray("itemVOList")
-                    if (itemList == null) {
-                        if (throwOnError) throw IllegalStateException("运动能量兑换列表缺少 itemVOList")
-                        break
-                    }
+                    val itemList = data.getJSONArray("itemVOList")
+                    val seenCount = seenItemIds.size
                     for (i in 0 until itemList.length()) {
-                        val candidate = buildSportsEnergyExchangeCandidate(itemList.optJSONObject(i) ?: continue, cityCode) ?: continue
-                        candidateMap.putIfAbsent(candidate.item.id, candidate)
+                        val item = itemList.getJSONObject(i)
+                        items.put(item)
+                        val itemId = listOf(item.optString("benefitId").trim(), item.optString("itemId").trim())
+                            .filter { it.isNotBlank() }.joinToString("|")
+                        if (itemId.isNotBlank()) seenItemIds.add(itemId)
                     }
-                    totalPages++
-                    if (!stopAfterSelectedIds.isNullOrEmpty() &&
-                        stopAfterSelectedIds.all { candidateMap.containsKey(it) }
-                    ) {
-                        Log.sports("运动能量兑换🎁目标全部命中，提前结束拉取#命中${stopAfterSelectedIds.size}/翻${totalPages}页")
-                        break@outer
-                    }
-                    if (!data.optBoolean("hasMore", false)) {
-                        break
+                    if (!data.optBoolean("hasMore", false)) break
+                    check(itemList.length() > 0 && seenItemIds.size > seenCount) {
+                        "运动能量兑换分页未前进: categoryType=$categoryType pageNum=$pageNum count=${itemList.length()} hasMore=true"
                     }
                     adSession = data.optString("adSession", adSession)
                     pageNum++
-                    if (throwOnError && pageNum > 20) throw IllegalStateException("运动能量兑换列表尚有未拉取页面")
                     ExchangeFetchPacing.pageTurnDelay()
                 }
             }
-            if (candidateMap.isEmpty()) {
-                exchangeMap.save(UserMap.currentUid)
-                Log.sports("运动能量兑换🎁未获取到候选列表")
-                return emptyList()
-            }
-            val candidates = candidateMap.values.toList()
-            candidates.forEach { candidate ->
-                exchangeMap.add(candidate.item.id, candidate.item.displayName())
-            }
-            exchangeMap.save(UserMap.currentUid)
-            Log.sports("运动能量兑换🎁设置页刷新列表#${candidates.size}")
-            return candidates
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "refreshSportsEnergyExchangeOptionsForSettings err:", t)
-            if (throwOnError) {
-                throw t
-            }
-            return emptyList()
+            val payload = JSONObject().put("items", items).put("cityCode", cityCode)
+            ExchangeOptionsSnapshot(parse(payload).map { it.item.toOptionRow() }, payload)
         }
+        val candidates = parse(snapshot.payload)
+        val exchangeMap = IdMapManager.getInstance(SportsEnergyExchangeMap::class.java)
+        candidates.forEach { exchangeMap.add(it.item.id, it.item.displayName()) }
+        exchangeMap.save(UserMap.currentUid)
+        return candidates
     }
 
-    private fun refreshSportsEnergyExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
-        val rows = refreshSportsEnergyExchangeCandidatesFromRpc(throwOnError = true).map { it.item.toOptionRow() }
-        ExchangeOptionsCache.save(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY, rows)
-        return rows
-    }
+    private fun refreshSportsEnergyExchangeOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+        refreshSportsEnergyExchangeCandidatesFromRpc(forceRefresh).map { it.item.toOptionRow() }
 
     private fun refreshSportsEnergyExchangeOptionsForSettings(): List<MapperEntity> {
-        val freshRows = ExchangeOptionsCache.loadFreshForSettingsCache(
-            UserMap.currentUid,
-            ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY,
-            ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS
-        )
-        if (freshRows.isNotEmpty()) {
+        val freshRows = ExchangeOptionsCache.loadTodaySnapshot(
+            UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY
+        )?.rows
+        if (freshRows != null) {
             Log.sports("运动能量兑换🎁设置页使用新鲜缓存#${freshRows.size}")
             return freshRows
         }
@@ -818,7 +780,7 @@ class AntSports : ModelTask() {
             return emptyList()
         }
         val rowsResult = runCatching {
-            RequestManager.withExchangeSettingsRefresh { refreshSportsEnergyExchangeOptionsFromRpc() }
+            refreshSportsEnergyExchangeOptionsFromRpc()
         }.onFailure {
             Log.printStackTrace(TAG, "refreshSportsEnergyExchangeOptionsForSettings.currentRpc err:", it)
         }
@@ -847,15 +809,14 @@ class AntSports : ModelTask() {
                 ?.filter { it.isNotEmpty() }
                 ?.toSet()
                 ?: emptySet()
-            if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
-                Log.sports("运动能量兑换🎁TTL内跳过全量列表拉取")
-                return
-            }
             if (selectedIds.isEmpty()) {
                 Log.sports("运动能量兑换🎁未勾选目标，跳过列表拉取")
                 return
             }
-            val candidates = refreshSportsEnergyExchangeCandidatesFromRpc(stopAfterSelectedIds = selectedIds)
+            if (RpcDailyCircuit.isBlockedToday(UserMap.currentUid, "com.alipay.neverland.biz.rpc.queryItemList")) {
+                return
+            }
+            val candidates = refreshSportsEnergyExchangeCandidatesFromRpc()
             if (candidates.isEmpty()) {
                 return
             }
@@ -883,8 +844,8 @@ class AntSports : ModelTask() {
         }
     }
 
-    internal fun refreshSportsEnergyExchangeOptionsForRemote(): List<ExchangeOptionRow> =
-        RequestManager.withExchangeSettingsRefresh { refreshSportsEnergyExchangeOptionsFromRpc() }
+    internal fun refreshSportsEnergyExchangeOptionsForRemote(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+        refreshSportsEnergyExchangeOptionsFromRpc(forceRefresh)
 
     internal fun replenishExchangeByNeed(
         need: ExchangeEffectNeed,
@@ -903,12 +864,11 @@ class AntSports : ModelTask() {
         if (selectedIds.isEmpty()) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
-        if (ExchangeOptionsCache.isFresh(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY, ExchangeFetchPacing.SETTINGS_FRESH_TTL_MS)) {
-            Log.sports("运动能量兑换🎁TTL内跳过补兑列表拉取#$reason")
-            return ExchangeReplenishResult.NOT_SELECTED
+        if (RpcDailyCircuit.isBlockedToday(UserMap.currentUid, "com.alipay.neverland.biz.rpc.queryItemList")) {
+            return ExchangeReplenishResult.BUSINESS_LIMIT
         }
         return runCatching {
-            val candidates = refreshSportsEnergyExchangeCandidatesFromRpc(stopAfterSelectedIds = selectedIds)
+            val candidates = refreshSportsEnergyExchangeCandidatesFromRpc()
             var matchedSelected = false
             var attempted = false
             var exchangedCount = 0
@@ -7290,6 +7250,9 @@ class AntSports : ModelTask() {
 
         private fun queryRightsCenterDropdownReward(): RightsCenterDropdownQuery {
             val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryRightsCenterItemList(LocationHelper.requireCityCode()))
+            if (RpcDailyCircuit.isStopResponse(response)) {
+                return RightsCenterDropdownQuery(queried = false, rewardObjectPresent = false, reward = null)
+            }
             if (!isSportsRpcSuccess(response)) {
                 Log.error(
                     TAG,

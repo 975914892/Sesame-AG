@@ -84,6 +84,10 @@ data class PersistentSchedule(
 ) {
     fun effectivePrecisionPolicy(): String = PersistentSchedulePrecisionPolicy.normalize(precisionPolicy, kind)
 
+    fun firstDueAtMs(): Long = lastFireAtMs.takeIf { it > 0L } ?: triggerAtMs
+
+    fun deadlineAtMs(): Long = firstDueAtMs() + toleranceMs.coerceAtLeast(0L)
+
     fun withScheduleState(
         state: String,
         now: Long = System.currentTimeMillis(),
@@ -138,7 +142,7 @@ data class PersistentSchedule(
             state = PersistentScheduleState.FIRED,
             updatedAtMs = now,
             attemptCount = attemptCount + 1,
-            lastFireAtMs = now,
+            lastFireAtMs = firstDueAtMs(),
             lastError = null,
         )
 }

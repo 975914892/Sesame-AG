@@ -14,13 +14,13 @@ import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.task.exchange.ExchangeCost
-import io.github.aoguai.sesameag.hook.RequestManager
 import io.github.aoguai.sesameag.task.exchange.ExchangeEffectCatalog
 import io.github.aoguai.sesameag.task.exchange.ExchangeItem
 import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
 import io.github.aoguai.sesameag.util.Files
@@ -123,6 +123,7 @@ class ChouChouLe {
         val endTime: Long,
         val balanceCent: Int,
         val items: List<IpDrawMallItem>,
+        val rawItems: JSONArray,
     )
 
     private data class IpDrawMallItem(
@@ -747,7 +748,7 @@ class ChouChouLe {
                 }
             }
 
-            var snapshot = queryIpDrawMallSnapshot(IpDrawActivity(activityId, endTime)) ?: return
+            var snapshot = loadIpDrawMallSnapshot(IpDrawActivity(activityId, endTime))
             val userId = UserMap.currentUid
             val data = syncIpDrawShopSnapshot(snapshot)
             Log.farm("[自动兑换]: 当前持有总碎片: ${snapshot.balanceCent / 100}")
@@ -767,18 +768,6 @@ class ChouChouLe {
 
             for ((item, targetCount) in sequence) {
                 var currentItem = snapshot.items.firstOrNull { it.skuId == item.skuId } ?: item
-                val blockReason = blockedIpDrawMallItemReason(currentItem)
-                if (blockReason.isNotBlank()) {
-                    Log.farm("[自动兑换]: [${currentItem.name}] 跳过：$blockReason")
-                    if (!isCustom && shouldStopDefaultExchangeForNoEnoughPoint(currentItem)) {
-                        return
-                    }
-                    continue
-                }
-                if (currentItem.safety != ExchangeSafety.AUTO) {
-                    Log.farm("[自动兑换]: [${currentItem.name}] 跳过：${currentItem.safetyReason.ifBlank { currentItem.safety.name }}")
-                    continue
-                }
                 if (currentItem.spuId.isBlank() || currentItem.skuId.isBlank()) {
                     Log.farm("[自动兑换]: [${currentItem.name}] 跳过：缺少 spuId/skuId")
                     continue
@@ -899,14 +888,31 @@ class ChouChouLe {
         }
     }
 
-    fun refreshIpChouChouLeExchangeOptionsFromRpc(): List<ExchangeOptionRow> {
-        ExchangeFetchPacing.domainStartDelay()
+    fun refreshIpChouChouLeExchangeOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> {
         val activity = queryActiveIpDrawActivity() ?: throw IllegalStateException("未获取到有效的IP抽抽乐活动")
-        val snapshot = queryIpDrawMallSnapshot(activity) ?: throw IllegalStateException("未获取到IP抽抽乐商店快照")
+        val snapshot = loadIpDrawMallSnapshot(activity, forceRefresh)
         syncIpDrawShopSnapshot(snapshot)
-        val rows = snapshot.items.map { buildIpChouChouLeExchangeOption(it).toOptionRow() }
-        ExchangeOptionsCache.save(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE, rows)
-        return rows
+        return snapshot.items.map { buildIpChouChouLeExchangeOption(it).toOptionRow() }
+    }
+
+    private fun loadIpDrawMallSnapshot(activity: IpDrawActivity, forceRefresh: Boolean = false): IpDrawMallSnapshot {
+        val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE, forceRefresh) {
+            ExchangeFetchPacing.domainStartDelay()
+            val mall = queryIpDrawMallSnapshot(activity) ?: error("未获取到完整IP抽抽乐商店快照")
+            val payload = JSONObject().put("activityId", mall.activityId).put("endTime", mall.endTime)
+                .put("balanceCent", mall.balanceCent).put("items", mall.rawItems)
+            ExchangeOptionsSnapshot(mall.items.map { buildIpChouChouLeExchangeOption(it).toOptionRow() }, payload)
+        }
+        val payload = snapshot.payload
+        check(payload.getString("activityId") == activity.activityId && isIpDrawActivityActive(activity)) {
+            "IP抽抽乐活动已变化，请在设置页手动刷新兑换列表"
+        }
+        val rawItems = payload.getJSONArray("items")
+        val items = LinkedHashMap<String, IpDrawMallItem>()
+        for (i in 0 until rawItems.length()) {
+            parseIpDrawMallItems(rawItems.getJSONObject(i)).forEach { items.putIfAbsent(it.skuId, it) }
+        }
+        return IpDrawMallSnapshot(activity.activityId, activity.endTime, payload.getInt("balanceCent"), items.values.toList(), rawItems)
     }
 
     private fun queryActiveIpDrawActivity(): IpDrawActivity? {
@@ -932,7 +938,6 @@ class ChouChouLe {
     private fun queryIpDrawMallSnapshot(
         activity: IpDrawActivity,
         pageSize: Int = 10,
-        maxPages: Int = 20,
     ): IpDrawMallSnapshot? {
         if (activity.activityId.isBlank()) {
             Log.farm("IP抽抽乐商店💸[缺少 activityId，无法查询]")
@@ -942,13 +947,13 @@ class ChouChouLe {
             return null
         }
         val items = mutableListOf<IpDrawMallItem>()
+        val rawItems = JSONArray()
         val seenSkuIds = linkedSetOf<String>()
-        val seenStartIndexes = linkedSetOf<Int>()
+        val seenItemIds = linkedSetOf<String>()
         var balanceCent = 0
         var startIndex = 0
-        var pageCount = 0
 
-        while (pageCount < maxPages && seenStartIndexes.add(startIndex)) {
+        while (true) {
             val jo =
                 runCatching {
                     JSONObject(AntFarmRpcCall.getItemList(activity.activityId, pageSize, startIndex))
@@ -967,51 +972,38 @@ class ChouChouLe {
                 ?.takeIf { it.has("cent") }
                 ?.let { balanceCent = it.optInt("cent", balanceCent) }
 
-            val itemInfoVOList = jo.optJSONArray("itemInfoVOList")
-            if (itemInfoVOList == null) RequestManager.failExchangeSettingsRefresh()
-            if (itemInfoVOList == null || itemInfoVOList.length() == 0) {
-                break
-            }
-
-            var newItemCount = 0
+            val itemInfoVOList = jo.optJSONArray("itemInfoVOList") ?: return null
+            val seenCount = seenItemIds.size
             for (i in 0 until itemInfoVOList.length()) {
-                val itemJo = itemInfoVOList.optJSONObject(i) ?: continue
+                val itemJo = itemInfoVOList.optJSONObject(i) ?: return null
+                rawItems.put(itemJo)
+                itemJo.optString("spuId").trim().takeIf { it.isNotBlank() }?.let { seenItemIds.add("spu:$it") }
+                val skuList = itemJo.optJSONArray("skuModelList")
+                if (skuList != null) {
+                    for (j in 0 until skuList.length()) {
+                        skuList.optJSONObject(j)?.optString("skuId")?.trim()?.takeIf { it.isNotBlank() }
+                            ?.let { seenItemIds.add("sku:$it") }
+                    }
+                }
                 parseIpDrawMallItems(itemJo).forEach { item ->
                     if (seenSkuIds.add(item.skuId)) {
                         items.add(item)
-                        newItemCount++
                     }
                 }
             }
 
-            pageCount++
-            if (newItemCount == 0) {
-                RequestManager.failExchangeSettingsRefresh()
-                Log.farm("IP抽抽乐商店💸[分页未发现新商品，停止继续查询: startIndex=$startIndex]")
-                break
-            }
-
-            val responseNextIndex = if (jo.has("nextStartIndex")) jo.optInt("nextStartIndex", -1) else -1
-            val nextStartIndex = if (responseNextIndex > startIndex) responseNextIndex else startIndex + itemInfoVOList.length()
             val hasMore = if (jo.has("hasMore")) jo.optBoolean("hasMore", false) else itemInfoVOList.length() >= pageSize
-            if (!hasMore || nextStartIndex <= startIndex) {
-                if (hasMore && nextStartIndex <= startIndex) {
-                    RequestManager.failExchangeSettingsRefresh()
-                    Log.farm("IP抽抽乐商店💸[分页 nextStartIndex 未前进，停止继续查询: startIndex=$startIndex]")
-                }
-                break
-            }
-            if (pageCount >= maxPages || seenStartIndexes.contains(nextStartIndex)) {
-                RequestManager.failExchangeSettingsRefresh()
+            if (!hasMore) break
+            val nextStartIndex = if (jo.has("nextStartIndex")) jo.optInt("nextStartIndex", -1) else startIndex + itemInfoVOList.length()
+            if (itemInfoVOList.length() == 0 || seenItemIds.size == seenCount || nextStartIndex <= startIndex) {
+                Log.farm("IP抽抽乐商店💸[列表分页未前进: startIndex=$startIndex count=${itemInfoVOList.length()} hasMore=$hasMore nextStartIndex=$nextStartIndex]")
+                return null
             }
             startIndex = nextStartIndex
             ExchangeFetchPacing.pageTurnDelay()
         }
 
-        if (pageCount >= maxPages) {
-            Log.farm("IP抽抽乐商店💸[分页达到上限${maxPages}页，停止继续查询]")
-        }
-        return IpDrawMallSnapshot(activity.activityId, activity.endTime, balanceCent, items)
+        return IpDrawMallSnapshot(activity.activityId, activity.endTime, balanceCent, items, rawItems)
     }
 
     private fun queryIpDrawMallItemDetail(item: IpDrawMallItem): IpDrawMallItemDetail? {
@@ -1212,23 +1204,6 @@ class ChouChouLe {
                 }
             }
 
-        for (item in sortedItems) {
-            if (item.safety != ExchangeSafety.AUTO) continue
-            val blockReason = blockedIpDrawMallItemReason(item)
-            if (blockReason.isNotBlank()) {
-                if (shouldStopDefaultExchangeForNoEnoughPoint(item)) {
-                    Log.farm("[自动兑换]: 最高价值项 [${item.name}] 碎片不足，等攒够再换，终止本次兑换")
-                    return emptyList()
-                }
-                continue
-            }
-            if (item.isNewEgg) continue
-            if (item.priceCent > 0 && snapshot.balanceCent < item.priceCent) {
-                Log.farm("[自动兑换]: 最高价值项 [${item.name}] 碎片不足，等攒够再换，终止本次兑换")
-                return emptyList()
-            }
-            break
-        }
         return sortedItems.map { it to (if (it.limitCount > 0) it.limitCount else 1) }
     }
 

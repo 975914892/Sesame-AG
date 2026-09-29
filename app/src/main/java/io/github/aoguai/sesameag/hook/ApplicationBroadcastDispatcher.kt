@@ -11,6 +11,7 @@ import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
 import io.github.aoguai.sesameag.hook.keepalive.ScheduledTaskRouter
+import io.github.aoguai.sesameag.hook.keepalive.SystemWakeScheduler
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.Model
@@ -45,7 +46,7 @@ internal object ApplicationBroadcastDispatcher {
         if (finalProcessName != null && finalProcessName.endsWith(":widgetProvider")) {
             return
         }
-        if (!RuntimeIdentityGuard.isTrustedForExecution()) {
+        if (action != ApplicationHookConstants.BroadcastActions.HOOK_READY && !RuntimeIdentityGuard.isTrustedForExecution()) {
             record(TAG, "execution_gate_denied: runtime_identity")
             return
         }
@@ -129,35 +130,16 @@ internal object ApplicationBroadcastDispatcher {
             record(TAG, "忽略不存在的持久执行广播: $persistentScheduleId")
             return
         }
-        val currentSession = AccountSessionCoordinator.currentSession()
-        if (persistentSchedule != null && currentSession == null) {
-            PersistentScheduleRegistry.rescheduleDeferred(appContext, persistentSchedule.id, "broadcast_session_not_ready")
-            record(TAG, "持久执行广播收到但当前会话未就绪，已延后调度: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && !AccountSessionCoordinator.isScheduleRoutable(persistentSchedule)) {
-            PersistentScheduleRegistry.markFired(appContext, persistentSchedule.id)
-            record(TAG, "持久执行广播会话不匹配，已丢弃调度: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && persistentSchedule.state != PersistentScheduleState.SCHEDULED) {
-            record(TAG, "忽略已处理的持久执行广播: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && !ApplicationHook.isReadyForExec()) {
-            PersistentScheduleRegistry.rescheduleDeferred(appContext, persistentSchedule.id, "broadcast_workflow_not_ready")
-            record(TAG, "持久执行广播收到但工作流未就绪，已延后调度: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && ApplicationHookConstants.isOffline()) {
-            PersistentScheduleRegistry.rescheduleDeferred(appContext, persistentSchedule.id, "broadcast_offline")
-            record(TAG, "持久执行广播收到但当前离线，已延后调度: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule?.kind == PersistentScheduleKind.MODULE_CHILD) {
-            val ctx = context?.applicationContext ?: context ?: ApplicationHook.appContext
-            if (ctx == null || !ScheduledTaskRouter.fire(ctx, persistentSchedule, "target_broadcast_execute")) {
-                record(TAG, "模块持久子任务路由失败: ${persistentSchedule.name}")
+        if (persistentSchedule != null) {
+            val ctx = appContext ?: return
+            ApplicationHookConstants.submitEntry("persistent_broadcast_execute") {
+                ScheduledTaskRouter.confirmTargetLaunch(
+                    persistentSchedule.id,
+                    safeIntent.getLongExtra(SystemWakeScheduler.EXTRA_CONFIRMATION_AT, 0L),
+                )
+                PersistentScheduleRegistry.get(persistentSchedule.id)?.let {
+                    ScheduledTaskRouter.fire(ctx, it, "target_broadcast_execute")
+                }
             }
             return
         }
@@ -220,15 +202,7 @@ internal object ApplicationBroadcastDispatcher {
                 }
                 ApplicationHook.setWakenAtTimeAlarm()
             }
-            if (ApplicationHookCore.requestExecution(trigger)) {
-                persistentScheduleId.takeIf { it.isNotBlank() }?.let { scheduleId ->
-                    PersistentScheduleRegistry.markQueued(appContext, scheduleId)
-                }
-            } else {
-                persistentScheduleId.takeIf { it.isNotBlank() }?.let { scheduleId ->
-                    PersistentScheduleRegistry.rescheduleDeferred(appContext, scheduleId, "broadcast_enqueue_rejected")
-                }
-            }
+            ApplicationHookCore.requestExecution(trigger)
         }
     }
 
@@ -253,26 +227,16 @@ internal object ApplicationBroadcastDispatcher {
             record(TAG, "忽略不存在的持久预唤醒广播: $persistentScheduleId")
             return
         }
-        val currentSession = AccountSessionCoordinator.currentSession()
-        if (persistentSchedule != null && currentSession == null) {
-            record(TAG, "持久预唤醒广播收到但当前会话未就绪，保留调度等待恢复: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && !AccountSessionCoordinator.isScheduleRoutable(persistentSchedule)) {
-            PersistentScheduleRegistry.markFired(ctx, persistentSchedule.id)
-            record(TAG, "持久预唤醒广播会话不匹配，已丢弃调度: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && persistentSchedule.state != PersistentScheduleState.SCHEDULED) {
-            record(TAG, "忽略已处理的持久预唤醒广播: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && !ApplicationHook.isReadyForExec()) {
-            record(TAG, "持久预唤醒广播收到但工作流未就绪，保留调度等待恢复: ${persistentSchedule.name}")
-            return
-        }
-        if (persistentSchedule != null && ApplicationHookConstants.isOffline()) {
-            record(TAG, "持久预唤醒广播收到但当前离线，保留调度等待恢复: ${persistentSchedule.name}")
+        if (persistentSchedule != null) {
+            ApplicationHookConstants.submitEntry("persistent_broadcast_prewakeup") {
+                ScheduledTaskRouter.confirmTargetLaunch(
+                    persistentSchedule.id,
+                    safeIntent.getLongExtra(SystemWakeScheduler.EXTRA_CONFIRMATION_AT, 0L),
+                )
+                PersistentScheduleRegistry.get(persistentSchedule.id)?.let {
+                    ScheduledTaskRouter.fire(ctx, it, "target_broadcast_prewakeup")
+                }
+            }
             return
         }
         val now = System.currentTimeMillis()
@@ -332,6 +296,13 @@ internal object ApplicationBroadcastDispatcher {
     ) {
         val ctx = context?.applicationContext ?: context ?: ApplicationHook.appContext
         val targetUserId = intent.getStringExtra("userId")?.trim().orEmpty()
+        if (!RuntimeIdentityGuard.isTrustedForExecution()) {
+            sendHookReadyResult(
+                ctx, targetUserId, ready = false, message = "运行环境尚未就绪", request = intent,
+                currentUserId = AccountSessionCoordinator.currentUserId().orEmpty(),
+            )
+            return
+        }
         val loader = ApplicationHook.classLoader
         if (loader == null) {
             sendHookReadyResult(
@@ -339,6 +310,7 @@ internal object ApplicationBroadcastDispatcher {
                 targetUserId,
                 ready = false,
                 message = "目标应用 Hook 尚未就绪",
+                request = intent,
             )
             return
         }
@@ -351,6 +323,7 @@ internal object ApplicationBroadcastDispatcher {
                     targetUserId,
                     ready = false,
                     message = "当前目标应用账号未登录",
+                    request = intent,
                 )
             }
 
@@ -360,6 +333,7 @@ internal object ApplicationBroadcastDispatcher {
                     targetUserId,
                     ready = false,
                     message = "当前目标应用账号与好友中心账号不一致: target=$targetUserId, current=$currentUserId",
+                    request = intent,
                     currentUserId = currentUserId,
                 )
             }
@@ -370,6 +344,7 @@ internal object ApplicationBroadcastDispatcher {
                     targetUserId.ifBlank { currentUserId },
                     ready = false,
                     message = "目标应用 RPC 当前处于离线拦截状态",
+                    request = intent,
                     currentUserId = currentUserId,
                 )
             }
@@ -380,6 +355,7 @@ internal object ApplicationBroadcastDispatcher {
                     targetUserId.ifBlank { currentUserId },
                     ready = false,
                     message = "目标应用 RpcBridge 尚未就绪",
+                    request = intent,
                     currentUserId = currentUserId,
                 )
             }
@@ -390,6 +366,7 @@ internal object ApplicationBroadcastDispatcher {
                     targetUserId.ifBlank { currentUserId },
                     ready = true,
                     message = "目标应用已就绪",
+                    request = intent,
                     currentUserId = currentUserId,
                 )
             }
@@ -401,11 +378,17 @@ internal object ApplicationBroadcastDispatcher {
         userId: String,
         ready: Boolean,
         message: String,
+        request: Intent,
         currentUserId: String = "",
     ) {
         val ctx = context ?: ApplicationHook.appContext ?: return
         ctx.sendBroadcast(
             Intent(ApplicationHookConstants.BroadcastActions.HOOK_READY_RESULT).apply {
+                val replyPackage = request.getStringExtra("replyPackage")
+                setPackage(if (replyPackage == General.PACKAGE_NAME) General.PACKAGE_NAME else General.MODULE_PACKAGE_NAME)
+                putExtra("requestToken", request.getStringExtra("requestToken"))
+                putExtra("sessionEpoch", AccountSessionCoordinator.currentSessionEpoch())
+                putExtra("workflowReady", ApplicationHook.isReadyForExec() && WorkflowRootGuard.isExecutionAllowed())
                 putExtra("userId", userId)
                 putExtra("ready", ready)
                 putExtra("message", message)
@@ -538,7 +521,8 @@ internal object ApplicationBroadcastDispatcher {
             val requestId = safeIntent.getStringExtra("requestId").orEmpty()
             val target = safeIntent.getStringExtra("target").orEmpty()
             val targetUserId = safeIntent.getStringExtra("userId")?.trim().orEmpty()
-            val result = refreshExchangeOptionsInTarget(target, targetUserId)
+            val forceRefresh = safeIntent.getBooleanExtra("forceRefresh", false)
+            val result = refreshExchangeOptionsInTarget(target, targetUserId, forceRefresh)
             sendRefreshExchangeOptionsResult(
                 ctx,
                 requestId = requestId,
@@ -561,6 +545,7 @@ internal object ApplicationBroadcastDispatcher {
     private fun refreshExchangeOptionsInTarget(
         target: String,
         targetUserId: String,
+        forceRefresh: Boolean,
     ): ExchangeOptionsRefreshResult {
         val loader =
             ApplicationHook.classLoader
@@ -585,52 +570,54 @@ internal object ApplicationBroadcastDispatcher {
 
         return try {
             UserMap.setCurrentUserId(currentUserId)
-            val options =
+            val refresh = {
                 when (target) {
                     ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE -> {
-                        Model.getModel(MyBankWelfare::class.java)?.refreshMyBankWelfareExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "网商银行模块未初始化", currentUserId)
+                        Model.getModel(MyBankWelfare::class.java)?.refreshMyBankWelfareExchangeOptionsForRemote(forceRefresh)
+                            ?: error("网商银行模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT -> {
-                        Model.getModel(AntMember::class.java)?.refreshMemberPointExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)
+                        Model.getModel(AntMember::class.java)?.refreshMemberPointExchangeOptionsForRemote(forceRefresh)
+                            ?: error("会员模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT -> {
-                        Model.getModel(AntMember::class.java)?.refreshBeanExchangeRightOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)
+                        Model.getModel(AntMember::class.java)?.refreshBeanExchangeRightOptionsForRemote(forceRefresh)
+                            ?: error("会员模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE -> {
-                        Model.getModel(AntFarm::class.java)?.refreshParadiseCoinExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "庄园模块未初始化", currentUserId)
+                        Model.getModel(AntFarm::class.java)?.refreshParadiseCoinExchangeOptionsForRemote(forceRefresh)
+                            ?: error("庄园模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE -> {
-                        Model.getModel(AntFarm::class.java)?.refreshIpChouChouLeExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "庄园模块未初始化", currentUserId)
+                        Model.getModel(AntFarm::class.java)?.refreshIpChouChouLeExchangeOptionsForRemote(forceRefresh)
+                            ?: error("庄园模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY -> {
-                        Model.getModel(AntSports::class.java)?.refreshSportsEnergyExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "运动模块未初始化", currentUserId)
+                        Model.getModel(AntSports::class.java)?.refreshSportsEnergyExchangeOptionsForRemote(forceRefresh)
+                            ?: error("运动模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY -> {
-                        Model.getModel(AntForest::class.java)?.refreshVitalityExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "森林模块未初始化", currentUserId)
+                        Model.getModel(AntForest::class.java)?.refreshVitalityExchangeOptionsForRemote(forceRefresh)
+                            ?: error("森林模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN -> {
-                        Model.getModel(AntSesameCredit::class.java)?.refreshSesameGrainExchangeOptionsForRemote()
-                            ?: return ExchangeOptionsRefreshResult(false, "芝麻信用模块未初始化", currentUserId)
+                        Model.getModel(AntSesameCredit::class.java)?.refreshSesameGrainExchangeOptionsForRemote(forceRefresh)
+                            ?: error("芝麻信用模块未初始化")
                     }
 
                     else -> {
-                        return ExchangeOptionsRefreshResult(false, "未知兑换列表刷新目标: $target", currentUserId)
+                        error("未知兑换列表刷新目标: $target")
                     }
                 }
+            }
+            val options = if (forceRefresh) RequestManager.withExchangeSettingsRefresh(refresh) else refresh()
             ExchangeOptionsRefreshResult(true, "刷新完成: $target#${options.size}", currentUserId, options)
         } catch (t: Throwable) {
             io.github.aoguai.sesameag.util.Log

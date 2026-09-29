@@ -7,7 +7,7 @@ import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
 import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.hook.ApplicationHookCore
-import io.github.aoguai.sesameag.hook.ApplicationResumeCoordinator
+import io.github.aoguai.sesameag.hook.HookReadyChecker
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
@@ -20,6 +20,12 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 object ScheduledTaskRouter {
@@ -39,6 +45,87 @@ object ScheduledTaskRouter {
         SKIPPED,
     }
 
+    private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val deliveryMutex = Mutex()
+
+    suspend fun fireDueFromModule(context: Context, source: String): Int = deliveryMutex.withLock {
+        val now = System.currentTimeMillis()
+        val due = PersistentScheduleRegistry.list().filter {
+            it.state == PersistentScheduleState.SCHEDULED && it.triggerAtMs <= now
+        }.sortedBy { it.deadlineAtMs() }
+        try {
+            val deliverable = due.filter { schedule ->
+                when {
+                    now > schedule.deadlineAtMs() -> {
+                        PersistentScheduleRegistry.markExpired(context, schedule.id, now, source)
+                        false
+                    }
+                    schedule.lastError in setOf("launch_pending", "delivery_pending") -> {
+                        if (schedule.lastError == "launch_pending") {
+                            recordLaunchFailure(schedule, IllegalStateException("launch_unconfirmed"))
+                        }
+                        PersistentScheduleRegistry.rescheduleDeferred(
+                            context, schedule.id, "${schedule.lastError}_timeout", now, expected = schedule,
+                        )
+                        false
+                    }
+                    else -> true
+                }
+            }
+            if (deliverable.isEmpty()) return@withLock due.size
+            val identity = AccountSessionCoordinator.currentOrPersistedSessionIdentity()
+            val readiness = HookReadyChecker.probe(context, identity?.userId.orEmpty())
+            var launchAttempted = PersistentScheduleRegistry.list().any {
+                it.state == PersistentScheduleState.SCHEDULED && it.lastError == "launch_pending"
+            }
+            for (schedule in deliverable) {
+                if (identity == null || schedule.ownerUserId != identity.userId || schedule.sessionEpoch != identity.sessionEpoch) {
+                    PersistentScheduleRegistry.markFailed(context, schedule.id, "session_mismatch", source = source, expected = schedule)
+                    continue
+                }
+                if (readiness.replied) {
+                    if (readiness.currentUserId.isNotBlank() && readiness.currentUserId != schedule.ownerUserId ||
+                        readiness.sessionEpoch > 0L && readiness.sessionEpoch != schedule.sessionEpoch
+                    ) {
+                        PersistentScheduleRegistry.markFailed(context, schedule.id, "target_session_mismatch", source = source, expected = schedule)
+                    } else if (readiness.ready && readiness.workflowReady &&
+                        readiness.currentUserId == schedule.ownerUserId && readiness.sessionEpoch == schedule.sessionEpoch
+                    ) {
+                        val waiting = PersistentScheduleRegistry.beginDeliveryWait(context, schedule, launching = false) ?: continue
+                        val intent = Intent(ApplicationHookConstants.BroadcastActions.EXECUTE).apply {
+                            setPackage(General.PACKAGE_NAME)
+                            putExtra(EXTRA_PERSISTENT_ID, waiting.id)
+                            putExtra(SystemWakeScheduler.EXTRA_CONFIRMATION_AT, waiting.updatedAtMs)
+                        }
+                        if (!sendTargetBroadcast(context, intent, waiting, source)) {
+                            PersistentScheduleRegistry.rescheduleDeferred(context, waiting.id, "broadcast_failed", expected = waiting)
+                        }
+                    } else {
+                        PersistentScheduleRegistry.rescheduleDeferred(
+                            context, schedule.id, "target_not_ready:${readiness.message}", expected = schedule,
+                        )
+                    }
+                    continue
+                }
+                if (launchAttempted || !shouldLaunchTarget(schedule) || !consumeLaunchQuota(schedule)) {
+                    PersistentScheduleRegistry.rescheduleDeferred(
+                        context, schedule.id, "target_unavailable_or_launch_disabled", expected = schedule,
+                    )
+                    continue
+                }
+                launchAttempted = true
+                val waiting = PersistentScheduleRegistry.beginDeliveryWait(context, schedule, launching = true) ?: continue
+                if (!SystemWakeScheduler.launchTargetNow(context, waiting)) {
+                    recordLaunchFailure(waiting, IllegalStateException("target_launch_failed"))
+                    PersistentScheduleRegistry.rescheduleDeferred(context, waiting.id, "target_launch_failed", expected = waiting)
+                }
+            }
+            due.size
+        } finally {
+            SystemWakeScheduler.refresh(context)
+        }
+    }
+
     fun fire(
         context: Context,
         schedule: PersistentSchedule,
@@ -46,6 +133,10 @@ object ScheduledTaskRouter {
     ): Boolean {
         return try {
             val appContext = context.applicationContext ?: context
+            if (!isTargetProcess(appContext)) {
+                moduleScope.launch { fireDueFromModule(appContext, source) }
+                return true
+            }
             Log.record(
                 TAG,
                 "路由持久调度[id=${schedule.id}] state=${schedule.state} kind=${schedule.kind} source=$source owner=${schedule.ownerUserId} session=${schedule.sessionEpoch}",
@@ -60,9 +151,8 @@ object ScheduledTaskRouter {
                 Log.runtime(TAG, "持久任务[${schedule.name}]未到触发时间，已重排 source=$source")
                 return true
             }
-            val toleranceMs = schedule.toleranceMs.coerceAtLeast(0L)
             val targetProcess = isTargetProcess(appContext)
-            if (now - schedule.triggerAtMs > toleranceMs) {
+            if (now > schedule.deadlineAtMs()) {
                 if (targetProcess && schedule.kind == PersistentScheduleKind.MODULE_CHILD) {
                     val payload = payloadOf(schedule)
                     if (payload.optString("child_kind") == EnergyWaitingManager.PERSISTENT_CHILD_KIND) {
@@ -75,20 +165,20 @@ object ScheduledTaskRouter {
                 Log.record(TAG, "持久任务[${schedule.name}]超过触发窗口，已过期 source=$source")
                 return true
             }
-            // 只有目标进程拥有后续执行队列；模块进程只负责转发，避免目标广播读到 QUEUED 后被拒绝。
+            if (schedule.lastError in setOf("launch_pending", "delivery_pending")) {
+                PersistentScheduleRegistry.rescheduleDeferred(
+                    appContext, schedule.id, "${schedule.lastError}_timeout", now, expected = schedule,
+                )
+                return true
+            }
+            // 所有宿主入口均先在跨进程锁内认领，再提交执行。
             if (targetProcess && !PersistentScheduleRegistry.markQueued(appContext, schedule.id, now, source)) {
                 Log.record(TAG, "持久任务排队状态已变化，跳过重复路由[${schedule.name}] source=$source")
                 return true
             }
             val routeResult = routeInternal(context, schedule, source)
             when (routeResult) {
-                RouteResult.HANDLED -> {
-                    if (targetProcess && schedule.kind == PersistentScheduleKind.MODULE_CHILD) {
-                        // Claim the child slot before an asynchronous module worker is queued.
-                        // This closes the startup arbitration window between QUEUED and RUNNING.
-                        PersistentScheduleRegistry.markRunning(schedule.id, source = source)
-                    }
-                }
+                RouteResult.HANDLED -> Unit
 
                 RouteResult.CONSUMED -> {
                     if (targetProcess) {
@@ -147,6 +237,9 @@ object ScheduledTaskRouter {
             )
             return RouteResult.SKIPPED
         }
+        if (targetProcess && !ApplicationHook.isReadyForExec()) {
+            return RouteResult.DEFERRED
+        }
         if (targetProcess && !WorkflowRootGuard.isExecutionAllowed()) {
             Log.record(TAG, "必需权限或使用协议未就绪，延后持久任务[${schedule.name}] source=$source")
             return RouteResult.DEFERRED
@@ -190,7 +283,7 @@ object ScheduledTaskRouter {
         }
     }
 
-    private fun routeResult(handled: Boolean): RouteResult = if (handled) RouteResult.HANDLED else RouteResult.FAILED
+    private fun routeResult(handled: Boolean): RouteResult = if (handled) RouteResult.HANDLED else RouteResult.DEFERRED
 
     private fun dispatchExecute(
         context: Context,
@@ -199,26 +292,7 @@ object ScheduledTaskRouter {
         wakenAtTime: Boolean,
         wakenTime: String?,
     ): Boolean {
-        val intent =
-            Intent(ApplicationHookConstants.BroadcastActions.EXECUTE).apply {
-                setPackage(General.PACKAGE_NAME)
-                putExtra("alarm_triggered", true)
-                putExtra("waken_at_time", wakenAtTime)
-                if (!wakenTime.isNullOrBlank()) {
-                    putExtra("waken_time", wakenTime)
-                }
-                putExtra(EXTRA_PERSISTENT_KIND, schedule.kind)
-                putExtra(EXTRA_PERSISTENT_ID, schedule.id)
-                putExtra(EXTRA_PERSISTENT_NAME, schedule.name)
-            }
-
-        if (isTargetProcess(context)) {
-            return requestExecutionInCurrentProcess(schedule, source, wakenAtTime, wakenTime)
-        }
-
-        maybeLaunchTarget(context, schedule, source)
-        sendTargetBroadcast(context, intent, schedule, source)
-        return true
+        return requestExecutionInCurrentProcess(schedule, source, wakenAtTime, wakenTime)
     }
 
     private fun dispatchPreWakeup(
@@ -228,29 +302,13 @@ object ScheduledTaskRouter {
     ): Boolean {
         val payload = payloadOf(schedule)
         val executionTime = payload.optLong("execution_time", schedule.triggerAtMs)
-        val intent =
-            Intent(ApplicationHookConstants.BroadcastActions.PRE_WAKEUP).apply {
-                setPackage(General.PACKAGE_NAME)
-                putExtra("execution_time", executionTime)
-                putExtra("force_execute", true)
-                putExtra(EXTRA_PERSISTENT_KIND, schedule.kind)
-                putExtra(EXTRA_PERSISTENT_ID, schedule.id)
-                putExtra(EXTRA_PERSISTENT_NAME, schedule.name)
-            }
-
-        if (isTargetProcess(context)) {
-            return requestExecutionInCurrentProcess(
-                schedule = schedule,
-                source = source,
-                wakenAtTime = false,
-                wakenTime = null,
-                executionTime = executionTime,
-            )
-        }
-
-        maybeLaunchTarget(context, schedule, source)
-        sendTargetBroadcast(context, intent, schedule, source)
-        return true
+        return requestExecutionInCurrentProcess(
+            schedule = schedule,
+            source = source,
+            wakenAtTime = false,
+            wakenTime = null,
+            executionTime = executionTime,
+        )
     }
 
     private fun dispatchModuleChild(
@@ -456,12 +514,14 @@ object ScheduledTaskRouter {
         intent: Intent,
         schedule: PersistentSchedule,
         source: String,
-    ) {
-        try {
+    ): Boolean {
+        return try {
             context.sendBroadcast(intent)
             Log.record(TAG, "已投递持久任务广播[${schedule.name}] source=$source")
+            true
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "投递持久任务广播失败[${schedule.name}]", t)
+            false
         }
     }
 
@@ -515,49 +575,12 @@ object ScheduledTaskRouter {
         )
     }
 
-    private fun maybeLaunchTarget(
-        context: Context,
-        schedule: PersistentSchedule,
-        source: String,
-    ): Boolean {
-        if (PersistentLaunchPolicy.payloadRequestsTargetLaunch(schedule.payloadJson) && !shouldLaunchTarget(schedule)) {
-            clearLaunchFailures(schedule)
-            Log.record(TAG, "持久任务前台拉起已关闭，跳过拉起目标应用[${schedule.name}]")
-            return false
-        }
-        if (!shouldLaunchTarget(schedule)) {
-            return false
-        }
-        if (ApplicationResumeCoordinator.isHostAppForeground()) {
-            clearLaunchFailures(schedule)
-            Log.record(TAG, "目标应用已在前台，跳过重复拉起[${schedule.name}]")
-            return false
-        }
-        if (!consumeLaunchQuota(schedule)) {
-            Log.record(TAG, "持久任务拉起目标应用被频控[${schedule.name}]")
-            return false
-        }
-        val launched =
-            SystemWakeScheduler.launchTargetNow(
-                context,
-                schedule,
-                allowBackgroundAlways = source == "alarm",
-            )
-        if (launched) {
-            // PendingIntent.send() 只代表请求已发出；只有 Activity 消费 launch extra 后才能确认拉起成功。
-            Log.record(TAG, "持久任务已请求拉起目标应用，等待 Activity 确认[${schedule.name}]")
-            return true
-        }
-        recordLaunchFailure(schedule, RuntimeException("pending_intent_launch_failed"))
-        return false
-    }
-
-    fun confirmTargetLaunch(scheduleId: String) {
-        SystemWakeScheduler.cancelLaunchConfirmationTimeout(scheduleId)
-        val schedule = PersistentScheduleRegistry.get(scheduleId) ?: return
-        PersistentScheduleRegistry.confirmTargetLaunch(scheduleId)
+    fun confirmTargetLaunch(scheduleId: String, confirmationAtMs: Long): Boolean {
+        if (!PersistentScheduleRegistry.confirmTargetLaunch(scheduleId, confirmationAtMs)) return false
+        val schedule = PersistentScheduleRegistry.get(scheduleId) ?: return false
         clearLaunchFailures(schedule)
-        Log.record(TAG, "目标应用已确认接收持久调度拉起[${schedule.name}]")
+        Log.record(TAG, "目标应用已确认接收持久调度[id=$scheduleId]")
+        return true
     }
 
     fun allowRuntimeForegroundLaunch(
