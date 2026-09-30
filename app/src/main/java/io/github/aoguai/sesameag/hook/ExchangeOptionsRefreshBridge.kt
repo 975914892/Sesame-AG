@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Process
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.fasterxml.jackson.core.type.TypeReference
 import io.github.aoguai.sesameag.SesameApplication
@@ -14,6 +15,7 @@ import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -52,6 +54,10 @@ object ExchangeOptionsRefreshBridge {
         val appContext = context.applicationContext
         val requestId = "${target}_${Process.myPid()}_${System.currentTimeMillis()}"
         val resultRef = AtomicReference(RefreshResult(false, "未收到目标应用刷新结果"))
+        val requestedUserId = userId?.trim().orEmpty()
+        val lastAdvanceAt = AtomicLong(SystemClock.elapsedRealtime())
+        val lastProgress = AtomicReference("等待目标应用响应")
+        val idleTimeoutMs = timeoutMs.coerceAtLeast(500L)
         val latch = CountDownLatch(1)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -64,12 +70,21 @@ object ExchangeOptionsRefreshBridge {
                 if (intent.getStringExtra("target") != target) {
                     return
                 }
-                val resultSuccess = intent.getBooleanExtra("success", false)
+                val responseUserId = intent.getStringExtra("userId").orEmpty()
+                if (requestedUserId.isNotEmpty() && responseUserId != requestedUserId) return
                 val message = intent.getStringExtra("message").orEmpty()
+                if (intent.getBooleanExtra("progress", false)) {
+                    lastProgress.set(message)
+                    if (intent.getBooleanExtra("advances", false)) {
+                        lastAdvanceAt.set(SystemClock.elapsedRealtime())
+                    }
+                    return
+                }
+                val resultSuccess = intent.getBooleanExtra("success", false)
                 if (message.isNotBlank()) {
                     Log.runtime(TAG, "refresh result[$target]: $message")
                 }
-                val userId = intent.getStringExtra("userId").orEmpty()
+                val userId = responseUserId
                 if (!resultSuccess) {
                     resultRef.set(RefreshResult(false, message, userId))
                     latch.countDown()
@@ -109,9 +124,19 @@ object ExchangeOptionsRefreshBridge {
                 putExtra("userId", userId.orEmpty())
                 putExtra("forceRefresh", forceRefresh)
             })
-            latch.await(timeoutMs.coerceAtLeast(500L), TimeUnit.MILLISECONDS)
+            while (latch.count > 0L) {
+                val remaining = idleTimeoutMs - (SystemClock.elapsedRealtime() - lastAdvanceAt.get())
+                if (remaining <= 0L) {
+                    if (latch.count == 0L) break
+                    return RefreshResult(false,
+                        "连续 ${TimeUnit.MILLISECONDS.toSeconds(idleTimeoutMs)} 秒无新进展，已结束等待；${lastProgress.get()}。目标应用查询未被取消，已保存页可供后续续查。",
+                        requestedUserId)
+                }
+                latch.await(remaining, TimeUnit.MILLISECONDS)
+            }
             resultRef.get()
         } catch (t: Throwable) {
+            if (t is InterruptedException) Thread.currentThread().interrupt()
             Log.printStackTrace(TAG, "requestRefresh err:", t)
             RefreshResult(false, t.message ?: t.javaClass.simpleName)
         } finally {

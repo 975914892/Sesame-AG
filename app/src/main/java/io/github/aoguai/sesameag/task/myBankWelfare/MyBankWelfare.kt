@@ -230,23 +230,24 @@ class MyBankWelfare : ModelTask() {
             }
             return candidates
         }
-        val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE, forceRefresh) {
-            ExchangeFetchPacing.domainStartDelay()
-            val payload = JSONObject().put("items", queryMyBankRightsCandidates())
+        val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE, forceRefresh) { session ->
+            val payload = JSONObject().put("items", queryMyBankRightsCandidates(session))
             ExchangeOptionsSnapshot(parse(payload).values.map { it.item.toOptionRow() }, payload)
         }
         val candidates = parse(snapshot.payload)
         return MyBankWelfareExchangeData(candidates.values.map { it.item.toOptionRow() }, candidates)
     }
 
-    private fun queryMyBankRightsCandidates(): JSONArray {
+    private fun queryMyBankRightsCandidates(session: io.github.aoguai.sesameag.task.exchange.ExchangeFetchSession): JSONArray {
         val items = JSONArray()
         val seenItemIds = linkedSetOf<String>()
         var pageNum = 1
         var totalCount = Int.MAX_VALUE
         val pageSize = 20
         while ((pageNum - 1) * pageSize < totalCount) {
-            val response = JSONObject(MyBankWelfareRpcCall.queryItemsInMemberV2(pageNum = pageNum, perPageSize = pageSize))
+            val response = session.read("items", JSONObject().put("pageNum", pageNum).put("pageSize", pageSize), "权益第 $pageNum 页") {
+                JSONObject(MyBankWelfareRpcCall.queryItemsInMemberV2(pageNum = pageNum, perPageSize = pageSize))
+            }
             check(ResChecker.checkRes(TAG, "${BUSINESS_NAME}权益列表查询失败:", response)) { "网商银行福利金权益列表查询失败" }
             val pageItems = response.getJSONObject("result").getJSONObject("pageItems")
             val dataList = pageItems.getJSONArray("dataList")
@@ -262,15 +263,19 @@ class MyBankWelfare : ModelTask() {
             }
             if (dataList.length() < pageSize) {
                 check(totalCount == Int.MAX_VALUE || items.length() >= totalCount) { "网商银行福利金列表尚有未拉取商品" }
+                session.commit(JSONObject().put("done", true).put("totalCount", totalCount), dataList.length(), "分页结束，保存完整列表")
                 break
             }
             pageNum++
-            if ((pageNum - 1) * pageSize < totalCount) {
+            val hasMore = (pageNum - 1) * pageSize < totalCount
+            if (hasMore) {
                 check(seenItemIds.size > seenCount) {
                     "网商银行福利金分页未前进: pageNum=${pageNum - 1} count=${dataList.length()} totalCount=$totalCount"
                 }
-                ExchangeFetchPacing.pageTurnDelay()
             }
+            session.commit(JSONObject().put("pageNum", pageNum).put("totalCount", totalCount).put("done", !hasMore),
+                dataList.length(), if (hasMore) "权益第 $pageNum 页" else "分页结束，保存完整列表")
+            if (hasMore) session.pageTurnDelay()
         }
         return items
     }

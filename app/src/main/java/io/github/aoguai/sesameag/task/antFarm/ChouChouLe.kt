@@ -848,7 +848,9 @@ class ChouChouLe {
 
                     GlobalThreadPools.sleepCompat(800L)
                     val beforeExchangeItem = currentItem
-                    val refreshedSnapshot = queryIpDrawMallSnapshot(IpDrawActivity(activityId, endTime))
+                    val refreshedSnapshot = runCatching {
+                        loadIpDrawMallSnapshot(IpDrawActivity(activityId, endTime), liveRead = true)
+                    }.onFailure { Log.printStackTrace(TAG, "IP抽抽乐兑换后回查失败", it) }.getOrNull()
                     if (refreshedSnapshot == null) {
                         Log.farm("[自动兑换]: 已调用兑换但未回查确认 [${currentItem.name}] | ${formatIpDrawRpcResult(exchangeJo)}")
                         break
@@ -895,17 +897,32 @@ class ChouChouLe {
         return snapshot.items.map { buildIpChouChouLeExchangeOption(it).toOptionRow() }
     }
 
-    private fun loadIpDrawMallSnapshot(activity: IpDrawActivity, forceRefresh: Boolean = false): IpDrawMallSnapshot {
-        val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE, forceRefresh) {
-            ExchangeFetchPacing.domainStartDelay()
-            val mall = queryIpDrawMallSnapshot(activity) ?: error("未获取到完整IP抽抽乐商店快照")
+    private fun loadIpDrawMallSnapshot(
+        activity: IpDrawActivity, forceRefresh: Boolean = false, liveRead: Boolean = false
+    ): IpDrawMallSnapshot {
+        check(isIpDrawActivityActive(activity)) { "IP抽抽乐活动已结束" }
+        val context = JSONObject().put("activityId", activity.activityId).put("endTime", activity.endTime)
+        fun toSnapshot(mall: IpDrawMallSnapshot): ExchangeOptionsSnapshot {
             val payload = JSONObject().put("activityId", mall.activityId).put("endTime", mall.endTime)
                 .put("balanceCent", mall.balanceCent).put("items", mall.rawItems)
-            ExchangeOptionsSnapshot(mall.items.map { buildIpChouChouLeExchangeOption(it).toOptionRow() }, payload)
+            return ExchangeOptionsSnapshot(mall.items.map { buildIpChouChouLeExchangeOption(it).toOptionRow() }, payload)
+        }
+        val snapshot = if (liveRead) {
+            ExchangeOptionsCache.readAndReplaceFromLive(UserMap.currentUid,
+                ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE, context) { checkCurrent ->
+                toSnapshot(queryIpDrawMallSnapshot(activity, checkCurrent = checkCurrent)
+                    ?: error("未获取到完整IP抽抽乐实时回查快照"))
+            }
+        } else {
+            ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE,
+                forceRefresh, context = { context }) { session ->
+                toSnapshot(queryIpDrawMallSnapshot(activity, session = session)
+                    ?: error("未获取到完整IP抽抽乐商店快照"))
+            }
         }
         val payload = snapshot.payload
         check(payload.getString("activityId") == activity.activityId && isIpDrawActivityActive(activity)) {
-            "IP抽抽乐活动已变化，请在设置页手动刷新兑换列表"
+            "IP抽抽乐活动已变化，保留后续重新获取"
         }
         val rawItems = payload.getJSONArray("items")
         val items = LinkedHashMap<String, IpDrawMallItem>()
@@ -938,6 +955,8 @@ class ChouChouLe {
     private fun queryIpDrawMallSnapshot(
         activity: IpDrawActivity,
         pageSize: Int = 10,
+        session: io.github.aoguai.sesameag.task.exchange.ExchangeFetchSession? = null,
+        checkCurrent: () -> Unit = {},
     ): IpDrawMallSnapshot? {
         if (activity.activityId.isBlank()) {
             Log.farm("IP抽抽乐商店💸[缺少 activityId，无法查询]")
@@ -954,12 +973,22 @@ class ChouChouLe {
         var startIndex = 0
 
         while (true) {
-            val jo =
-                runCatching {
+            checkCurrent()
+            if (!isIpDrawActivityActive(activity)) return null
+            val jo = runCatching {
+                if (session != null) {
+                    session.read("items", JSONObject().put("startIndex", startIndex).put("pageSize", pageSize),
+                        "商品列表偏移 $startIndex") {
+                        JSONObject(AntFarmRpcCall.getItemList(activity.activityId, pageSize, startIndex))
+                    }
+                } else {
+                    io.github.aoguai.sesameag.task.exchange.ExchangeFetchProgress.report(UserMap.currentUid.orEmpty(),
+                        ExchangeOptionsRefreshBridge.TARGET_FARM_IP_CHOUCHOULE, "实时回查商品列表偏移 $startIndex")
                     JSONObject(AntFarmRpcCall.getItemList(activity.activityId, pageSize, startIndex))
-                }.onFailure {
-                    Log.printStackTrace(TAG, "queryIpDrawMallSnapshot err:", it)
-                }.getOrNull() ?: return null
+                }
+            }.onFailure {
+                Log.printStackTrace(TAG, "queryIpDrawMallSnapshot err:", it)
+            }.getOrNull() ?: return null
 
             if (!isIpDrawExchangeSuccess(jo)) {
                 Log.farm("IP抽抽乐商店💸[获取列表失败: startIndex=$startIndex | ${formatIpDrawRpcResult(jo)}]")
@@ -993,16 +1022,23 @@ class ChouChouLe {
             }
 
             val hasMore = if (jo.has("hasMore")) jo.optBoolean("hasMore", false) else itemInfoVOList.length() >= pageSize
-            if (!hasMore) break
+            if (!hasMore) {
+                session?.commit(JSONObject().put("done", true).put("balanceCent", balanceCent), itemInfoVOList.length(),
+                    "分页结束，保存完整列表")
+                break
+            }
             val nextStartIndex = if (jo.has("nextStartIndex")) jo.optInt("nextStartIndex", -1) else startIndex + itemInfoVOList.length()
             if (itemInfoVOList.length() == 0 || seenItemIds.size == seenCount || nextStartIndex <= startIndex) {
                 Log.farm("IP抽抽乐商店💸[列表分页未前进: startIndex=$startIndex count=${itemInfoVOList.length()} hasMore=$hasMore nextStartIndex=$nextStartIndex]")
                 return null
             }
+            session?.commit(JSONObject().put("startIndex", nextStartIndex).put("balanceCent", balanceCent), itemInfoVOList.length(),
+                "商品列表偏移 $nextStartIndex")
             startIndex = nextStartIndex
-            ExchangeFetchPacing.pageTurnDelay()
+            if (session != null) session.pageTurnDelay() else ExchangeFetchPacing.pageTurnDelay()
         }
-
+        checkCurrent()
+        if (!isIpDrawActivityActive(activity)) return null
         return IpDrawMallSnapshot(activity.activityId, activity.endTime, balanceCent, items, rawItems)
     }
 
