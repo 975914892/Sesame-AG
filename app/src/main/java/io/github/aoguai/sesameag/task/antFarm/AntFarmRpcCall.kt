@@ -687,14 +687,18 @@ object AntFarmRpcCall {
 
     // 日常任务
     @JvmStatic
-    fun doFarmTask(bizKey: String?): String =
+    @JvmOverloads
+    fun doFarmTask(bizKey: String?, taskSceneCode: String? = null): String =
         requestString(
             "com.alipay.antfarm.doFarmTask",
-            (
-                "[{\"bizKey\":\"" + bizKey +
-                    "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" +
-                    VERSION + "\"}]"
-            ),
+            JSONArray().put(JSONObject().apply {
+                put("bizKey", bizKey)
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM")
+                put("source", "H5")
+                put("version", VERSION)
+                if (!taskSceneCode.isNullOrBlank()) put("taskSceneCode", taskSceneCode)
+            }).toString(),
         )
 
     @JvmStatic

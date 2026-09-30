@@ -79,6 +79,9 @@ object StatusFlags {
     /** 森林：打地鼠今日已执行 */
     const val FLAG_ANTFOREST_WHACK_MOLE_EXECUTED = "forest::whackMole::executed"
 
+    /** 当日选中的保护地 ID；0 表示合成后需要重新评估。 */
+    const val FLAG_ANTFOREST_PATROL_TARGET = "AntForest::patrolTarget"
+
     /** 森林：保护地巡护机会兑换今日已达上限 */
     const val FLAG_ANTFOREST_PATROL_CHANCE_EXCHANGE_LIMIT = "AntForest::exchangePatrolChanceLimit"
 
@@ -200,12 +203,15 @@ object StatusFlags {
     /** 芝麻信用：今日是否已处理芝麻粒领取 */
     const val FLAG_SESAME_COLLECT_DONE: String = "AntSesameCredit::collectSesameDone"
 
+    /** 芝麻炼金：今天普通任务列表已确认无待处理项 */
+    const val FLAG_SESAME_ALCHEMY_TASKS_DONE = "AntSesameCredit::alchemy::tasksDone"
+
     /** 芝麻信用：芝麻粒炼金次日奖励是否已领取 */
     const val FLAG_SESAME_ALCHEMY_NEXT_DAY_AWARD: String = "AntSesameCredit::alchemy::nextDayAward"
 
-    /** 庄园芝麻大表鸽：今日已确认领取满产奖励 */
-    const val FLAG_FARM_ZHIMA_PIGEON_REWARD_RECEIVED: String =
-        "AntFarm::zhimaPigeonRewardReceived"
+    /** 庄园芝麻大表鸽：最新炼金列表已确认今天没有后续雇佣任务 */
+    const val FLAG_FARM_ZHIMA_PIGEON_HIRE_DONE: String =
+        "AntFarm::zhimaPigeonHireDone"
 
     /** 芝麻信用：芝麻粒兑换今日是否已处理 */
     const val FLAG_SESAME_GRAIN_EXCHANGE_DONE: String = "AntSesameCredit::sesameGrainExchangeDone"
@@ -258,6 +264,12 @@ object StatusFlags {
 
     /** 今日运动问答是否已处理 */
     const val FLAG_ANTSPORTS_MOTION_DAILY_QUIZ_DONE: String = "AntSports::motionDailyQuizDone"
+
+    /** 运动问答：健康奖励泡泡已完成领取回查 */
+    const val FLAG_ANTSPORTS_MOTION_QUIZ_HEALTH_CONFIRMED = "AntSports::motionQuizHealthConfirmed"
+
+    /** 运动问答：绿色能量已取得收取回执 */
+    const val FLAG_ANTSPORTS_MOTION_QUIZ_GREEN_CONFIRMED = "AntSports::motionQuizGreenConfirmed"
 
     /** 运动签到：今日已处理或已进入业务止损 */
     const val FLAG_ANTSPORTS_CHECK_IN_HANDLED_TODAY: String = "AntSports::checkInHandledToday"
@@ -317,6 +329,9 @@ object StatusFlags {
     /** 神奇海洋：今日任务列表已确认无可执行项 */
     const val FLAG_ANTOCEAN_TASKS_DONE = "AntOcean::tasksDone"
 
+    /** 神奇海洋：连续访问任务今天已取得有效进度 */
+    const val FLAG_ANTOCEAN_CONSECUTIVE_VISIT_DONE = "AntOcean::consecutiveVisitDone"
+
     /** 神奇海洋：完成动作被明确拒绝后，仅停止同一快照的当日重放。 */
     const val FLAG_ANTOCEAN_ACTION_STOP_PREFIX = "AntOcean::taskActionStop::"
 
@@ -330,12 +345,21 @@ object StatusFlags {
     /** 神奇物种：今日卡片收集已由服务端确认完成 */
     const val FLAG_ANTDODO_DAILY_COLLECT_DONE = "AntDodo::dailyCollectDone"
 
+    /** 神奇物种：今天连续抽卡已处理，累计进度仍待跨日推进 */
+    const val FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE = "AntDodo::consecutiveCollectDone"
+
+    /** 神奇物种：今天任务列表已确认无待处理项 */
+    const val FLAG_ANTDODO_TASKS_DONE = "AntDodo::tasksDone"
+
     // ============================================================
     // 农场 / 新村 / 团队
     // ============================================================
 
     /** 团队浇水：今日次数统计 */
     const val FLAG_TEAM_WATER_DAILY_COUNT: String = "Flag_Team_Weater_Daily_Count"
+
+    /** 农场：今天日常任务列表已确认无待处理项 */
+    const val FLAG_ANTORCHARD_TASKS_DONE = "AntOrchard::tasksDone"
 
     /** 农场组件：每日回访奖励 */
     const val FLAG_ANTORCHARD_WIDGET_DAILY_AWARD: String = "Flag_Antorchard_Widget_Daily_Award"

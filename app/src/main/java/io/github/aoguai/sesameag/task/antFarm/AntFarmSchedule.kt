@@ -93,6 +93,7 @@ internal fun AntFarm.scheduleFarmPendingWork() {
             "exchange" -> enableChouchoule?.value != true || autoExchange?.value != true
             "rankAwards" -> donationCompetition?.value != true
             "loveChicken" -> loveChickenGathering?.value != true
+            "zhimaPigeon" -> !isZhimaPigeonConfigured()
             "awards" -> false
             else -> true
         }
@@ -120,6 +121,7 @@ internal suspend fun AntFarm.runDueFarmWork() {
                 runFarmPriorityDonations()
                 runLoveChickenGatheringWorkflow()
             }
+            "zhimaPigeon" -> if (isZhimaPigeonConfigured()) runZhimaPigeonTaskFlow()
             "awards" -> receiveFarmAwards()
             "draw" -> if (enableChouchoule?.value == true) ChouChouLe().run(this)
             "exchange" -> if (enableChouchoule?.value == true && autoExchange?.value == true) ChouChouLe().exchangeIpRewards()
@@ -128,7 +130,7 @@ internal suspend fun AntFarm.runDueFarmWork() {
             }
         }
         // 已过期的日末触发只负责一次收尾；未确认的业务状态仍由下一轮自然调度读取。
-        if (reason == "awards" || reason == "draw" || reason == "loveChicken") {
+        if (reason == "awards" || reason == "draw" || reason == "loveChicken" || reason == "zhimaPigeon") {
             val pending = store.getOrCreate<MutableMap<String, Long>>(FARM_PENDING_WORK)
             if ((pending[reason] ?: Long.MAX_VALUE) <= now) {
                 pending.remove(reason)
