@@ -30,7 +30,13 @@ internal object LegacyPatrolWorkflow {
     private data class PatrolTargetRecord(
         val patrolId: Int,
         val reserveName: String,
-        val reason: String
+        val reason: String,
+        val cacheable: Boolean = true,
+    )
+
+    private data class PatrolInventorySelection(
+        val target: PatrolTargetRecord?,
+        val cacheable: Boolean,
     )
 
     private enum class PatrolPieceState {
@@ -185,7 +191,7 @@ internal object LegacyPatrolWorkflow {
         for (record in sortedRecords) {
             when (getPatrolAnimalPieceState(record)) {
                 PatrolPieceState.MISSING -> {
-                    return PatrolTargetRecord(record.patrolId, record.reserveName, "普通动物碎片未齐")
+                    return PatrolTargetRecord(record.patrolId, record.reserveName, "普通动物碎片未齐", !hasUnknownPieceState)
                 }
 
                 PatrolPieceState.UNKNOWN -> hasUnknownPieceState = true
@@ -194,42 +200,49 @@ internal object LegacyPatrolWorkflow {
             }
         }
 
+        var canCacheTarget = !hasUnknownPieceState
         if (!hasUnknownPieceState) {
-            selectPatrolInventoryTargetRecord(sortedRecords)?.let { return it }
+            val inventorySelection = selectPatrolInventoryTargetRecord(sortedRecords)
+            inventorySelection.target?.let { return it.copy(cacheable = inventorySelection.cacheable) }
+            canCacheTarget = inventorySelection.cacheable
         } else {
             Log.forestPatrol("巡护图鉴状态不完整，保留原地图排序，不按背包动物切换")
         }
 
         sortedRecords.firstOrNull { hasUnreachedPatrolNode(it.userPatrol) }?.let {
-            return PatrolTargetRecord(it.patrolId, it.reserveName, "旧到新未走完")
+            return PatrolTargetRecord(it.patrolId, it.reserveName, "旧到新未走完", canCacheTarget)
         }
 
         val latestRecord = sortedRecords.maxWithOrNull(compareBy<PatrolRecordInfo> { it.startDate }.thenBy { it.patrolId })
             ?: return null
-        return PatrolTargetRecord(latestRecord.patrolId, latestRecord.reserveName, "全部完成后最新循环")
+        return PatrolTargetRecord(latestRecord.patrolId, latestRecord.reserveName, "全部完成后最新循环", canCacheTarget)
     }
 
-    private fun selectPatrolInventoryTargetRecord(records: List<PatrolRecordInfo>): PatrolTargetRecord? {
+    private fun selectPatrolInventoryTargetRecord(records: List<PatrolRecordInfo>): PatrolInventorySelection {
         val response = try {
             JSONObject(AntForestPatrolRpcCall.queryAnimalPropList())
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             Log.printStackTrace(TAG, "queryAnimalPropList for patrol target err", t)
-            return null
+            return PatrolInventorySelection(null, false)
         }
         if (!ResChecker.checkRes(TAG, "查询巡护背包动物失败:", response)) {
-            return null
+            return PatrolInventorySelection(null, false)
         }
         val animalProps = response.optJSONArray("animalProps")
         if (animalProps == null || animalProps.length() == 0) {
             Log.forestPatrol("巡护背包动物为空，保留原地图排序")
-            return null
+            return PatrolInventorySelection(null, animalProps != null)
         }
 
         var bestTarget: PatrolInventoryTarget? = null
+        var canCacheTarget = true
         for (record in records) {
             val normalAnimalIds = normalPatrolAnimalIds(record.patrolConfig)
-            if (normalAnimalIds.isEmpty()) continue
+            if (normalAnimalIds.isEmpty()) {
+                canCacheTarget = false
+                continue
+            }
             for (index in 0 until animalProps.length()) {
                 val animalProp = animalProps.optJSONObject(index) ?: continue
                 val animalId = getPatrolAnimalId(animalProp)
@@ -237,11 +250,11 @@ internal object LegacyPatrolWorkflow {
                 val main = animalProp.optJSONObject("main")
                 if (main == null || !main.has("holdsNum") || main.isNull("holdsNum")) {
                     Log.forestPatrol("巡护背包动物缺少holdsNum字段[animalId=$animalId]，保留原地图排序")
-                    return null
+                    return PatrolInventorySelection(null, false)
                 }
                 if (!hasAnimalPropRobEnergy(animalProp)) {
                     Log.forestPatrol("巡护背包动物缺少robEnergy字段[animalId=$animalId]，保留原地图排序")
-                    return null
+                    return PatrolInventorySelection(null, false)
                 }
                 val holdsNum = main.optInt("holdsNum", 0)
                 if (holdsNum <= 0) continue
@@ -257,12 +270,15 @@ internal object LegacyPatrolWorkflow {
         }
         val target = bestTarget ?: run {
             Log.forestPatrol("巡护背包动物未匹配普通地图动物，保留原地图排序")
-            return null
+            return PatrolInventorySelection(null, canCacheTarget)
         }
-        return PatrolTargetRecord(
-            target.record.patrolId,
-            target.record.reserveName,
-            "普通动物已合成，背包数量最少(${target.holdsNum})且能量最高(${target.estimatedEnergy}g)",
+        return PatrolInventorySelection(
+            PatrolTargetRecord(
+                target.record.patrolId,
+                target.record.reserveName,
+                "普通动物已合成，背包数量最少(${target.holdsNum})且能量最高(${target.estimatedEnergy}g)",
+            ),
+            canCacheTarget,
         )
     }
 
@@ -293,16 +309,30 @@ internal object LegacyPatrolWorkflow {
             Log.forestPatrol("巡护记录缺少records，保留当前保护地")
             return false
         }
-        val target = selectPatrolTargetRecord(records) ?: return false
+        val cachedId = Status.getIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET) ?: 0
+        val target = if (cachedId > 0) {
+            val cachedRecord = collectPatrolRecordInfo(records).firstOrNull { it.patrolId == cachedId }
+            if (cachedRecord == null) {
+                Status.setIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET, 0)
+                selectPatrolTargetRecord(records)
+            } else {
+                PatrolTargetRecord(cachedId, cachedRecord.reserveName, "当日目标")
+            }
+        } else {
+            selectPatrolTargetRecord(records)
+        } ?: return false
         if (target.patrolId <= 0 || target.patrolId == currentPatrolId) {
+            if (target.cacheable) Status.setIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET, target.patrolId)
             Log.forestPatrol("巡护⚖️-当前地图保持[${target.reserveName}/${target.patrolId}](${target.reason})")
             return false
         }
         val switchResponse = unwrapResData(JSONObject(AntForestPatrolRpcCall.switchUserPatrol(target.patrolId.toString())))
         return if (ResChecker.checkRes(TAG, "切换巡护地图失败:", switchResponse)) {
+            if (target.cacheable) Status.setIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET, target.patrolId)
             Log.forestPatrol("巡护⚖️-切换地图至[${target.reserveName}/${target.patrolId}](${target.reason})")
             true
         } else {
+            Status.setIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET, 0)
             Log.forestPatrol("巡护地图切换失败[${target.reserveName}/${target.patrolId}]: ${switchResponse.optString("resultDesc", switchResponse.optString("desc"))}")
             false
         }
@@ -342,14 +372,17 @@ internal object LegacyPatrolWorkflow {
                 if (ResChecker.checkRes(TAG, "查询巡护任务失败:", jo)) {
                     // 查询我的巡护记录
                     val currentPatrolId = jo.optJSONObject("userPatrol")?.optInt("patrolId", 0) ?: 0
-                    val recordPayload = unwrapResData(JSONObject(AntForestPatrolRpcCall.queryMyPatrolRecord()))
-                    if (ResChecker.checkRes(TAG, "查询巡护记录失败:", recordPayload) &&
-                        switchUserPatrolIfNeeded(currentPatrolId, recordPayload)
-                    ) {
-                        jo = unwrapResData(JSONObject(AntForestPatrolRpcCall.queryUserPatrol()))
-                        if (!ResChecker.checkRes(TAG, "查询巡护任务失败:", jo)) {
-                            Log.forestPatrol(jo.optString("resultDesc", jo.optString("desc", "查询巡护任务失败")))
-                            break
+                    val cachedPatrolId = Status.getIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET) ?: 0
+                    if (cachedPatrolId != currentPatrolId || cachedPatrolId <= 0) {
+                        val recordPayload = unwrapResData(JSONObject(AntForestPatrolRpcCall.queryMyPatrolRecord()))
+                        if (ResChecker.checkRes(TAG, "查询巡护记录失败:", recordPayload) &&
+                            switchUserPatrolIfNeeded(currentPatrolId, recordPayload)
+                        ) {
+                            jo = unwrapResData(JSONObject(AntForestPatrolRpcCall.queryUserPatrol()))
+                            if (!ResChecker.checkRes(TAG, "查询巡护任务失败:", jo)) {
+                                Log.forestPatrol(jo.optString("resultDesc", jo.optString("desc", "查询巡护任务失败")))
+                                break
+                            }
                         }
                     }
                     // 获取用户当前巡护状态信息
@@ -739,6 +772,7 @@ internal object LegacyPatrolWorkflow {
                         unwrapResData(JSONObject(AntForestPatrolRpcCall.combineAnimalPiece(id, piecePropIds.toString())))
                     resultCode = combineResponse.optString("resultCode")
                     if ("SUCCESS" == resultCode) {
+                        Status.setIntFlagToday(StatusFlags.FLAG_ANTFOREST_PATROL_TARGET, 0)
                         Log.forestPatrol("成功合成动物💡[$name]")
                         animalId = id
                         GlobalThreadPools.sleepCompat(100) // 等待一段时间再查询
