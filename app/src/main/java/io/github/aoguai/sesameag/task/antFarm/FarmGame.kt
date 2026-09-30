@@ -484,8 +484,10 @@ object FarmGame {
         GameCenterPlayRpcCall.collectDeliveryBenefitCandidates(queryResponse)
             .filter { candidate ->
                 candidate.hasPendingReward ||
-                    (remainingDraws > 0 &&
-                        farmGameCenterDecision(candidate).action == GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT)
+                    (remainingDraws > 0 && farmGameCenterDecision(candidate).action in setOf(
+                        GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT,
+                        GameCenterPlayRpcCall.TaskAction.DURATION_ONLY,
+                    ))
             }
 
     private fun farmGameCenterDecision(
