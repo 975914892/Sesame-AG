@@ -462,6 +462,10 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             // 尝试停止任务
             task.stopTask()
 
+        } catch (e: CancellationException) {
+            skippedCount.incrementAndGet()
+            Log.record(TAG, "⏸ 任务取消: $taskId (${e.message})")
+            throw e
         } catch (e: Exception) {
             val time = System.currentTimeMillis() - startTime
             failureCount.incrementAndGet()
