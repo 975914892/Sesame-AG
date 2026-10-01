@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antSports
 
+import android.util.Base64
+
 import io.github.aoguai.sesameag.entity.RpcEntity
 import io.github.aoguai.sesameag.hook.RequestManager
 import org.json.JSONArray
@@ -267,10 +269,12 @@ object AntSportsRpcCall {
                 put("bizType", MOTION_QUIZ_BIZ_TYPE)
                 put("quizId", quizId)
             }
-        return requestMotionQuizChannelData(
-            "answer_quiz_award",
-            "2025081410521001",
-            body,
+        return RequestManager.requestString(
+            "alipay.iblib.channel.flow",
+            JSONArray().put(JSONObject()
+                .put("body", body)
+                .put("stepflowCode", "query_quiz_prizes_new")
+                .put("version", "2.0")).toString(),
         )
     }
 
@@ -289,6 +293,70 @@ object AntSportsRpcCall {
             "2025102200108020",
             body,
         )
+    }
+
+    fun queryFactcheckQuestionnaireIndex(lifecycleId: String): String = RequestManager.requestString(
+        "com.alipay.factcheck.questionnaireIndex",
+        JSONArray().put(JSONObject()
+            .put("businessTypeEnum", "APPLET")
+            .put("extInfo", JSONObject().put("lifecycleId", lifecycleId))
+            .put("previewDate", System.currentTimeMillis())
+            .put("source", "factcheck")).toString(),
+    )
+
+    fun startFactcheckQuestionnaire(question: JSONObject, lifecycleId: String): String {
+        val content = JSONObject(question.toString()).apply {
+            remove("index")
+            put("sourceMethod", "factchek")
+        }
+        val message = JSONObject().put("chunkId", 0).put("hasNext", false).put("turn", 0)
+            .put("contents", JSONArray().put(JSONObject()
+                .put("content", Base64.encodeToString(content.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
+                .put("lastPack", false).put("packNo", 0)))
+        return RequestManager.requestString("com.alipay.factcheck.questionnaire", JSONArray().put(JSONObject()
+            .put("businessTypeEnum", "APPLET")
+            .put("extInfo", JSONObject().put("lifecycleId", lifecycleId))
+            .put("previewDate", System.currentTimeMillis()).put("source", "factcheck")
+            .put("messageInfo", message)).toString())
+    }
+
+    fun submitFactcheckAnswer(question: JSONObject, context: JSONObject, questionNo: Int, lifecycleId: String): String {
+        val session = context.getJSONObject("sessionInfo")
+        val content = JSONObject(question.toString()).apply {
+            put("userAnswer", question.getString("certType"))
+            put("sessionId", session.getString("sessionId"))
+            put("index", questionNo)
+            put("sourceMethod", "factchek")
+        }
+        val message = JSONObject().put("chatId", context.getJSONObject("messageInfo").getString("chatId"))
+            .put("chunkId", 0).put("hasNext", false).put("turn", 0)
+            .put("contents", JSONArray().put(JSONObject()
+                .put("content", Base64.encodeToString(content.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
+                .put("lastPack", false).put("packNo", 0)))
+        return RequestManager.requestString("com.alipay.factcheck.submitAnswer", JSONArray().put(JSONObject()
+            .put("businessTypeEnum", "APPLET")
+            .put("extInfo", JSONObject().put("lifecycleId", lifecycleId))
+            .put("previewDate", System.currentTimeMillis()).put("source", "factcheck")
+            .put("messageInfo", message).put("sessionInfo", session)
+            .put("streamInfo", context.getJSONObject("streamInfo"))).toString())
+    }
+
+    fun collectFactcheckEnergy(question: JSONObject, context: JSONObject, bubbleId: String, lifecycleId: String): String {
+        val session = context.getJSONObject("sessionInfo")
+        val content = JSONObject().put("contentId", question.getString("contentId"))
+            .put("title", question.getString("title")).put("userId", session.getString("userId"))
+            .put("bubbleId", bubbleId)
+        val message = JSONObject().put("hasNext", false).put("protocolVersion", "2.0").put("turn", 666)
+            .put("contents", JSONArray().put(JSONObject()
+                .put("content", Base64.encodeToString(content.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
+                .put("contentEncoding", "json").put("contentType", "energy")
+                .put("lastPack", false).put("packNo", 1)))
+        return RequestManager.requestString("com.alipay.factcheck.collectEnergy", JSONArray().put(JSONObject()
+            .put("businessTypeEnum", "APPLET")
+            .put("extInfo", JSONObject().put("lifecycleId", lifecycleId))
+            .put("previewDate", System.currentTimeMillis()).put("source", "factcheck")
+            .put("messageInfo", message).put("sessionInfo", session)
+            .put("streamInfo", context.getJSONObject("streamInfo"))).toString())
     }
 
     /**
@@ -1441,10 +1509,13 @@ object AntSportsRpcCall {
          *
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryBubbleTask
          */
-        fun queryBubbleTask(source: String = DEFAULT_SOURCE): String =
+        fun queryBubbleTask(source: String? = DEFAULT_SOURCE): String =
             RequestManager.requestString(
                 NEVERLAND_QUERY_BUBBLE_TASK_RPC,
-                """[{"source":"$source","sportsAuthed":true}]""",
+                JSONArray().put(JSONObject().apply {
+                    if (source != null) put("source", source)
+                    put("sportsAuthed", true)
+                }).toString(),
             )
 
         private fun sportsItemMallFeatures(): JSONArray =
@@ -1507,7 +1578,7 @@ object AntSportsRpcCall {
                 JSONArray()
                     .put(
                         JSONObject().apply {
-                            put("chInfo", "xzyd1031")
+                            put("chInfo", "medical_health")
                             put("clientOS", "android")
                             put("features", sportsItemMallFeatures())
                             put("sceneId", "SPORT_ITEM_MALL")
@@ -1533,7 +1604,7 @@ object AntSportsRpcCall {
                         JSONObject().apply {
                             put("adSession", adSession)
                             put("categoryType", categoryType)
-                            put("chInfo", "xzyd1031")
+                            put("chInfo", "medical_health")
                             put("cityCode", cityCode)
                             put("clientOS", "android")
                             put("features", sportsItemMallFeatures())
@@ -1695,7 +1766,7 @@ object AntSportsRpcCall {
          */
         fun pickBubbleTaskEnergy(
             ids: List<String>,
-            source: String = DEFAULT_SOURCE,
+            source: String? = DEFAULT_SOURCE,
             pickAllEnergyBall: Boolean = true,
         ): String {
             val obj =
@@ -1707,7 +1778,7 @@ object AntSportsRpcCall {
                         },
                     )
                     put("pickAllEnergyBall", pickAllEnergyBall)
-                    put("source", source)
+                    if (source != null) put("source", source)
                 }
             val arr = JSONArray().put(obj)
             return RequestManager.requestString(

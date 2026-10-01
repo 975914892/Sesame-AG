@@ -53,6 +53,7 @@ private val orchardDefaultBlacklist =
         "ZHUFANG3IN1", // 添加农场小组件并访问
         "70000|逛好物最高得1500肥料", // XLight广告流量风控，缺少稳定自动闭环
         "12173", // 买好货
+        "104283", // “抢”农货得120000肥料，需要真实下单
         "TOUTIAO|逛一逛今日头条", // 精确匹配旧今日头条任务，避免误伤趣头条任务
         "ORCHARD_NORMAL_JIUYIHUISHOU_VISIT", // 旧衣服回收
         "ORCHARD_NORMAL_SHOUJISHUMAHUISHOU", // 数码回收
@@ -73,7 +74,6 @@ private val orchardDefaultBlacklist =
         "CHOUCHOULE_GAME_WDHYSJ_CHARGE", // 需真实充值，finishDrawTask 返回 400000040
         "ORCHARD_NORMAL_GAODE_VISIT|去高德发表真实评价", // finishTask 返回 400000040，不支持rpc调用
         "ORCHARD_NORMAL_SHANGOUMIANDAN|逛一逛淘宝闪购", // finishTask 返回 400000040，不支持rpc调用
-        "ORCHARD_NORMAL_TAOBAOTAOLIPAI_VISIT|逛一逛淘宝拍照", // 不支持rpc调用
         "ORCHARD_NORMAL_TAOBAO26_618|去淘金币赢20亿", // 不支持rpc调用，缺少稳定完成RPC闭环
         "ORCHARD_NORMAL_BAIDU_DUO", // 去百度浏览资讯
         "ORCHARD_NORMAL_XIANXIAZHIFU100", // 到店支付1笔得100肥
@@ -109,6 +109,10 @@ private val farmDefaultBlacklist =
         // 蚂蚁庄园
         "HEART_DONATION_ADVANCED_FOOD_V2", // 茉莉雪梨卷任务
         "HEART_DONATE", // 爱心捐赠
+        "MYZY_pay_rcccl_jhwg", // 游戏充值得10次抽抽乐机会，需真实支付
+        "MYZY_pay_IPccl_jhwg", // 游戏充值得10次抽抽乐机会，需真实支付
+        "antfarm_pay_task_wdhysj_ccl", // 游戏充值得10次抽抽乐机会，需真实支付
+        "ipccl_pay_ah_wdhy_ahsj_1y_ah", // 游戏充值得10次抽抽乐机会，需真实支付
         "20251118_chouchoulechoukuan2|伸出援手，点亮希望", // 装扮抽抽乐公益捐赠任务
         "innerAction:DONATION", // 装扮抽抽乐公益捐赠任务动作
         "categorizationSecondLevel:Public_Welfare_Behavior", // 装扮抽抽乐公益行为分类
@@ -116,6 +120,7 @@ private val farmDefaultBlacklist =
         "desc:单笔捐赠", // 装扮抽抽乐捐赠换机会任务描述
         "targetUrl:donationSubject", // 装扮抽抽乐公益捐赠专题页
         "SHANGOU_xiadan", // 逛闪购外卖1元起吃
+        "LSHS_xiadan_202509", // 完成1笔旧衣回收，需要真实回收订单
         "OFFLINE_PAY", // 到店付款
         "ONLINE_PAY", // 线上支付
         "HUABEI_MAP_180", // 用花呗完成一笔支付
@@ -362,6 +367,10 @@ private val youthPrivilegeDefaultBlacklist =
 private val sportsDefaultBlacklist =
     setOf(
         // 运动
+        "AP19300602", // 添加支付宝小组件
+        "AP11258305", // 医疗健康添加首页任务
+        "STEP_STETLEMENT_TASK", // 步数满1000
+        "DURATION_STETLEMENT_TASK", // 锻炼30分钟
         "玩游戏",
         // 签名/设计类广告任务：finishAdTask 返回 304/TASK_NOT_FINISHED
         "AP17300472",

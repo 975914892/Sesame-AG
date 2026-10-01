@@ -3526,6 +3526,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 val jo = JSONObject(responseString)
                 val resultCode = jo.optString("resultCode")
                 if (!jo.optBoolean("success") && !"SUCCESS".equals(resultCode, ignoreCase = true)) {
+                    if ("TARGET_USER_QUIT_FOREST" == resultCode) {
+                        Log.forest("[" + getAndCacheUserName(userId) + "]对方未开通蚂蚁森林，取消重试:" + jo.optString("resultDesc"))
+                        return@Runnable
+                    }
                     if ("PARAM_ILLEGAL2" == resultCode) {
                         Log.forest("[" + getAndCacheUserName(userId) + "]" + "能量已被收取,取消重试 错误:" + jo.getString("resultDesc"))
                         return@Runnable
@@ -8560,6 +8564,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val fromTag = task.fromTag
             val targetBubbleId = task.bubbleId
             Log.forest("蹲点收取开始：用户[${userName}] userId[${userId}] targetBubbleId[$targetBubbleId] fromTag[${fromTag}]")
+            if (!ResChecker.checkRes(TAG, "蹲点用户主页查询失败:", userHomeObj)) {
+                return CollectResult(
+                    success = false,
+                    userName = userName,
+                    message = "无法查询用户能量信息",
+                    waitingOutcome = WaitingCollectOutcome.HOME_UNAVAILABLE,
+                )
+            }
             if (EnergyWaitingManager.isBubbleInCooldown(userId, targetBubbleId)) {
                 return CollectResult(
                     success = false,
@@ -8624,20 +8636,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 Log.forest("  ⭐ 主号有保护罩，但可以收取自己的能量")
             }
 
-            // 先查询用户能量状态
-            val queryResult = collectEnergy(userId, userHomeObj, fromTag) ?: return CollectResult(
-                success = false,
-                userName = userName,
-                message = "无法查询用户能量信息",
-                waitingOutcome = WaitingCollectOutcome.HOME_UNAVAILABLE,
-            )
-
-            // 提取可收取的能量球ID
+            // 只读取本次主页，通用 collectEnergy 会提前收取整页能量。
             val availableBubbles: MutableList<Long> = ArrayList()
-            val queryServerTime = queryResult.optLong("now", System.currentTimeMillis())
             extractBubbleInfo(
-                queryResult,
-                queryServerTime,
+                userHomeObj,
+                serverTime,
                 availableBubbles,
                 userId,
                 collectWaitingTasks = false,
@@ -8662,7 +8665,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             // 蹲点任务只允许提交自身目标，不能携带同主页的其他气泡。
             val collectVivaResult = collectVivaEnergy(
                 userId,
-                queryResult,
+                userHomeObj,
                 targetBubbleIds,
                 fromTag,
                 skipPropCheck = true,
@@ -8721,7 +8724,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         return if (task.isSelf()) {
             querySelfHome()
         } else {
-            queryFriendHome(task.userId, fromAct)
+            queryFriendHome(task.userId, fromAct, forceRefresh = true)
         }
     }
 
@@ -8912,6 +8915,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 waitingOutcome = WaitingCollectOutcome.SUCCESS
             )
         }
+        if (jsonCollectMap.contains(task.userId)) {
+            Log.forest("蹲点收取[${task.userName}]在不收能量名单中，已暂停")
+            return CollectResult(
+                success = false,
+                userName = task.userName,
+                message = "当前用户禁止收取能量",
+                paused = true,
+                waitingOutcome = WaitingCollectOutcome.SUCCESS
+            )
+        }
         return try {
             withContext(Dispatchers.Default) {
                 val friendHomeObj = queryWaitingTargetHome(task)
@@ -8920,7 +8933,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     val realUserName = getAndCacheUserName(task.userId, friendHomeObj, task.fromTag)
                     val isSelf = task.userId == UserMap.currentUid
                     Log.forest("蹲点收取：用户[${realUserName}] userId=${task.userId} currentUid=${UserMap.currentUid} isSelf=${isSelf}")
-                    // 直接执行能量收取，让原有的collectEnergy方法处理保护罩和炸弹检查
+                    // 蹲点路径独立检查保护状态，并且只提交当前任务的目标能量球。
                     val result = collectEnergyForWaiting(task, friendHomeObj, realUserName)
                     if (result.success && result.energyCount > 0) {
                         runCatching {

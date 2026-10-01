@@ -23,6 +23,7 @@ import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.customTasks.CustomTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchProgress
 import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.JsonUtil
@@ -522,16 +523,26 @@ internal object ApplicationBroadcastDispatcher {
             val target = safeIntent.getStringExtra("target").orEmpty()
             val targetUserId = safeIntent.getStringExtra("userId")?.trim().orEmpty()
             val forceRefresh = safeIntent.getBooleanExtra("forceRefresh", false)
-            val result = refreshExchangeOptionsInTarget(target, targetUserId, forceRefresh)
-            sendRefreshExchangeOptionsResult(
-                ctx,
-                requestId = requestId,
-                target = target,
-                userId = result.userId.ifBlank { targetUserId },
-                success = result.success,
-                message = result.message,
-                options = result.options,
-            )
+            val progressUserId = targetUserId.ifBlank { UserMap.currentUid.orEmpty() }
+            val subscription = ExchangeFetchProgress.subscribe(progressUserId, target) { event ->
+                sendRefreshExchangeOptionsResult(ctx, requestId, target, progressUserId,
+                    success = false, message = event.message, options = emptyList(),
+                    progress = true, advances = event.advances)
+            }
+            try {
+                val result = refreshExchangeOptionsInTarget(target, targetUserId, forceRefresh)
+                sendRefreshExchangeOptionsResult(
+                    ctx,
+                    requestId = requestId,
+                    target = target,
+                    userId = result.userId.ifBlank { targetUserId },
+                    success = result.success,
+                    message = result.message,
+                    options = result.options,
+                )
+            } finally {
+                subscription.close()
+            }
         }
     }
 
@@ -634,6 +645,8 @@ internal object ApplicationBroadcastDispatcher {
         success: Boolean,
         message: String,
         options: List<MapperEntity>,
+        progress: Boolean = false,
+        advances: Boolean = false,
     ) {
         val ctx = context ?: ApplicationHook.appContext ?: return
         ctx.sendBroadcast(
@@ -644,8 +657,12 @@ internal object ApplicationBroadcastDispatcher {
                 putExtra("userId", userId)
                 putExtra("success", success)
                 putExtra("message", message)
-                putExtra("optionCount", options.size)
-                putExtra("optionsJson", JsonUtil.formatJson(options, false))
+                putExtra("progress", progress)
+                putExtra("advances", advances)
+                if (!progress) {
+                    putExtra("optionCount", options.size)
+                    putExtra("optionsJson", JsonUtil.formatJson(options, false))
+                }
                 putExtra("timestamp", System.currentTimeMillis())
             },
         )

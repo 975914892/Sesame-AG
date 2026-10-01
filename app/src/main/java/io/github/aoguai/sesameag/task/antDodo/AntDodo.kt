@@ -28,6 +28,8 @@ import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
+import io.github.aoguai.sesameag.task.common.TaskFlowExecutionState
+import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
@@ -62,6 +64,7 @@ class AntDodo : ModelTask() {
     private var usePropCollectToFriendTimes7Days: BooleanModelField? = null
     private var autoGenerateBook: BooleanModelField? = null
     private val loggedTaskProgressHints = LinkedHashSet<String>()
+    private var taskListRefreshNeeded = false
 
     override fun getName(): String = "神奇物种"
 
@@ -146,7 +149,9 @@ class AntDodo : ModelTask() {
         try {
             Log.dodo("执行开始-${getName()}")
             loggedTaskProgressHints.clear()
-            receiveTaskAward()
+            val executionState = TaskFlowExecutionState()
+            taskListRefreshNeeded = false
+            receiveTaskAward(executionState)
             collect()
             if (collectToFriend?.value == true) {
                 if (hasPendingCollectToFriendSchedule()) {
@@ -162,7 +167,7 @@ class AntDodo : ModelTask() {
                 }
             }
             sendAntDodoCard()
-            receiveTaskAward()
+            if (taskListRefreshNeeded) receiveTaskAward(executionState)
             propList()
             if (autoGenerateBook?.value == true) {
                 autoGenerateBook()
@@ -246,6 +251,13 @@ class AntDodo : ModelTask() {
                 }
                 if (index >= 0) {
                     val leftFreeQuota = jo.getInt("leftFreeQuota")
+                    if (leftFreeQuota == 0 &&
+                        !Status.hasFlagToday(StatusFlags.FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE)
+                    ) {
+                        Status.setFlagToday(StatusFlags.FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE)
+                        Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
+                        taskListRefreshNeeded = true
+                    }
                     for (j in 0 until leftFreeQuota) {
                         val collectResponse = AntDodoRpcCall.collect()
                         attempted = true
@@ -256,6 +268,8 @@ class AntDodo : ModelTask() {
                         jo = JSONObject(collectResponse)
                         if (ResChecker.checkRes(TAG, jo)) {
                             data = jo.getJSONObject("data")
+                            Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
+                            taskListRefreshNeeded = true
                             val animal = data.getJSONObject("animal")
                             val ecosystem = animal.getString("ecosystem")
                             val name = animal.getString("name")
@@ -276,9 +290,10 @@ class AntDodo : ModelTask() {
         }
     }
 
-    private fun receiveTaskAward() {
+    private fun receiveTaskAward(executionState: TaskFlowExecutionState = TaskFlowExecutionState()) {
         try {
-            TaskFlowEngine(DodoTaskFlowAdapter(), roundSleepMs = 500L).run()
+            taskListRefreshNeeded = false
+            TaskFlowEngine(DodoTaskFlowAdapter(), roundSleepMs = 500L, executionState = executionState).run()
         } catch (e: JSONException) {
             Log.error(TAG, "JSON解析错误: ${e.message}")
             Log.printStackTrace(TAG, e)
@@ -296,6 +311,18 @@ class AntDodo : ModelTask() {
         override val moduleName: String = TASK_BLACKLIST_MODULE
         override val flowName: String = "神奇物种任务"
 
+        override fun isFlowHandledToday(): Boolean = Status.hasFlagToday(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
+
+        override fun onAllTasksDone(snapshot: TaskFlowSnapshot) {
+            Status.setFlagToday(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
+        }
+
+        override fun shouldSkipByTodayState(item: TaskFlowItem): Boolean =
+            item.type == "CONTINUOUS_COLLECT_TIMES_7" &&
+                item.status in setOf(TaskStatus.TODO.name, "WAIT_COMPLETE") &&
+                item.current != null && item.limit != null && item.current < item.limit &&
+                Status.hasFlagToday(StatusFlags.FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE)
+
         override fun query(): JSONObject {
             val response = AntDodoRpcCall.taskList()
             if (response.isNullOrEmpty()) {
@@ -307,7 +334,8 @@ class AntDodo : ModelTask() {
         }
 
         override fun isQuerySuccess(response: JSONObject): Boolean {
-            return ResChecker.checkRes(TAG, response)
+            return ResChecker.checkRes(TAG, response) &&
+                response.optJSONObject("data")?.optJSONArray("taskGroupInfoList") != null
         }
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
@@ -331,6 +359,12 @@ class AntDodo : ModelTask() {
                     val awardCount = bizInfo.optString("awardCount", "1").trim().ifBlank { "1" }
                     val taskProgress = parseDodoTaskProgressInt(taskBaseInfo, "taskProgress")
                     val taskRequire = parseDodoTaskProgressInt(taskBaseInfo, "taskRequire")?.takeIf { it > 0 }
+                    if (taskType == "CONTINUOUS_COLLECT_TIMES_7" &&
+                        taskProgress != null && taskRequire != null && taskProgress < taskRequire &&
+                        taskBaseInfo.optBoolean("curCycleFinished")
+                    ) {
+                        Status.setFlagToday(StatusFlags.FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE)
+                    }
                     val raw = JSONObject()
                         .put("taskGroupId", taskGroup.optString("taskGroupId"))
                         .put("taskInfo", taskInfo)
@@ -361,7 +395,7 @@ class AntDodo : ModelTask() {
         }
 
         override fun mapPhase(item: TaskFlowItem): TaskFlowPhase {
-            if (isConsecutiveCollectTask(item.type, item.title) &&
+            if (item.type == "CONTINUOUS_COLLECT_TIMES_7" &&
                 item.status in setOf(TaskStatus.TODO.name, "WAIT_COMPLETE")
             ) {
                 return mapConsecutiveCollectPhase(item)
@@ -433,7 +467,6 @@ class AntDodo : ModelTask() {
                     detail = dodoActionDetail(item, "reDecisionTaskOpenGreen")
                 )
             }
-            val unsupportedGameDetail = unsupportedGameTaskDetail(taskBaseInfo)
             val gameContract = dodoGamePlayContract(taskBaseInfo, raw.optJSONObject("bizInfo"))
             gameContract?.let { contract ->
                 val ack = GameCenterPlayRpcCall.submitForAck(contract)
@@ -456,17 +489,6 @@ class AntDodo : ModelTask() {
                     )
                 }
                 Log.dodo("物种任务🧾️[${item.title}]时长上报已接受，继续物种任务完成闭环")
-            }
-            if (unsupportedGameDetail != null && gameContract == null) {
-                val detail = dodoActionDetail(item, "finishTask") + " $unsupportedGameDetail"
-                Log.error(TAG, "神奇物种外部游戏任务缺少稳定完成RPC闭环，跳过伪完成: $detail")
-                return TaskFlowActionResult.failure(
-                    failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
-                    code = "UNSUPPORTED_GAMEPLAY_TASK",
-                    message = "外部游戏任务缺少稳定完成RPC闭环",
-                    rpc = "DodoTaskFlowAdapter.finishTask",
-                    detail = detail,
-                )
             }
             val response = AntDodoRpcCall.finishTask(item.sceneCode, item.type)
             if (response.isNullOrEmpty()) {
@@ -638,11 +660,6 @@ class AntDodo : ModelTask() {
         }
     }
 
-    private fun isConsecutiveCollectTask(taskType: String, taskTitle: String): Boolean {
-        return taskType == "CONTINUOUS_COLLECT_TIMES_7" ||
-            (taskTitle.contains("连续") && taskTitle.contains("抽卡7天"))
-    }
-
     private fun mapConsecutiveCollectPhase(item: TaskFlowItem): TaskFlowPhase {
         val current = item.current ?: 0
         val limit = item.limit
@@ -691,24 +708,6 @@ class AntDodo : ModelTask() {
             }
         }
         return result
-    }
-
-    private fun unsupportedGameTaskDetail(taskBaseInfo: JSONObject): String? {
-        val prodPlayParam = parseDodoBizInfo(taskBaseInfo.opt("prodPlayParam"))
-        val taskCategorization = prodPlayParam.optJSONObject("taskCategorization") ?: return null
-        val categorizationSecondLevel = taskCategorization.optString("categorizationSecondLevel").trim()
-        val gameId = taskCategorization
-            .optJSONObject("categorizationParamModel")
-            ?.optString("game_id")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
-        if (!categorizationSecondLevel.equals("Game", ignoreCase = true)) {
-            return null
-        }
-        val taskProdPlayType = taskBaseInfo.optString("taskProdPlayType").trim()
-        return "categorizationSecondLevel=$categorizationSecondLevel " +
-            "taskProdPlayType=${taskProdPlayType.ifBlank { "UNKNOWN" }} gameId=$gameId"
     }
 
     private fun dodoGamePlayContract(
@@ -1248,6 +1247,8 @@ class AntDodo : ModelTask() {
             }
             val jo = JSONObject(socialResponse)
             if (ResChecker.checkRes(TAG, jo)) {
+                Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
+                taskListRefreshNeeded = true
                 Log.dodo("赠送卡片🦕[${UserMap.getMaskName(targetUser) ?: targetUser}]#$ecosystem-$name")
             } else {
                 Log.runtime(TAG, jo.getString("resultDesc"))
@@ -1320,6 +1321,8 @@ class AntDodo : ModelTask() {
                     jo = JSONObject(collectFriendResponse)
                     if (ResChecker.checkRes(TAG, jo)) {
                         val collectData = jo.getJSONObject("data")
+                        Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
+                        taskListRefreshNeeded = true
                         val animal = collectData.getJSONObject("animal")
                         val ecosystem = animal.getString("ecosystem")
                         val name = animal.getString("name")

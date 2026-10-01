@@ -195,6 +195,12 @@ object GameCenterPlayRpcCall {
                 reason = "structured duration protocol",
             )
         }
+        if (directFinishSupported && descriptor.gameTaskType.isBlank()) {
+            return TaskActionDecision(
+                action = TaskAction.DIRECT_FINISH,
+                reason = "module-provided direct completion contract",
+            )
+        }
         if (descriptor.gameTaskType.equals("shichang", ignoreCase = true)) {
             return TaskActionDecision(
                 action = TaskAction.DEFERRED,

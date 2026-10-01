@@ -2066,6 +2066,9 @@ class AntOcean : ModelTask() {
         override val nonRetryableActionFlagPrefix: String = StatusFlags.FLAG_ANTOCEAN_ACTION_STOP_PREFIX
         override val continueCurrentRoundOnRetryableFailure: Boolean = true
 
+        override fun isFlowHandledToday(): Boolean =
+            Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_TASKS_DONE)
+
         override fun query(): JSONObject {
             val response = AntOceanRpcCall.queryTaskList()
             return JsonUtil.parseJSONObjectOrNull(response) ?: JSONObject()
@@ -2139,6 +2142,9 @@ class AntOcean : ModelTask() {
                 )
             }
             latestItems = items
+            if (items.any { isConsecutiveVisitTaskWaitingForLaterDay(it, mapPhase(it)) }) {
+                Status.setFlagToday(StatusFlags.FLAG_ANTOCEAN_CONSECUTIVE_VISIT_DONE)
+            }
             return items
         }
 
@@ -2195,6 +2201,11 @@ class AntOcean : ModelTask() {
         }
 
         override fun shouldSkipByTodayState(item: TaskFlowItem): Boolean {
+            if (Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_CONSECUTIVE_VISIT_DONE) &&
+                isConsecutiveVisitTaskWaitingForLaterDay(item, mapPhase(item))
+            ) {
+                return true
+            }
             if (Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT) &&
                 isHelpFriendCleanTask(item.type) &&
                 !isRewardReadyStatus(item.status) &&
@@ -2311,11 +2322,7 @@ class AntOcean : ModelTask() {
                 if (mappedTask != null) {
                     val report = kotlinx.coroutines.runBlocking { mappedTask.reportDetailed(1, logger = Log::ocean) }
                     return if (report.completed) {
-                        TaskFlowActionResult.defer(
-                            deferredReason = DeferredReason.STATE_CONFIRMATION,
-                            message = "游戏业务上报完成，回查海洋任务",
-                            refreshAfterAction = true,
-                        )
+                        finishOceanTask(item)
                     } else {
                         TaskFlowActionResult.failure(
                             failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
@@ -2345,7 +2352,7 @@ class AntOcean : ModelTask() {
             val instance = item.raw?.optJSONObject("task")?.optString("entityGenerateTime").orEmpty()
             val game = GameCenterPlayRpcCall.describeTask(item.raw)
             return "${action.logName}:${buildOceanTaskBizKey(item.sceneCode, item.type, item.title)}:$instance:" +
-                "${game.gameAppId}:${game.source}:${game.gameTaskType}:${game.contract?.playTime}"
+                "${game.gameAppId}:${game.source}:${game.gameTaskType}:${game.contract?.playTime}:${item.progress}"
         }
 
         override fun afterFailure(
@@ -2598,7 +2605,8 @@ class AntOcean : ModelTask() {
             val game = games.optJSONObject(index) ?: continue
             val gameId = game.optString("gameId")
             val appId = game.optString("appId")
-            if (gameId.isBlank() || appId.isBlank() || !handledGames.add("${item.id}:$gameId")) continue
+            val instance = item.raw?.optJSONObject("task")?.optString("entityGenerateTime").orEmpty()
+            if (gameId.isBlank() || appId.isBlank() || !handledGames.add("${item.id}:$instance:${item.progress}:$gameId")) continue
             val consult = GameCenterPlayRpcCall.consultGameFloatingBall(gameId, source, source, trafficDriverId)
             if (!consult.accepted) {
                 return TaskFlowActionResult.failure(

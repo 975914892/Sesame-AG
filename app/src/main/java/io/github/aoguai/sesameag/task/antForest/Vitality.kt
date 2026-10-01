@@ -60,17 +60,25 @@ object Vitality {
     @JvmStatic
     fun initVitality(labelType: String, forceRefresh: Boolean = false): Boolean {
         try {
-            val snapshot = ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, forceRefresh) {
-                ExchangeFetchPacing.domainStartDelay()
-                val index = JSONObject(AntForestRpcCall.queryVitalityStoreIndex())
+            val snapshot = ExchangeOptionsCache.getOrFetch(
+                UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, forceRefresh,
+                context = { JSONObject().put("labelType", labelType) }
+            ) { session ->
+                val index = session.read("index", JSONObject(), "商城首页") {
+                    JSONObject(AntForestRpcCall.queryVitalityStoreIndex())
+                }
                 check(ResChecker.checkRes(TAG, index)) { "森林活力值商城首页查询失败" }
+                session.commit(JSONObject().put("startIndex", 0), nextLabel = "商品列表偏移 0")
                 val items = JSONArray()
                 val seenItemIds = linkedSetOf<String>()
                 val pageSize = 10
                 var startIndex = 0
                 while (true) {
-                    val response = ItemListByType(labelType, startIndex, pageSize)
-                        ?: error("森林活力值商品列表查询失败: startIndex=$startIndex")
+                    val response = session.read("items", JSONObject().put("startIndex", startIndex).put("pageSize", pageSize),
+                        "商品列表偏移 $startIndex") {
+                        ItemListByType(labelType, startIndex, pageSize)
+                            ?: error("森林活力值商品列表查询失败: startIndex=$startIndex")
+                    }
                     val page = response.optJSONArray("itemInfoVOList")
                         ?: error("森林活力值商品列表缺少 itemInfoVOList: startIndex=$startIndex count=missing hasMore=${response.opt("hasMore")} nextStartIndex=${response.opt("nextStartIndex")}")
                     val seenCount = seenItemIds.size
@@ -85,24 +93,42 @@ object Vitality {
                         }
                     }
                     val hasMore = if (response.has("hasMore")) response.getBoolean("hasMore") else page.length() >= pageSize
-                    if (!hasMore) break
+                    if (!hasMore) {
+                        session.commit(JSONObject().put("done", true), page.length(), "分页结束，保存完整列表")
+                        break
+                    }
                     val nextStartIndex = if (response.has("nextStartIndex")) response.optInt("nextStartIndex", -1) else startIndex + page.length()
                     check(page.length() > 0 && seenItemIds.size > seenCount && nextStartIndex > startIndex) {
                         "森林活力值商品列表分页未前进: startIndex=$startIndex count=${page.length()} hasMore=$hasMore nextStartIndex=$nextStartIndex"
                     }
+                    session.commit(JSONObject().put("startIndex", nextStartIndex), page.length(), "商品列表偏移 $nextStartIndex")
                     startIndex = nextStartIndex
-                    ExchangeFetchPacing.pageTurnDelay()
+                    session.pageTurnDelay()
                 }
                 val skus = HashMap<String, JSONObject>()
                 for (i in 0 until items.length()) handleVitalityItem(items.getJSONObject(i), skus)
                 val rows = AntForest.instance?.buildVitalityExchangeOptionRows(skus) ?: error("森林模块未初始化")
-                ExchangeOptionsSnapshot(rows, JSONObject().put("items", items))
+                ExchangeOptionsSnapshot(rows, JSONObject().put("items", items).put("labelType", labelType))
             }
             val skus = HashMap<String, JSONObject>()
             val items = snapshot.payload.getJSONArray("items")
             for (i in 0 until items.length()) handleVitalityItem(items.getJSONObject(i), skus)
             skuInfo.clear()
             skuInfo.putAll(skus)
+            val rewardsMap = IdMapManager.getInstance(VitalityRewardsMap::class.java)
+            skus.forEach { (skuId, skuModel) ->
+                val skuName = skuModel.optString("skuName")
+                val price = skuModel.optJSONObject("price")?.optInt("amount") ?: 0
+                var orderInfo = "$skuName\n价格${price}🍃活力值"
+                if (skuName.contains("能量雨") || skuName.contains("敦煌") || skuName.contains("保护罩") ||
+                    skuName.contains("海洋") || skuName.contains("物种") || skuName.contains("收能量") || skuName.contains("隐身")) {
+                    orderInfo += "\n每日限时兑1个"
+                } else if (skuName == "限时31天内使用31天长效双击卡") {
+                    orderInfo += "\n每月限时兑1个"
+                }
+                rewardsMap.add(skuId, orderInfo)
+            }
+            rewardsMap.save(UserMap.currentUid)
             return true
         } catch (th: Throwable) {
             Log.runtime(TAG, "initVitality err")
@@ -121,25 +147,12 @@ object Vitality {
                 val skuId = skuModel.optString("skuId")
                 if (skuId.isEmpty()) continue
 
-                val skuName = skuModel.optString("skuName")
-                val price = skuModel.optJSONObject("price")?.optInt("amount") ?: 0
-                var oderInfo = "$skuName\n价格${price}🍃活力值"
-                
-                if (skuName.contains("能量雨") || skuName.contains("敦煌") || skuName.contains("保护罩") || 
-                    skuName.contains("海洋") || skuName.contains("物种") || skuName.contains("收能量") || skuName.contains("隐身")) {
-                    oderInfo = "$skuName\n价格${price}🍃活力值\n每日限时兑1个"
-                } else if (skuName == "限时31天内使用31天长效双击卡") {
-                    oderInfo = "$skuName\n价格${price}🍃活力值\n每月限时兑1个"
-                }
-                
                 if (!skuModel.has("spuId")) {
                     skuModel.put("spuId", spuId)
                 }
                 copyParentItemFields(skuModel, vitalityItem)
                 skus[skuId] = skuModel
-                IdMapManager.getInstance(VitalityRewardsMap::class.java).add(skuId, oderInfo)
             }
-            UserMap.currentUid?.let { IdMapManager.getInstance(VitalityRewardsMap::class.java).save(it) }
         } catch (th: Throwable) {
             Log.runtime(TAG, "handleVitalityItem err")
             Log.printStackTrace(TAG, th)

@@ -133,6 +133,10 @@ object RequestManager {
             return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("账号会话已变化", methodLog))
         }
         if (result.isNullOrBlank()) {
+            // 在途请求可能因其他 RPC 触发离线而返回空值，不应再次熔断并覆盖风控原因。
+            if (ApplicationHookConstants.isOffline()) {
+                return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("离线模式", methodLog))
+            }
             // 失败：增加计数，检查兜底
             handleFailure(methodLog ?: "Unknown", "返回数据为空")
             return RpcRequestOutcome.Failure("返回数据为空")

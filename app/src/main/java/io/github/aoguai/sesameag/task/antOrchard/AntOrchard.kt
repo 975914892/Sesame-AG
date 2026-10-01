@@ -452,6 +452,7 @@ class AntOrchard : ModelTask() {
                     return
                 }
 
+                Status.removeFlag(StatusFlags.FLAG_ANTORCHARD_TASKS_DONE)
                 actualWaterTimes = spreadJson
                     .optJSONObject("batchSpreadInfo")
                     ?.takeIf { it.optBoolean("useBatchSpread", false) }
@@ -680,6 +681,9 @@ class AntOrchard : ModelTask() {
         override val flowName: String = if (starTasks) "农场努力流星任务" else "农场任务"
         override val continueCurrentRoundOnRetryableFailure: Boolean = true
 
+        override fun isFlowHandledToday(): Boolean =
+            !starTasks && Status.hasFlagToday(StatusFlags.FLAG_ANTORCHARD_TASKS_DONE)
+
         override fun query(): JSONObject {
             val response = if (starTasks) AntOrchardRpcCall.listStarTasks() else AntOrchardRpcCall.orchardListTask()
             if (response.isBlank()) {
@@ -690,7 +694,12 @@ class AntOrchard : ModelTask() {
             return JSONObject(response)
         }
 
-        override fun isQuerySuccess(response: JSONObject): Boolean = isOrchardRpcSuccessResponse(response)
+        override fun isQuerySuccess(response: JSONObject): Boolean =
+            isOrchardRpcSuccessResponse(response) &&
+                (starTasks || response.optJSONArray("taskList") != null)
+
+        override fun isQueryComplete(response: JSONObject): Boolean =
+            isQuerySuccess(response) && (starTasks || !response.has("signTaskInfo") || signHandled)
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
             latestListTaskResponse = response
@@ -953,9 +962,12 @@ class AntOrchard : ModelTask() {
         override fun actionKey(
             item: TaskFlowItem,
             action: TaskFlowAction,
-        ): String = "${action.logName}:${item.id}:${item.actionType}:${item.status}:${item.progress.ifBlank { "NO_PROGRESS" }}"
+        ): String = "${action.logName}:${item.id}:${item.raw?.optString("taskId")}:${item.actionType}:${item.status}:${item.progress.ifBlank { "NO_PROGRESS" }}"
 
         override fun onAllTasksDone(snapshot: io.github.aoguai.sesameag.task.common.TaskFlowSnapshot) {
+            if (!starTasks) {
+                Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_TASKS_DONE)
+            }
             Log.orchard("农场任务列表已无待处理任务")
         }
 
@@ -978,8 +990,7 @@ class AntOrchard : ModelTask() {
                 listModeLogged = true
             }
             if (!signHandled && response.has("signTaskInfo")) {
-                signHandled = true
-                orchardSign(response.getJSONObject("signTaskInfo"))
+                signHandled = orchardSign(response.getJSONObject("signTaskInfo"))
             }
             if (!linkedHintsLogged) {
                 linkedHintsLogged = true
@@ -2132,7 +2143,7 @@ class AntOrchard : ModelTask() {
 
     private fun buildXLightSession(): String = "u_${RandomUtil.getRandomString(5)}_${RandomUtil.getRandomString(5)}"
 
-    private fun orchardSign(signTaskInfo: JSONObject) {
+    private fun orchardSign(signTaskInfo: JSONObject): Boolean {
         try {
             val currentSignItem = signTaskInfo.getJSONObject("currentSignItem")
             if (!currentSignItem.getBoolean("signed")) {
@@ -2144,15 +2155,18 @@ class AntOrchard : ModelTask() {
                             .getJSONObject("currentSignItem")
                             .getInt("awardCount")
                     Log.orchard("农场签到📅[获得肥料]#${awardCount}g")
+                    return joSign.optJSONObject("signTaskInfo")?.optJSONObject("currentSignItem")?.optBoolean("signed") == true
                 } else {
-                    Log.orchard(joSign.toString())
+                    Log.error(TAG, "农场签到失败 raw=$joSign")
                 }
             } else {
                 Log.orchard("农场今日已签到")
+                return true
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "orchardSign err:", t)
         }
+        return false
     }
 
     internal fun smashedGoldenEgg(count: Int) {

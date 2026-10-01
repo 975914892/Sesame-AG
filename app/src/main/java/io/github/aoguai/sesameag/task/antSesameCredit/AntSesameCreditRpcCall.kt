@@ -102,6 +102,47 @@ object AntSesameCreditRpcCall {
         )
     }
 
+    @JvmStatic
+    fun queryAccomplishmentHome(tabCode: String? = null): String = RequestManager.requestString(
+        "com.antgroup.zmxy.zmcustprod.biz.rpc.creditidentity.api.CreditIdentityAchievementRpcManager.queryAccomplishmentHomeV2",
+        JSONArray().put(JSONObject().apply {
+            if (!tabCode.isNullOrBlank()) put("tabCode", tabCode)
+        }).toString(),
+    )
+
+    @JvmStatic
+    fun queryAccomplishmentDetail(medalSeriesCode: String): String = RequestManager.requestString(
+        "com.antgroup.zmxy.zmcustprod.biz.rpc.creditidentity.api.CreditIdentityAchievementRpcManager.enterAccomplishmentDetailV2",
+        JSONArray().put(JSONObject().put("medalSeriesCode", medalSeriesCode)).toString(),
+    )
+
+    @JvmStatic
+    fun claimAccomplishment(medalSeriesCode: String): String = RequestManager.requestString(
+        "com.antgroup.zmxy.zmcustprod.biz.rpc.creditidentity.api.CreditIdentityAchievementRpcManager.claimAccomplishmentV2",
+        JSONArray().put(JSONObject().put("medalSeriesCode", medalSeriesCode)).toString(),
+    )
+
+    @JvmStatic
+    fun queryPassageScenes(): String = RequestManager.requestString(
+        "com.antgroup.zmxy.zmcustprod.biz.rpc.creditidentity.api.CreditIdentityPassageRpcManager.queryPassageScenes",
+        """[{"queryVersion":"V3"}]""",
+    )
+
+    @JvmStatic
+    fun queryPassageActivationPanel(sceneCode: String): String = RequestManager.requestString(
+        "com.antgroup.zmxy.zmcustprod.biz.rpc.creditidentity.api.CreditIdentityPassageRpcManager.queryPassageActivationPanel",
+        JSONArray().put(JSONObject().put("sceneCode", sceneCode)).toString(),
+    )
+
+    @JvmStatic
+    fun activatePassage(sceneCode: String): String = RequestManager.requestString(
+        "com.antgroup.zmxy.zmcustprod.biz.rpc.creditidentity.api.CreditIdentityPassageRpcManager.activatePassage",
+        JSONArray().put(JSONObject().apply {
+            put("sceneCode", sceneCode)
+            put("requestId", System.currentTimeMillis().toString())
+        }).toString(),
+    )
+
     /**
      * 获取芝麻信用任务列表
      */
