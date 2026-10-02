@@ -151,7 +151,7 @@ open class FriendSelectionModelField(
     }
 }
 
-class FriendSelectionCountModelField(
+open class FriendSelectionCountModelField(
     code: String,
     name: String,
     value: FriendSelectionCountSpec = FriendSelectionCountSpec(),
@@ -285,6 +285,7 @@ data class FriendSelectionEditorMeta(
     val kind: String = "FRIEND_SELECTION",
     val countEnabled: Boolean,
     val relationDefault: FriendRelationFilter = FriendRelationFilter.MUTUAL_ONLY,
+    val countLabel: String = "次数",
 )
 
 private val MANDATORY_CAPABILITY_MODULE_KEYS =
@@ -461,4 +462,15 @@ private fun looksLikeLegacyFriendSelectionConfig(
             jsonObject.keys().asSequence().none { knownKeys.contains(it) }
         }
     }.getOrDefault(false)
+}
+
+/**
+ * 好友与数值（自定义单位）选择字段：复用好友计数选择的全部能力，
+ * 仅通过 editorMeta 的 countLabel 区分界面单位（如“克数”）。
+ */
+class FriendSelectionGramModelField(
+    code: String,
+    name: String,
+) : FriendSelectionCountModelField(code, name) {
+    override fun getEditorMeta(): Any = FriendSelectionEditorMeta(countEnabled = true, countLabel = "克数")
 }
