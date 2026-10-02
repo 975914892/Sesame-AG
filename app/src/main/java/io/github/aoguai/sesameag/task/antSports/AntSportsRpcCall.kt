@@ -4,6 +4,7 @@ import android.util.Base64
 
 import io.github.aoguai.sesameag.entity.RpcEntity
 import io.github.aoguai.sesameag.hook.RequestManager
+import io.github.aoguai.sesameag.hook.internal.LocationHelper
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -224,7 +225,7 @@ object AntSportsRpcCall {
         val body =
             JSONObject().apply {
                 put("bizType", MOTION_QUIZ_BIZ_TYPE)
-                put("cityCode", CITY_CODE)
+                put("cityCode", LocationHelper.getCityCodeOrNull() ?: CITY_CODE)
                 put("queryDate", queryDate)
                 put("queryVersion", 2)
                 put("scene", "single_day")
@@ -887,7 +888,7 @@ object AntSportsRpcCall {
     fun userTaskGroupQuery(groupId: String): String =
         RequestManager.requestString(
             "alipay.tiyubiz.sports.userTaskGroup.query",
-            """[{"cityCode":"$CITY_CODE","groupId":"$groupId"}]""",
+            """[{"cityCode":"${LocationHelper.getCityCodeOrNull() ?: CITY_CODE}","groupId":"$groupId"}]""",
         )
 
     /**
@@ -906,7 +907,7 @@ object AntSportsRpcCall {
     ): String =
         RequestManager.requestString(
             "alipay.tiyubiz.sports.userTask.complete",
-            """[{"bizType":"$bizType","cityCode":"$CITY_CODE","completedTime":${System.currentTimeMillis()},"taskId":"$taskId"}]""",
+            """[{"bizType":"$bizType","cityCode":"${LocationHelper.getCityCodeOrNull() ?: CITY_CODE}","completedTime":${System.currentTimeMillis()},"taskId":"$taskId"}]""",
         )
 
     /**

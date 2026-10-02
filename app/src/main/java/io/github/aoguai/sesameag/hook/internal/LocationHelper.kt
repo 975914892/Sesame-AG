@@ -3,6 +3,8 @@ package io.github.aoguai.sesameag.hook.internal
 import android.location.Geocoder
 import io.github.aoguai.sesameag.entity.AreaCode
 import io.github.aoguai.sesameag.hook.ApplicationHook
+import io.github.aoguai.sesameag.model.BaseModel
+import io.github.aoguai.sesameag.util.CityCoordinates
 import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +18,8 @@ object LocationHelper {
     private const val TAG = "LocationInfoHelper"
     private var classLoader: ClassLoader? = null
     private const val LOCATION_KEY = "cached_location"
+    private const val LAST_KNOWN_CITY_CODE_KEY = "last_known_city_code"
+    private const val FALLBACK_CITY_CODE = "330100"
 
     fun init(loader: ClassLoader) {
         classLoader = loader
@@ -78,20 +82,63 @@ object LocationHelper {
     }
 
     @Suppress("DEPRECATION")
-    fun requireCityCode(): String = runBlocking(Dispatchers.IO) {
+    fun getCityCodeOrNull(): String? = runBlocking(Dispatchers.IO) { getCityCode() }
+
+    /**
+     * 城市码：定位降级链（位置缓存 → Geocoder+城市目录 → 用户配置 → 最近成功）全部失败时，
+     * 回落硬编码城市码（杭州，与 AntSportsRpcCall.CITY_CODE 一致），不再抛异常
+     */
+    @Suppress("DEPRECATION")
+    fun requireCityCode(): String =
+        getCityCodeOrNull() ?: FALLBACK_CITY_CODE.also { Log.error(TAG, "城市定位全部失败，使用兜底城市码 $it") }
+
+    /**
+     * 城市码降级链：位置缓存 → 实时定位（Geocoder+城市目录）→ 用户配置默认城市 → 最近成功城市
+     * 全部失败返回 null，调用方跳过城市相关子任务
+     */
+    @Suppress("DEPRECATION")
+    private suspend fun getCityCode(): String? {
         val location = requestLocationSuspend()
-        location.optString("cityCode").takeIf { it.isNotBlank() }?.let { return@runBlocking it }
+        location.optString("cityCode").takeIf { it.isNotBlank() }?.let {
+            rememberCityCode(it)
+            return it
+        }
         val latitude = location.optDouble("latitude", Double.NaN)
         val longitude = location.optDouble("longitude", Double.NaN)
-        check(latitude.isFinite() && longitude.isFinite()) { "缺少宿主当前位置，城市相关请求保留待处理" }
-        val context = checkNotNull(ApplicationHook.appContext) { "宿主 Context 未初始化" }
-        check(Geocoder.isPresent()) { "系统地理编码不可用，城市相关请求保留待处理" }
-        val address = Geocoder(context, Locale.CHINA).getFromLocation(latitude, longitude, 1)?.firstOrNull()
-        val cityName = address?.locality?.takeIf { it.isNotBlank() } ?: address?.adminArea
-        val cityCode = AreaCode.getList().firstOrNull { it.name == cityName }?.id
-        check(!cityCode.isNullOrBlank()) { "系统地理编码与城市目录未能确定当前城市，保留待处理" }
-        saveLocationToDataStore(mapOf("latitude" to latitude, "longitude" to longitude, "cityCode" to cityCode))
-        cityCode
+        try {
+            if (latitude.isFinite() && longitude.isFinite()) {
+                val context = ApplicationHook.appContext
+                if (context != null && Geocoder.isPresent()) {
+                    val address = Geocoder(context, Locale.CHINA).getFromLocation(latitude, longitude, 1)?.firstOrNull()
+                    val cityName = address?.locality?.takeIf { it.isNotBlank() } ?: address?.adminArea
+                    val cityCode = AreaCode.getList().firstOrNull { it.name == cityName }?.id
+                    if (!cityCode.isNullOrBlank()) {
+                        saveLocationToDataStore(mapOf("latitude" to latitude, "longitude" to longitude, "cityCode" to cityCode))
+                        rememberCityCode(cityCode)
+                        return cityCode
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, e)
+        }
+        // 国内 ROM 无 GMS 时 Geocoder 后端不可用，用离线坐标表最近邻解析城市码
+        CityCoordinates.nearestCityCode(latitude, longitude)?.let { cityCode ->
+            saveLocationToDataStore(mapOf("latitude" to latitude, "longitude" to longitude, "cityCode" to cityCode))
+            rememberCityCode(cityCode)
+            return cityCode
+        }
+        Log.error(TAG, "城市定位降级：尝试使用配置默认城市或最近成功城市")
+        BaseModel.defaultCityCode.value?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        return DataStore.get(LAST_KNOWN_CITY_CODE_KEY, String::class.java)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun rememberCityCode(cityCode: String) {
+        try {
+            DataStore.put(LAST_KNOWN_CITY_CODE_KEY, cityCode)
+        } catch (e: Exception) {
+            Log.error(TAG, "保存城市码缓存失败: ${e.message}")
+        }
     }
 
     private fun createAndSaveError(msg: String): JSONObject {

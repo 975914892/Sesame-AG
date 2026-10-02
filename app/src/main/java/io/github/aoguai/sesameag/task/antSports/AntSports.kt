@@ -730,10 +730,10 @@ class AntSports : ModelTask() {
                 var adSession = ""
                 while (true) {
                     val response = session.read("items", JSONObject().put("categoryType", categoryType)
-                        .put("pageNum", pageNum).put("pageSize", 10).put("adSession", adSession),
+                        .put("pageNum", pageNum).put("pageSize", 15).put("adSession", adSession),
                         "${categoryType.ifBlank { "全部商品" }}第 $pageNum 页") {
                         JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryItemList(
-                            categoryType = categoryType, pageNum = pageNum, cityCode = cityCode, adSession = adSession
+                            categoryType = categoryType, pageNum = pageNum, pageSize = 15, cityCode = cityCode, adSession = adSession
                         ))
                     }
                     if (RpcDailyCircuit.isStopResponse(response) || RpcOfflineRisk.isHardBlocked(response) ||
