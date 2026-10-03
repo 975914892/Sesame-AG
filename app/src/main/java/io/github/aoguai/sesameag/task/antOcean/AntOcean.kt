@@ -185,6 +185,11 @@ class AntOcean : ModelTask() {
     private var cleanOceanList: FriendSelectionModelField? = null
 
     /**
+     * 清理 | 帮助好友
+     */
+    private var cleanOceanFriend: BooleanModelField? = null
+
+    /**
      * 神奇海洋 | 制作万能拼图
      */
     private var exchangeProp: BooleanModelField? = null
@@ -251,6 +256,12 @@ class AntOcean : ModelTask() {
                 "cleanOceanList",
                 "清理 | 好友列表",
             ).withDesc("配置要参与清理规则的好友列表。").also { cleanOceanList = it },
+        )
+        modelFields.addField(
+            BooleanModelField("cleanOceanFriend", "清理 | 帮助好友", true)
+                .withDesc(
+                    "独立控制是否帮助好友清理海域垃圾；关闭后仅清理自己的海域。需开启“清理 | 开启”。",
+                ).also { cleanOceanFriend = it },
         )
         modelFields.addField(
             BooleanModelField("exchangeProp", "万能拼图 | 制作", false)
@@ -1957,6 +1968,10 @@ class AntOcean : ModelTask() {
             if (cleanOcean?.value != true || maxSuccessfulCleans <= 0) {
                 return 0
             }
+            if (cleanOceanFriend?.value != true) {
+                Log.ocean("海域清理[好友]帮助好友清理未开启，跳过好友海域清理")
+                return 0
+            }
             if (Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)) {
                 return 0
             }
@@ -2460,6 +2475,15 @@ class AntOcean : ModelTask() {
             return TaskFlowActionResult.defer(
                 deferredReason = DeferredReason.PREREQUISITE_PENDING,
                 message = "好友清理未开启，等待手动完成",
+                rpc = "AntOcean.completeHelpFriendCleanTask",
+                detail = oceanTaskActionDetail(item, "helpFriendCleanTask"),
+            )
+        }
+        if (cleanOceanFriend?.value != true) {
+            logOceanTaskOnce("海洋任务🌊[${item.title}]帮助好友清理未开启，等待手动完成")
+            return TaskFlowActionResult.defer(
+                deferredReason = DeferredReason.PREREQUISITE_PENDING,
+                message = "帮助好友清理未开启，等待手动完成",
                 rpc = "AntOcean.completeHelpFriendCleanTask",
                 detail = oceanTaskActionDetail(item, "helpFriendCleanTask"),
             )

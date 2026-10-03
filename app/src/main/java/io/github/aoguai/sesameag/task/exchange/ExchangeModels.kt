@@ -404,6 +404,7 @@ object ExchangeOptionsCache {
             } else {
                 loadTodaySnapshot(normalizedUserId, target, queryContext)?.let {
                     checkCurrent()
+                    if (pending.exists()) pending.delete()
                     return it
                 }
             }
@@ -490,9 +491,13 @@ object ExchangeOptionsCache {
         if (normalizedUserId.isEmpty()) return null
         return runCatching {
             val file = Files.getTargetFileofUser(normalizedUserId, fileName(target)) ?: return null
-            if (!file.exists() || file.length() == 0L || !TimeUtil.isSameDay(file.lastModified(), System.currentTimeMillis())) return null
+            if (!file.exists() || file.length() == 0L) return null
             val json = JSONObject(Files.readFromFile(file))
-            if (json.has("userId") && json.getString("userId") != normalizedUserId) return null
+            if (!TimeUtil.isSameDay(json.optLong("savedAt", file.lastModified()), System.currentTimeMillis())) return null
+            if (json.has("userId") && json.getString("userId") != normalizedUserId) {
+                ExchangeFetchProgress.report(normalizedUserId, target, "完整缓存归属账号已变化，重新获取")
+                return null
+            }
             val payload = json.getJSONObject("payload")
             // These directories require host location/activity discovery before a valid cache hit.
             if (expectedContext == null && target in setOf("sports_energy", "farm_ip_chouchoule")) return null
@@ -505,14 +510,6 @@ object ExchangeOptionsCache {
                     ExchangeFetchProgress.report(normalizedUserId, target, "完整缓存查询条件已变化，重新获取")
                     return null
                 }
-            }
-            val pending = Files.getTargetFileofUser(normalizedUserId, pendingFileName(target))
-            if (pending != null && pending.exists() && pending.length() > 0L) {
-                val header = ExchangeFetchSession.readHeader(pending) ?: return null
-                if (ExchangeFetchSession.isCurrentHeader(header, normalizedUserId, target) &&
-                    (expectedContext == null || ExchangeFetchSession.matchesContext(header.getJSONObject("context"), expectedContext)) &&
-                    header.optString("runId") != json.optString("runId")
-                ) return null
             }
             val snapshot = ExchangeOptionsSnapshot(
                 JsonUtil.parseObject(json.getJSONArray("rows").toString(), object : TypeReference<List<ExchangeOptionRow>>() {}), payload

@@ -15,6 +15,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
 import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
 import io.github.aoguai.sesameag.util.ResChecker
+import io.github.aoguai.sesameag.util.TimeUtil
 
 /**
  * @author Byseven
@@ -23,6 +24,7 @@ import io.github.aoguai.sesameag.util.ResChecker
  */
 object Vitality {
     private val TAG = Vitality::class.java.simpleName
+    private var skuInfoLoadedAt = 0L
     val skuInfo = HashMap<String, JSONObject>()
 
     @JvmStatic
@@ -59,6 +61,7 @@ object Vitality {
 
     @JvmStatic
     fun initVitality(labelType: String, forceRefresh: Boolean = false): Boolean {
+        if (!forceRefresh && skuInfo.isNotEmpty() && TimeUtil.isSameDay(skuInfoLoadedAt, System.currentTimeMillis())) return true
         try {
             val snapshot = ExchangeOptionsCache.getOrFetch(
                 UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY, forceRefresh,
@@ -115,6 +118,7 @@ object Vitality {
             for (i in 0 until items.length()) handleVitalityItem(items.getJSONObject(i), skus)
             skuInfo.clear()
             skuInfo.putAll(skus)
+            skuInfoLoadedAt = System.currentTimeMillis()
             val rewardsMap = IdMapManager.getInstance(VitalityRewardsMap::class.java)
             skus.forEach { (skuId, skuModel) ->
                 val skuName = skuModel.optString("skuName")

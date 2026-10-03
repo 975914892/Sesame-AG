@@ -140,6 +140,7 @@ class AntFarm : ModelTask() {
     private var foodInTroughLimitCurrent: Int = 180
     private val invalidToolTypesThisRound: MutableSet<ToolType> = linkedSetOf()
     private var manurePotCollectionBlockedThisRound: Boolean = false
+    private val manurePotBelowThresholdReported: MutableSet<String> = linkedSetOf()
     internal var lastDonationActivityIds: Set<String> = emptySet()
         private set
     internal var lastDonationNoMoreActivities: Boolean = false
@@ -871,6 +872,7 @@ class AntFarm : ModelTask() {
             farmAwardNoProgressIds.clear()
             farmWorkAttempted.clear()
             manurePotCollectionBlockedThisRound = false
+            manurePotBelowThresholdReported.clear()
 
             if (!runFarmLifecycleWorkflow(tc)) {
                 return@withLock
@@ -5793,6 +5795,7 @@ class AntFarm : ModelTask() {
                         if (ResChecker.checkRes(TAG, joManurePot)) {
                             val collectManurePotNum = joManurePot.optInt("collectManurePotNum", 0)
                             Log.farm("打扫鸡屎🧹[" + collectManurePotNum + "g]" + (i + 1) + "次")
+                            manurePotBelowThresholdReported.remove(manurePotNO)
                         } else {
                             val resultCode = joManurePot.optString("resultCode")
                             val memo = joManurePot.optString("memo")
@@ -5804,8 +5807,12 @@ class AntFarm : ModelTask() {
                             Log.farm("打扫鸡屎失败: 第" + (i + 1) + "次" + joManurePot)
                         }
                     } else if (manurePotNum > 0.0) {
-                        Log.farm(String.format(Locale.US, "打扫鸡屎🧹池[%d]当前%.2fg，未达到3g收取阈值，等待积累", i + 1, manurePotNum)
-                        )
+                        val belowThresholdKey = manurePot.optString("manurePotNO").ifBlank { "index:$i" }
+                        if (belowThresholdKey !in manurePotBelowThresholdReported) {
+                            Log.farm(String.format(Locale.US, "打扫鸡屎🧹池[%d]当前%.2fg，未达到3g收取阈值，等待积累", i + 1, manurePotNum)
+                            )
+                            manurePotBelowThresholdReported.add(belowThresholdKey)
+                        }
                     }
                 }
             }

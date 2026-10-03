@@ -57,6 +57,7 @@ class BaseModel : Model() {
         modelFields.addField(enableOnGoing) // 是否开启状态栏禁删
         modelFields.addField(languageSimplifiedChinese) // 是否只显示中文并设置时区
         modelFields.addField(toastPerfix) // 气泡提示的前缀
+        modelFields.addField(defaultCityCode) // 城市定位失败时的默认城市代码
         return modelFields
     }
 
@@ -304,6 +305,14 @@ class BaseModel : Model() {
         val toastPerfix: StringModelField =
             StringModelField("toastPerfix", "气泡前缀", "").withDesc(
                 "气泡提示前置文本，非空时会拼接在每条提示前。",
+            )
+
+        /**
+         * 默认城市代码（城市定位失败时的兑底）
+         */
+        val defaultCityCode: StringModelField =
+            StringModelField("defaultCityCode", "默认城市代码", "").withDesc(
+                "城市定位失败时使用的默认城市代码（如 330100=杭州），留空则先尝试最近一次成功定位的城市；均不可用时跳过城市相关子任务。",
             )
 
         /**

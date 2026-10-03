@@ -29,6 +29,7 @@ import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.ChoiceModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionCountModelField
+import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionGramModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.IntegerModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.SelectAndCountModelField
@@ -230,6 +231,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     internal var receiveForestTaskAward: BooleanModelField? = null
     private var waterFriendList: FriendSelectionCountModelField? = null
     private var waterFriendCount: IntegerModelField? = null
+    private var waterFriendGramList: FriendSelectionGramModelField? = null
     private var notifyFriend: BooleanModelField? = null
     internal var vitalityExchange: BooleanModelField? = null
     private var collectGiftBox: BooleanModelField? = null
@@ -726,6 +728,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 "浇水 | 单次克数(10/18/33/66)",
                 66
             ).withDesc("每次给好友浇水的克数。").also { waterFriendCount = it })
+        modelFields.addField(
+            FriendSelectionGramModelField(
+                "waterFriendGramList",
+                "浇水 | 好友与克数"
+            ).withDesc("为指定好友设置单独的浇水克数；未设置或数值非正的好友仍使用“浇水 | 单次克数”。").also { waterFriendGramList = it })
         modelFields.addField(
             BooleanModelField(
                 "notifyFriend",
@@ -1470,6 +1477,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             val friendMap = waterFriendList?.resolvedCountMap() ?: emptyMap()
             val notify = notifyFriend?.value == true // 获取通知开关状态
             val maxFriendWaterCount = waterFriendCount?.value ?: waterFriendCount?.defaultValue ?: 0
+            val friendGramMap = waterFriendGramList?.resolvedCountMap() ?: emptyMap()
 
             for (friendEntry in friendMap.entries) {
                 // 避免切号后仍继续为旧账号执行浇水与标记
@@ -1497,8 +1505,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             }
 
                             // ✅ 关键改动：传入通知开关
+                            val friendGram = friendGramMap[uid]?.takeIf { it > 0 } ?: maxFriendWaterCount
                             val waterCountKVNode = returnFriendWater(
-                                uid, bizNo, waterCount, maxFriendWaterCount, notify, taskUid
+                                uid, bizNo, waterCount, friendGram, notify, taskUid
                             )
 
                             val actualWaterCount: Int = waterCountKVNode.key!!
