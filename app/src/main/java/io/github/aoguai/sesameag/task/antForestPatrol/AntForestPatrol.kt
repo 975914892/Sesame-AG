@@ -185,8 +185,21 @@ class AntForestPatrol : ModelTask() {
         }
         when (using?.opt("usingMonopolyCreature")) {
             true -> {
-                Log.forestPatrol("已有新版动物工作，保留当前伙伴")
-                return
+                if (ApplicationHookConstants.isOffline() || UserMap.currentUid != uid) return
+                // 到期（剩余天数耗尽或工作天数到上限）时走二次确认替换，否则保留当前伙伴
+                val entry = queryMonopolyEntry() ?: return
+                val usingAnimal = findUsingCreature(entry)
+                if (usingAnimal == null || !isCreatureExpired(usingAnimal)) {
+                    Log.forestPatrol("已有新版动物工作，保留当前伙伴")
+                    return
+                }
+                Log.forestPatrol(
+                    "新版动物[${usingAnimal.optString("creatureName", usingAnimal.optString("creatureCode", ""))}]工作到期，尝试替换新伙伴"
+                )
+                if (dispatchMonopolyAnimal(entry, replaceUsing = true) != false) {
+                    queryLegacyAnimals()
+                    queryUsingCreature(uid)
+                }
             }
             false -> Unit
             else -> {
@@ -211,6 +224,23 @@ class AntForestPatrol : ModelTask() {
         Log.forestPatrol("当前没有可派遣动物")
     }
 
+    private fun queryMonopolyEntry(): JSONObject? =
+        parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyEntryInfo())
+            .takeIf { ResChecker.checkRes(TAG, "查询新版动物候选失败:", it) }
+
+    private fun findUsingCreature(entry: JSONObject): JSONObject? {
+        val animals = entry.optJSONArray("creatureList") ?: return null
+        return (0 until animals.length()).mapNotNull { animals.optJSONObject(it) }
+            .firstOrNull { it.optString("status") == "using" }
+    }
+
+    private fun isCreatureExpired(animal: JSONObject): Boolean {
+        val energy = animal.optJSONObject("robEnergyVO") ?: return false
+        val maxWorkDays = energy.optInt("maxWorkDays", 0)
+        return energy.optInt("robRemainDays", 1) <= 0 ||
+            (maxWorkDays > 0 && energy.optInt("alreadyWorkDays", 0) >= maxWorkDays)
+    }
+
     private fun dispatchLegacyAnimal(): Boolean? {
         val response = parsePatrolResponse(AntForestPatrolRpcCall.queryAnimalPropList())
         if (!ResChecker.checkRes(TAG, "查询旧版动物候选失败:", response)) return null
@@ -224,10 +254,9 @@ class AntForestPatrol : ModelTask() {
         return true
     }
 
-    private fun dispatchMonopolyAnimal(): Boolean? {
-        val response = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyEntryInfo())
-        if (!ResChecker.checkRes(TAG, "查询新版动物候选失败:", response)) return null
-        if (response.optBoolean("usingMonopolyCreature")) return true
+    private fun dispatchMonopolyAnimal(entryInfo: JSONObject? = null, replaceUsing: Boolean = false): Boolean? {
+        val response = entryInfo ?: queryMonopolyEntry() ?: return null
+        if (!replaceUsing && response.optBoolean("usingMonopolyCreature")) return true
         val animals = response.optJSONArray("creatureList") ?: run {
             Log.error(TAG, "新版候选缺少 creatureList:$response")
             return null
@@ -246,11 +275,28 @@ class AntForestPatrol : ModelTask() {
             candidates.firstOrNull()
         } ?: return false
         if (ApplicationHookConstants.isOffline()) return null
-        val assigned = parsePatrolResponse(AntForestPatrolRpcCall.assignMonopolyCreature(selected.getString("creatureCode")))
-        if (ResChecker.checkRes(TAG, "新版动物派遣失败:", assigned)) {
+        if (assignMonopolyWithConfirm(selected.getString("creatureCode"))) {
             Log.forestPatrol("派遣新版动物[${selected.optString("creatureName", selected.getString("creatureCode"))}]")
         }
         return true
+    }
+
+    /**
+     * 派遣新版动物；服务端返回占用确认码时按 secondConfirm=true 重发完成替换。
+     */
+    private fun assignMonopolyWithConfirm(creatureCode: String): Boolean {
+        val first = parsePatrolResponse(AntForestPatrolRpcCall.assignMonopolyCreature(creatureCode))
+        val resultCode = first.optString("resultCode")
+        if (resultCode == "SUCCESS") return true
+        // 占用确认码属业务确认流而非失败：MONOPOLY_CREATURE_USE_CONFIRM(新版占用)/ANIMAL_PROP_IN_USE_CONFIRM(旧版占用)
+        if (resultCode != "MONOPOLY_CREATURE_USE_CONFIRM" && resultCode != "ANIMAL_PROP_IN_USE_CONFIRM") {
+            Log.error(TAG, "新版动物派遣失败:$first")
+            return false
+        }
+        val second = parsePatrolResponse(
+            AntForestPatrolRpcCall.assignMonopolyCreature(creatureCode, secondConfirm = true)
+        )
+        return ResChecker.checkRes(TAG, "新版动物替换失败:", second)
     }
 
     companion object {
