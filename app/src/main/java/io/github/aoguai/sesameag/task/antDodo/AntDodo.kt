@@ -99,7 +99,7 @@ class AntDodo : ModelTask() {
             FriendSelectionModelField(
                 "sendFriendCard",
                 "赠送卡片 | 好友列表"
-            ).withDesc("列表不为空时，会把当前图鉴可赠送的冗余卡片送给列表中的首个有效好友，并始终保留每张卡至少1张。").also {
+            ).withDesc("列表不为空时，会把当前图鉴可赠送的冗余卡片送给列表中的首个有效好友，并始终保留每张卡至少1张；缺卡时可通过换卡等途径补齐至多两张。").also {
                 sendFriendCard = it
             }
         )
@@ -229,6 +229,45 @@ class AntDodo : ModelTask() {
         }
     }
 
+    /** 上次卡背刮奖观察快照，状态变化时才记日志 */
+    private var lastScratchObservation: String? = null
+
+    private fun observeScratchableCards(data: JSONObject?) {
+        try {
+            val curCollection = data?.optJSONArray("curCollection") ?: return
+            var scratchableCount = 0
+            var unscratchedCount = 0
+            var unscratchedEnergyGram = 0
+            for (i in 0 until curCollection.length()) {
+                val cardList = curCollection.optJSONObject(i)
+                    ?.optJSONObject("collectDetail")
+                    ?.optJSONArray("cardList") ?: continue
+                for (j in 0 until cardList.length()) {
+                    val card = cardList.optJSONObject(j) ?: continue
+                    if (!card.optBoolean("scratchable", false)) {
+                        continue
+                    }
+                    scratchableCount++
+                    if (!card.optBoolean("scratched", false)) {
+                        unscratchedCount++
+                        unscratchedEnergyGram += card.optInt("energyGram", 0)
+                    }
+                }
+            }
+            if (scratchableCount == 0) {
+                return
+            }
+            val snapshot = "可刮$scratchableCount 张，未刮$unscratchedCount 张，未刮累计${unscratchedEnergyGram}g"
+            if (snapshot == lastScratchObservation) {
+                return
+            }
+            lastScratchObservation = snapshot
+            Log.dodo("神奇物种（卡背刮奖）：$snapshot")
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, t)
+        }
+    }
+
     private fun collectAnimalCard(): Boolean {
         return try {
             val homeResponse = AntDodoRpcCall.homePage()
@@ -240,6 +279,7 @@ class AntDodo : ModelTask() {
             var attempted = false
             if (ResChecker.checkRes(TAG, jo)) {
                 var data = jo.getJSONObject("data")
+                observeScratchableCards(data)
                 val ja = data.getJSONArray("limit")
                 var index = -1
                 for (i in 0 until ja.length()) {
@@ -1028,9 +1068,15 @@ class AntDodo : ModelTask() {
             collectDetail.optInt("count", 0) > 0
     }
 
+    /** 无卡或持有不足两张且未生成勋章：允许通过换卡、道具等获取途径补齐至多两张 */
     private fun isMissingCurrentAnimalCard(collectDetail: JSONObject?): Boolean {
-        return !hasCurrentAnimalCard(collectDetail) &&
-            collectDetail?.optBoolean("hasGeneratedBookMedal") != true
+        if (collectDetail?.optBoolean("hasGeneratedBookMedal") == true) {
+            return false
+        }
+        if (!hasCurrentAnimalCard(collectDetail)) {
+            return true
+        }
+        return (collectDetail?.optInt("count", 0) ?: 1) < 2
     }
 
     private fun hasAnimalCardForBookMedal(collectDetail: JSONObject?): Boolean {

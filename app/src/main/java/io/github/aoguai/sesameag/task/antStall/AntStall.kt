@@ -537,6 +537,10 @@ class AntStall : ModelTask() {
                 tc.countDebug("收金币")
             }
 
+            // 收肥料：先收回好友丢的肥料补充库存，再丢肥料才能最大化当日可丢量
+            collectManure()
+            tc.countDebug("收肥料")
+
             // 丢肥料
             if (stallThrowManure.value == true) {
                 throwManure()
@@ -548,10 +552,6 @@ class AntStall : ModelTask() {
             // 收取金币
             settle(seatsMap)
             tc.countDebug("收取金币")
-
-            // 收肥料
-            collectManure()
-            tc.countDebug("收肥料")
 
             // 请走操作
             sendBack(seatsMap)

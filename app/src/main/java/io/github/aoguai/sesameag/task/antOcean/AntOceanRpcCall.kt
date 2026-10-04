@@ -481,9 +481,16 @@ object AntOceanRpcCall {
     
     @JvmStatic
     fun submitAnswer(answer: String, questionId: String): String {
+        val args = JSONObject()
+            .put("activityId", "363")
+            .put("answer", answer)
+            .put("dadaVersion", "1.3.0")
+            .put("outBizId", "ANTOCEAN_DATI_PINTU_722_new")
+            .put("questionId", questionId)
+            .put("version", "1")
         return RequestManager.requestString(
             "com.alipay.reading.game.dada.openDailyAnswer.submitAnswer",
-            "[{\"activityId\":\"363\",\"answer\":\"$answer\",\"dadaVersion\":\"1.3.0\",\"outBizId\":\"ANTOCEAN_DATI_PINTU_722_new\",\"questionId\":\"$questionId\",\"version\":\"1\"}]"
+            JSONArray().put(args).toString()
         )
     }
     
