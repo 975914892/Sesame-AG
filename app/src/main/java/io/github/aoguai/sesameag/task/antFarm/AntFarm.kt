@@ -239,6 +239,9 @@ class AntFarm : ModelTask() {
     private var useSpecialFoodCount: IntegerModelField? = null
     private var activitySpecialFoodCount: IntegerModelField? = null
     internal var useNewEggCard: BooleanModelField? = null
+    internal var useFenceTool: BooleanModelField? = null
+    internal var useDollTool: BooleanModelField? = null
+    internal var dollSupplementOrder: ChoiceModelField? = null
     internal var harvestProduce: BooleanModelField? = null
     internal var donation: BooleanModelField? = null
     internal var donationMode: ChoiceModelField? = null
@@ -491,6 +494,27 @@ class AntFarm : ModelTask() {
                 "新蛋卡 | 使用",
                 false
             ).withDesc("自动使用新蛋卡，立即增加爱心蛋。").also { useNewEggCard = it })
+modelFields.addField(
+    BooleanModelField(
+        "useFenceTool",
+        "篱笆卡 | 使用",
+        false
+    ).withDesc("自动使用篱笆卡，使小鸡留在家中，防止好友小鸡前来偷吃。").also { useFenceTool = it })
+        modelFields.addField(
+            BooleanModelField(
+                "useDollTool",
+                "数字公仔补签卡 | 自动补签",
+                false
+            ).withDesc("自动使用数字公仔补签卡，按所选顺序补签缺失的月度成就公仔。")
+                .also { useDollTool = it })
+        modelFields.addField(
+            ChoiceModelField(
+                "dollSupplementOrder",
+                "数字公仔补签 | 补签顺序",
+                DollSupplementOrder.OLD_TO_NEW,
+                DollSupplementOrder.nickNames
+            ).withDesc("补签卡不够一次补齐所有缺漏时，优先补最早还是最近的月度公仔。")
+                .also { dollSupplementOrder = it })
         modelFields.addField(
             BooleanModelField(
                 "hireAnimal",
@@ -1043,16 +1067,12 @@ class AntFarm : ModelTask() {
         AccountSessionCoordinator.currentUserId() ?: UserMap.currentUid
     )
 
-    private fun bigEaterUsedCountKey(today: String): String {
-        return "$BIG_EATER_USED_COUNT_KEY_PREFIX$today"
+    private fun getBigEaterUsedCount(): Int {
+        return Status.getIntFlagToday(StatusFlags.FLAG_FARM_BIG_EATER_USED_COUNT) ?: 0
     }
 
-    private fun getBigEaterUsedCount(today: String): Int {
-        return currentUserDataStore()?.get(bigEaterUsedCountKey(today), Int::class.javaObjectType) ?: 0
-    }
-
-    private fun putBigEaterUsedCount(today: String, count: Int) {
-        currentUserDataStore()?.put(bigEaterUsedCountKey(today), count)
+    private fun putBigEaterUsedCount(count: Int) {
+        Status.setIntFlagToday(StatusFlags.FLAG_FARM_BIG_EATER_USED_COUNT, count)
     }
 
     private fun getFarmAnswerCache(): MutableMap<String, String> {
@@ -2364,15 +2384,13 @@ class AntFarm : ModelTask() {
             if (serverUseBigEaterTool) {
                 Log.farm("服务端标记已使用加饭卡，跳过使用")
                 // 这里可选：尝试与本地计数对齐（仅在计数为0时+1，避免重复累加）
-                val today = LocalDate.now(FARM_ZONE).toString()
-                val usedCount = getBigEaterUsedCount(today)
+                val usedCount = getBigEaterUsedCount()
                 if (usedCount == 0) {
-                    putBigEaterUsedCount(today, 1)
+                    putBigEaterUsedCount(1)
                 }
             } else {
-                // 使用 UserDataStore 记录“当日已用次数”，每日上限为 2 次（按账号维度）
-                val today = LocalDate.now(FARM_ZONE).toString()
-                val usedCount = getBigEaterUsedCount(today)
+                // 使用每日标识记录当日已用次数，每日上限为 2 次（按账号维度，跨日自动重置）
+                val usedCount = getBigEaterUsedCount()
 
                 if (usedCount >= 2) {
                     Log.farm("今日加饭卡已使用${usedCount}/2，跳过使用")
@@ -2380,7 +2398,7 @@ class AntFarm : ModelTask() {
                     when (useFarmToolDetailed(ownerFarmId, ToolType.BIG_EATER_TOOL)) {
                         FarmToolUseResult.SUCCESS -> {
                             Log.farm("使用道具🎭[加饭卡]！")
-                            putBigEaterUsedCount(today, usedCount + 1)
+                            putBigEaterUsedCount(usedCount + 1)
                             // 刷新状态
                             syncAnimalStatus(ownerFarmId)
                         }
@@ -2719,7 +2737,16 @@ class AntFarm : ModelTask() {
                         val awardType = bizInfo.getString("awardType")
                         val taskTitle = bizInfo.optString("taskTitle", joItem.optString("taskType", "未知道具任务"))
                         val toolType = try {
-                            ToolType.valueOf(awardType)
+                            // 服务端奖励的 awardType 与道具枚举命名不一致（如 DOLL_TOOL/DOLLTOOL、ORNAMENT_ORDINARY_TOOL/ORDINARY_ORNAMENT_TOOL），归一化后再匹配
+                            ToolType.valueOf(
+                                when (awardType) {
+                                    "DOLL_TOOL" -> "DOLLTOOL"
+                                    "ORNAMENT_ORDINARY_TOOL" -> "ORDINARY_ORNAMENT_TOOL"
+                                    "ORNAMENT_ADVANCE_TOOL" -> "ADVANCE_ORNAMENT_TOOL"
+                                    "ORNAMENT_RARE_TOOL" -> "RARE_ORNAMENT_TOOL"
+                                    else -> awardType
+                                }
+                            )
                         } catch (_: IllegalArgumentException) {
                             Log.farm("发现暂未支持的庄园道具类型[$awardType]，跳过任务[$taskTitle]")
                             continue
@@ -2736,12 +2763,11 @@ class AntFarm : ModelTask() {
                                 when (toolType) {
                                     ToolType.ACCELERATETOOL -> useAccelerateTool(releaseRewardSlot = true)
                                     ToolType.BIG_EATER_TOOL -> {
-                                        val day = LocalDate.now(FARM_ZONE).toString()
-                                        val used = getBigEaterUsedCount(day)
+                                        val used = getBigEaterUsedCount()
                                         if (!serverUseBigEaterTool && used < 2 && isOwnerAnimalAtHome() &&
                                             ownerAnimal.animalFeedStatus == AnimalFeedStatus.EATING.name &&
                                             useFarmToolDetailed(ownerFarmId, toolType) == FarmToolUseResult.SUCCESS) {
-                                            putBigEaterUsedCount(day, used + 1)
+                                            putBigEaterUsedCount(used + 1)
                                             syncAnimalStatus(ownerFarmId)
                                         }
                                     }
@@ -4993,6 +5019,97 @@ class AntFarm : ModelTask() {
         return null
     }
 
+    /**
+     * 自动使用数字公仔补签卡补签月度成就公仔。
+     * 候选集 = 月度公仔序列（实证最早的 2022_10 起）- 小屋已拥有集；
+     * 每个目标先用 queryAntfarmDoll 确认未获得，再 useFarmTool 指定 achievementId+dollId 补签。
+     */
+    internal fun supplementDolls(ownerFarmId: String?) {
+        try {
+            if (ApplicationHookConstants.isOffline()) return
+            val tool = findFarmTool(ToolType.DOLLTOOL, forceRefresh = true) ?: run {
+                Log.farm("数字公仔补签🎭[无补签卡，跳过]")
+                return
+            }
+            if (tool.toolCount <= 0) {
+                Log.farm("数字公仔补签🎭[补签卡库存不足，跳过]")
+                return
+            }
+            val cabinJo = JSONObject(AntFarmRpcCall.queryLoveCabin(UserMap.currentUid))
+            if (!ResChecker.checkRes(TAG, "数字公仔补签查询小屋失败:", cabinJo)) return
+            val owned = mutableSetOf<String>()
+            val dollList = cabinJo.optJSONArray("loveCabinDollList")
+            if (dollList != null) {
+                for (i in 0..<dollList.length()) {
+                    val id = dollList.optJSONObject(i)?.optString("dollId").orEmpty()
+                    if (id.isNotEmpty()) owned.add(id)
+                }
+            }
+            // 月度公仔 id 形如 2023_06_MONTH_DOLL，枚举到当前月；已拥有集全量对比，全拥有时零补签消耗
+            val cal = Calendar.getInstance()
+            val endIdx = cal.get(Calendar.YEAR) * 12 + cal.get(Calendar.MONTH)
+            val missing = mutableListOf<String>()
+            var idx = 2022 * 12 + 9
+            while (idx <= endIdx) {
+                val dollId = String.format(Locale.CHINA, "%04d_%02d_MONTH_DOLL", idx / 12, idx % 12 + 1)
+                if (!owned.contains(dollId)) missing.add(dollId)
+                idx++
+            }
+            if (missing.isEmpty()) {
+                Log.farm("数字公仔补签🎭[月度公仔已集齐，无须补签]")
+                return
+            }
+            val newToOld = dollSupplementOrder?.value == DollSupplementOrder.NEW_TO_OLD
+            val ordered = if (newToOld) missing.reversed() else missing
+            Log.farm("数字公仔补签🎭[补签卡x${tool.toolCount} 缺${missing.size}只 顺序:${if (newToOld) "从晚到早" else "从早到晚"}]")
+            var remaining = tool.toolCount
+            var failStreak = 0
+            for (dollId in ordered) {
+                if (remaining <= 0) break
+                if (failStreak >= 2) {
+                    Log.farm("数字公仔补签🎭[连续查询异常，停止本轮]")
+                    break
+                }
+                val dollJo = try {
+                    JSONObject(AntFarmRpcCall.queryAntfarmDoll(dollId))
+                } catch (t: Throwable) {
+                    Log.printStackTrace(TAG, t)
+                    failStreak++
+                    continue
+                }
+                val info = dollJo.optJSONObject("dollInfoVO")
+                if (info == null) {
+                    failStreak++
+                    continue
+                }
+                failStreak = 0
+                if (info.optBoolean("acquired", false)) continue
+                val achievementId = info.optString("achievementId")
+                if (achievementId.isEmpty()) continue
+                val useJo = try {
+                    JSONObject(
+                        AntFarmRpcCall.useFarmTool(
+                            ownerFarmId, tool.toolId, ToolType.DOLLTOOL.name, achievementId, dollId
+                        )
+                    )
+                } catch (t: Throwable) {
+                    Log.printStackTrace(TAG, t)
+                    break
+                }
+                if (ResChecker.checkRes(TAG, "数字公仔补签失败:", useJo)) {
+                    remaining--
+                    Log.farm("数字公仔补签🎭[获得:${info.optString("dollName", dollId)}]")
+                } else {
+                    Log.farm("数字公仔补签🎭[补签[$dollId]未成功，停止本轮]")
+                    break
+                }
+            }
+            if (remaining <= 0) Log.farm("数字公仔补签🎭[补签卡已用尽]")
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "supplementDolls err:", t)
+        }
+    }
+
     private fun findFarmTool(toolType: ToolType, forceRefresh: Boolean = false): FarmTool? {
         if (forceRefresh || farmTools.isEmpty()) {
             listFarmTool()
@@ -5451,8 +5568,7 @@ class AntFarm : ModelTask() {
                         if (toolType == ToolType.ACCELERATETOOL) {
                             Status.useAccelerateTool()
                         } else {
-                            val day = LocalDate.now(FARM_ZONE).toString()
-                            putBigEaterUsedCount(day, getBigEaterUsedCount(day) + 1)
+                            putBigEaterUsedCount(getBigEaterUsedCount() + 1)
                         }
                         Log.farm("道具[${toolType.nickName()}]库存未确认减少，保留一次预算，本轮停止")
                         onFailure?.invoke(TaskFlowActionResult.failure(TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
@@ -8015,6 +8131,15 @@ class AntFarm : ModelTask() {
         }
     }
 
+    /** 数字公仔补签顺序 */
+    interface DollSupplementOrder {
+        companion object {
+            const val OLD_TO_NEW: Int = 0
+            const val NEW_TO_OLD: Int = 1
+            val nickNames: Array<String?> = arrayOf<String?>("从早到晚（先补最早）", "从晚到早（先补最近）")
+        }
+    }
+
     interface DonationCompetitionMode {
         companion object {
             const val AGGRESSIVE: Int = 0
@@ -8322,7 +8447,6 @@ class AntFarm : ModelTask() {
             objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
         }
 
-        private const val BIG_EATER_USED_COUNT_KEY_PREFIX = "antFarmBigEaterUsedCount::"
         private const val FARM_ANSWER_CACHE_KEY = "farmAnswerQuestionCache"
         private const val ZHIMA_PIGEON_REWARD_RECEIPT_KEY = "antFarmZhimaPigeonRewardReceipt"
     }
@@ -8417,7 +8541,7 @@ class AntFarm : ModelTask() {
 
     /**
      * 手动使用庄园道具
-     * @param toolType 道具类型：BIG_EATER_TOOL, NEWEGGTOOL, FENCETOOL
+     * @param toolType 道具类型（ToolType 枚举名，如 BIG_EATER_TOOL、NEWEGGTOOL、FENCETOOL 等）
      * @param toolCount 使用数量（仅 NEWEGGTOOL 有效）
      */
     fun manualUseFarmTool(toolType: String, toolCount: Int) {
