@@ -56,6 +56,11 @@ object AntSportsRpcCall {
     private const val SPORTS_WALK_SOURCE = "ch_othertinyapp"
 
     /**
+     * @brief 路线推荐页来源 - 真实页面查询推荐路线列表使用的渠道标识
+     */
+    private const val SPORTS_RECOMMEND_SOURCE = "medical_health"
+
+    /**
      * @brief 功能特性列表 - JSON 格式字符串
      *
      * 包含运动各项功能的支持标识符，用于API请求。
@@ -745,6 +750,21 @@ object AntSportsRpcCall {
         RequestManager.requestString(
             "com.alipay.sportsplay.biz.rpc.walk.queryPath",
             """[{"chInfo":"$SPORTS_WALK_SOURCE","clientOS":"android","date":"$date","enableNewVersion":true,"features":$FEATURES,"pathId":"$pathId","timeZone":"$TIME_ZONE"}]""",
+        )
+
+    /**
+     * @brief 查询推荐路线列表 - 当前路线完成后真实页面换图使用的推荐接口
+     *
+     * @param pathId 当前路线ID
+     *
+     * @return RPC调用结果的 JSON 字符串
+     *
+     * @remark 对应API：com.alipay.sportsplay.biz.rpc.walk.queryRecommendPathList
+     */
+    fun queryRecommendPathList(pathId: String): String =
+        RequestManager.requestString(
+            "com.alipay.sportsplay.biz.rpc.walk.queryRecommendPathList",
+            """[{"chInfo":"$SPORTS_RECOMMEND_SOURCE","clientOS":"android","features":$FEATURES,"pathId":"$pathId"}]""",
         )
 
     /**
