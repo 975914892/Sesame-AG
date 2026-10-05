@@ -196,7 +196,6 @@ private val forestDefaultBlacklist =
         "ENERGY_XUANJIAO_ditiechuxing地铁出行",
         "ENERGY_XUANJIAO_guangpanxingdong光盘行动",
         "ENERGY_XUANJIAO_dianzizhifu电子支付",
-        "FOREST_CONTINUOUS_COLLECT_ENERGY_7连续7天收自己能量",
         "LSHS_huisho20_202508", // 完成旧衣回收得能量
         "YUSHU_202511", // 单种榆树，年年有榆
         "KTKZ_YS202511", // 一起组团种榆树

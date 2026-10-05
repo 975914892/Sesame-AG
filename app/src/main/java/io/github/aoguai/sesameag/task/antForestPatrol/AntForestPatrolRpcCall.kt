@@ -210,10 +210,10 @@ internal object AntForestPatrolRpcCall {
             .put("source", "chInfo_ch_appcenter__chsub_9patch").put("uniqueId", RandomUtil.getRandomTag())).toString(),
     )
 
-    fun assignMonopolyCreature(creatureCode: String): String = RequestManager.requestString(
+    fun assignMonopolyCreature(creatureCode: String, secondConfirm: Boolean = false): String = RequestManager.requestString(
         "alipay.antisle.monopoly.h5.assignMonopolyCreature",
-        JSONArray().put(JSONObject().put("creatureCode", creatureCode).put("secondConfirm", false)
-            .put("source", "monopoly_home_popup").put("uniqueId", RandomUtil.getRandomTag())).toString(),
+        JSONArray().put(JSONObject().put("creatureCode", creatureCode).put("secondConfirm", secondConfirm)
+            .put("source", "monopoly_home_animal").put("uniqueId", RandomUtil.getRandomTag())).toString(),
     )
 
     fun listMonopolyTasks(regionCode: String, sceneCode: String): String = RequestManager.requestString(

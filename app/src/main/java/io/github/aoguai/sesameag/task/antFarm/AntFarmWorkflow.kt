@@ -63,6 +63,15 @@ internal suspend fun AntFarm.runFarmTaskWorkflow(
         syncAnimalStatus(ownerFarmId)
         tc.countDebug("使用新蛋卡")
     }
+    if (useFenceTool?.value == true) {
+        useFarmTool(ownerFarmId, AntFarm.ToolType.FENCETOOL)
+        syncAnimalStatus(ownerFarmId)
+        tc.countDebug("使用篱笆卡")
+    }
+    if (useDollTool?.value == true) {
+        supplementDolls(ownerFarmId)
+        tc.countDebug("数字公仔补签")
+    }
     if (shouldHarvestProduceNow()) {
         Log.farm("有可收取的爱心鸡蛋")
         harvestProduce(ownerFarmId)

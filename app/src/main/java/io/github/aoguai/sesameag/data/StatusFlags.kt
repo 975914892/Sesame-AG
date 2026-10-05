@@ -391,6 +391,9 @@ object StatusFlags {
     /** 农场好友助力：好友关系无效前缀 */
     const val FLAG_ANTORCHARD_ASSIST_RELATION_INVALID_PREFIX = "orchard::assistRelationInvalid::"
 
+    /** 农场抽抽乐：今日已探测新一轮活动（探测成功或服务端确认失效均消耗，当日不再探测，跨日自动重置） */
+    const val FLAG_ANTORCHARD_DRAW_ACTIVITY_PROBED = "orchard::drawActivityProbed"
+
     /** 蚂蚁新村：今日丢肥料是否达到上限 */
     const val FLAG_ANTSTALL_THROW_MANURE_LIMIT: String = "Flag_AntStall_Throw_Manure_Limit"
 
@@ -414,6 +417,9 @@ object StatusFlags {
 
     /** 庄园：加速卡每日次数上限标记 */
     const val FLAG_FARM_ACCELERATE_LIMIT = "antFarm::accelerateLimit"
+
+    /** 庄园：加饭卡今日已使用次数（每日上限 2 次） */
+    const val FLAG_FARM_BIG_EATER_USED_COUNT = "antFarm::bigEaterUsedCount"
 
     /** 庄园：日常特殊食品今日已使用数量 */
     const val FLAG_FARM_SPECIAL_FOOD_DAILY_COUNT = "antFarm::specialFoodDailyCount"

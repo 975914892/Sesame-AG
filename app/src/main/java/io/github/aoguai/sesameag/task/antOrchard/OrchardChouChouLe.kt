@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antOrchard
 
+import io.github.aoguai.sesameag.data.Status
+import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
@@ -26,7 +28,7 @@ internal fun AntOrchard.runOrchardChouChouLe(userId: String) {
         val dataStore = UserDataStoreManager.getInstance(userId) ?: return
         val activityState = dataStore.get(ACTIVITY_STATE_KEY, String::class.java)?.let(::JSONObject) ?: JSONObject()
         val adapter = OrchardDrawTaskFlowAdapter(this, dataStore, activityState)
-        if (!adapter.isActivityActive()) return
+        if (!adapter.isActivityActive() && !adapter.shouldProbeNewRound()) return
         val entry = JSONObject(AntOrchardRpcCall.enterDrawActivity())
         adapter.recordActivityResponse(entry)
         if (!ResChecker.checkRes(TAG, entry)) {
@@ -108,6 +110,23 @@ private class OrchardDrawTaskFlowAdapter(
         return activityState.optLong("startTime") <= now
     }
 
+    /**
+     * 上一轮活动结束后每天最多重新探测一次新一轮活动：探测权由每日标识控制（本地自然日重置、跨日自动失效），
+     * 避免本地残留的关闭状态永久阻断后续活动。
+     */
+    fun shouldProbeNewRound(): Boolean {
+        if (Status.hasFlagToday(StatusFlags.FLAG_ANTORCHARD_DRAW_ACTIVITY_PROBED)) return false
+        Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_DRAW_ACTIVITY_PROBED)
+        activityState.remove("closed")
+        activityState.remove("reason")
+        activityState.remove("code")
+        activityState.remove("probeDay")
+        activityState.put("startTime", 0L).put("endTime", 0L)
+        dataStore.put(ACTIVITY_STATE_KEY, activityState.toString())
+        Log.orchard("农场抽抽乐上一轮活动已结束，重新探测新一轮活动")
+        return true
+    }
+
     fun recordActivityResponse(response: JSONObject) {
         if (response.optBoolean("activityExpire") ||
             (response.optString("code") == "2600000010" && !response.optBoolean("retriable", true))
@@ -119,7 +138,8 @@ private class OrchardDrawTaskFlowAdapter(
                 .put("code", response.optString("code"))
                 .put("reason", response.optString("desc"))
             dataStore.put(ACTIVITY_STATE_KEY, activityState.toString())
-            Log.error(TAG, "农场抽抽乐活动停止，保留关闭状态 activity=$activityState raw=$response")
+            Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_DRAW_ACTIVITY_PROBED)
+            Log.error(TAG, "农场抽抽乐活动停止，保留关闭状态当日不再探测 activity=$activityState raw=$response")
         }
     }
 
