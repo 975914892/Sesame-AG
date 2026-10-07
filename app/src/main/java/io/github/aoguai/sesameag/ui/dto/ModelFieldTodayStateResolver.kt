@@ -120,7 +120,9 @@ object ModelFieldTodayStateResolver {
                 flag(StatusFlags.FLAG_ANTMEMBER_MEMBER_SIGN_DONE, "今日会员签到已处理")
             }
 
-            "AntMember.memberTask" -> {
+            "AntMember.memberTask",
+            "AntMember.memberSignPageTask",
+            "AntMember.memberSignInAdTask" -> {
                 when {
                     Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY) -> {
                         inactive("今日会员任务已处理")
