@@ -89,7 +89,6 @@ object TodayFlagRegistry {
         binding("AntSesameCredit", "enableZhimaTree", patterns = listOf(exact(StatusFlags.FLAG_SESAME_ZHIMA_TREE_TASK_HANDLED_TODAY), prefix(StatusFlags.FLAG_SESAME_ZHIMA_TREE_ACTION_STOP_PREFIX))),
         binding("AntSesameCredit", "collectSesame", "collectSesameWithOneClick", patterns = listOf(exact(StatusFlags.FLAG_SESAME_COLLECT_DONE))),
         binding("AntSesameCredit", "sesameGrainExchange", "sesameGrainExchangeList", patterns = listOf(exact(StatusFlags.FLAG_SESAME_GRAIN_EXCHANGE_DONE))),
-        binding("OtherTask", "credit2101", "CreditOptions", patterns = listOf(exact(StatusFlags.FLAG_CREDIT2101_CHAPTER_TASK_DONE), prefix(StatusFlags.FLAG_CREDIT2101_EVENT_COUNT_PREFIX))),
         binding("AntSports", "sportsTasks", patterns = listOf(exact(StatusFlags.FLAG_ANTSPORTS_DAILY_TASKS_DONE), exact(StatusFlags.FLAG_ANTSPORTS_MOTION_DAILY_QUIZ_DONE), exact(StatusFlags.FLAG_ANTSPORTS_MOTION_QUIZ_HEALTH_CONFIRMED), exact(StatusFlags.FLAG_ANTSPORTS_MOTION_QUIZ_GREEN_CONFIRMED))),
         binding("AntSports", "syncStepCount", patterns = listOf(exact(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE))),
         binding("AntSports", "walkReviveSteps", "walkReviveTask", patterns = listOf(exact(StatusFlags.FLAG_ANTSPORTS_ROUTE_REVIVE_TRIED))),
@@ -137,7 +136,6 @@ object TodayFlagRegistry {
         "AntStall" to listOf(prefix("AntStall::"), prefix("stall::"), prefix("Flag_AntStall_")),
         "AntFarm" to listOf(prefix("AntFarm::"), prefix("antFarm::"), prefix("farm::"), prefix("farmQuestion::")),
         "BaseModel" to listOf(prefix("OnceDaily::"), prefix("customRpcSchedule::"), prefix("friendCenter::")),
-        "OtherTask" to listOf(prefix("OnceDaily::"), prefix("friendCenter::"), prefix(StatusFlags.FLAG_CREDIT2101_EVENT_COUNT_PREFIX), exact(StatusFlags.FLAG_CREDIT2101_CHAPTER_TASK_DONE)),
         "ManualTaskModel" to listOf(prefix("customRpcSchedule::")),
     )
 

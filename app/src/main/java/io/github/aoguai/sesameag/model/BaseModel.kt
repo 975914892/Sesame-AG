@@ -13,7 +13,6 @@ import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antStall.AntStall
 import io.github.aoguai.sesameag.task.greenFinance.GreenFinance
 import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
-import io.github.aoguai.sesameag.task.other.OtherTask
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.maps.BeachMap
 import io.github.aoguai.sesameag.util.maps.IdMapManager
@@ -149,7 +148,6 @@ class BaseModel : Model() {
             AntDodo::class.java,
             GreenFinance::class.java,
             MyBankWelfare::class.java,
-            OtherTask::class.java,
         )
 
         val taskOrderMode: ChoiceModelField = ChoiceModelField(
