@@ -5,7 +5,6 @@ import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.core.util.DefaultIndenter
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter
 import com.fasterxml.jackson.databind.DeserializationFeature
-import com.fasterxml.jackson.databind.exc.MismatchedInputException
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import kotlinx.coroutines.CancellationException
@@ -14,16 +13,16 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.file.ClosedWatchServiceException
 import java.nio.file.Path
 import java.nio.file.StandardWatchEventKinds
 import java.nio.file.WatchService
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
-import kotlin.math.abs
 
 object DataStore {
     private const val TAG = "DataStore"
@@ -37,11 +36,6 @@ object DataStore {
     private val data = ConcurrentHashMap<String, Any>()
     private val lock = ReentrantReadWriteLock()
     private lateinit var storageFile: File
-
-    // 用于防抖：记录最后一次加载的文件修改时间
-    private val lastLoadedTime = AtomicLong(0)
-    // 用于防抖：记录最后一次写入的时间，避免自己写文件触发自己的监听
-    private val lastWriteTime = AtomicLong(0)
 
     @Volatile
     private var watcherJob: Job? = null
@@ -82,22 +76,16 @@ object DataStore {
         // 2. 设置目录权限为 777 (对 Xposed 模块至关重要，否则宿主读不到)
         setWorldReadableWritable(dir)
 
-        storageFile = File(dir, FILE_NAME)
-
-        // 3. 确保文件存在
-        if (!storageFile.exists()) {
-            try {
-                storageFile.createNewFile()
-                // 设置文件权限 666
-                setWorldReadableWritable(storageFile)
-                // 写入空 JSON 对象，避免空文件导致解析错误
-                storageFile.writeText("{}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create storage file", e)
+        lock.write {
+            storageFile = File(dir, FILE_NAME)
+            withStorageLock {
+                if (!storageFile.exists()) {
+                    saveToDisk(emptyMap())
+                } else {
+                    forceLoadFromDisk()
+                }
             }
         }
-
-        loadFromDisk()
         startWatcherNio()
     }
 
@@ -132,24 +120,21 @@ object DataStore {
     /* -------------------------------------------------- */
     /*  类型安全读取                                       */
     /* -------------------------------------------------- */
-    fun <T : Any> getOrCreate(key: String, typeRef: TypeReference<T>): T = lock.write {
-        // 在写入前，强制从磁盘重新加载，以获取其他进程的修改
+    fun <T : Any> getOrCreate(key: String, typeRef: TypeReference<T>): T = withStorageLock {
         forceLoadFromDisk()
-        // 1. 尝试从内存获取
         data[key]?.let {
             try {
-                return mapper.convertValue(it, typeRef)
+                return@withStorageLock mapper.convertValue(it, typeRef)
             } catch (e: Exception) {
-                Log.w(TAG, "Data mismatch for key $key, overwriting with default.", e)
+                Log.w(TAG, "Failed to read value for key $key; keeping stored data.", e)
+                throw e
             }
         }
 
-        // 2. 内存没有，创建默认值
         val default: T = createDefault(typeRef)
-        data[key] = default
-
-        // 3. 只有当确实是新数据时才保存，避免频繁 IO
-        saveToDisk()
+        val updated = HashMap(data)
+        updated[key] = default
+        saveToDisk(updated)
         default
     }
 
@@ -176,75 +161,33 @@ object DataStore {
         }
     }
 
-    /**
-     * 强制从磁盘加载最新数据到内存。
-     * 在每次写入操作（put, remove, getOrCreate）之前调用，以防止多进程冲突。
-     */
-    private fun forceLoadFromDisk() {
-        try {
-            if (!::storageFile.isInitialized) {
-                return
-            }
-            if (!storageFile.exists() || storageFile.length() == 0L) {
-                // saveToDisk 可能正在跨进程替换文件；这里保留当前快照，避免把 activedUser 等键误清空。
-                return
-            }
-
-            // 优化：如果文件没有变化，则不重复读取，避免高频 IO
-            val currentModTime = storageFile.lastModified()
-            if (currentModTime <= lastLoadedTime.get()) {
-                return
-            }
-
-            val loaded: Map<String, Any> = mapper.readValue(storageFile)
-            data.clear()
-            data.putAll(loaded)
-            // 更新加载时间戳，这样文件监控的 loadFromDisk 就不会因我们自己的写入而重复加载
-            lastLoadedTime.set(currentModTime)
-        } catch (e: Exception) {
-            // 如果文件正在被另一个进程写入，可能会导致解析异常，这里我们选择忽略，
-            // 在下一个写入周期，数据会被同步。
-            if (e !is MismatchedInputException) {
-                Log.w(TAG, "Force load from disk failed: ${e.message}")
-            }
+    // 注册表锁在外层；存储读写固定先取进程内锁，再取文件锁。
+    // 使用独立锁文件，避免原子替换 DataStore.json 后文件锁仍指向旧 inode。
+    private fun <T> withStorageLock(block: () -> T): T = lock.write {
+        if (!::storageFile.isInitialized) return@write block()
+        val lockFile = File(storageFile.parentFile, ".data-store.lock")
+        RandomAccessFile(lockFile, "rw").use { file ->
+            setWorldReadableWritable(lockFile)
+            file.channel.lock().use { block() }
         }
     }
 
+    /** 调用方持有文件锁；读取失败必须中止写入，不能以旧快照覆盖磁盘。 */
+    private fun forceLoadFromDisk() {
+        if (!::storageFile.isInitialized) return
+        val loaded: Map<String, Any> = mapper.readValue(storageFile)
+        data.clear()
+        data.putAll(loaded)
+    }
+
     private fun loadFromDisk() {
-        if (!::storageFile.isInitialized || !storageFile.exists()) return
-
-        // 检查文件修改时间，防止重复加载
-        val currentModTime = storageFile.lastModified()
-        if (currentModTime <= lastLoadedTime.get()) {
-            return
-        }
-
-        // 如果文件修改时间非常接近我们最后一次写入的时间（< 500ms），说明是我们自己写的，忽略
-        if (abs(currentModTime - lastWriteTime.get()) < 500) {
-            lastLoadedTime.set(currentModTime)
-            return
-        }
-
-        lock.write {
-            try {
-                // 双重检查，防止在等待锁的过程中文件又被改了
-                if (storageFile.length() == 0L) return@write
-
-                val loaded: Map<String, Any> = mapper.readValue(storageFile)
-                data.clear()
-                data.putAll(loaded)
-
-                lastLoadedTime.set(currentModTime)
-
-                // 通知监听器
-                onChangeListener?.invoke()
-
-            } catch (e: Exception) {
-                // 仅记录严重错误，忽略文件被占用导致的临时错误
-                if (e !is MismatchedInputException) {
-                    Log.w(TAG, "Failed to load config: ${e.message}")
-                }
-            }
+        if (!::storageFile.isInitialized) return
+        try {
+            withStorageLock { forceLoadFromDisk() }
+            // 即使其他读取已经刷新 data，也需要通知注册表失效；回调不能持有存储锁。
+            onChangeListener?.invoke()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load config: ${e.message}")
         }
     }
 
@@ -264,38 +207,26 @@ object DataStore {
         return File.createTempFile("${storageFile.name}.", ".tmp", parentDir)
     }
 
-    private fun saveToDisk() {
-        if (!::storageFile.isInitialized) return
+    private fun saveToDisk(snapshot: Map<String, Any>) {
+        if (!::storageFile.isInitialized) {
+            data.clear()
+            data.putAll(snapshot)
+            return
+        }
         var tempFile: File? = null
         try {
             tempFile = createWriteTempFile()
-            // 1. 写入临时文件
-            mapper.writer(prettyPrinter).writeValue(tempFile, data)
-            // 2. 设置临时文件权限 (关键：确保 .tmp 也是 666)
+            mapper.writer(prettyPrinter).writeValue(tempFile, snapshot)
             setWorldReadableWritable(tempFile)
-            // 3. 记录写入时间
-            lastWriteTime.set(System.currentTimeMillis())
-            // 4. 尝试原子重命名 (Atomic Rename)
-            var renameSuccess = tempFile.renameTo(storageFile)
-            // 5. 如果重命名失败，直接 copy 覆盖，避免先删主文件造成跨进程读到“文件不存在”。
-            if (!renameSuccess) {
-                Log.w(TAG, "renameTo failed, falling back to copy stream.")
-                try {
-                    tempFile.copyTo(storageFile, overwrite = true)
-                    renameSuccess = true
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to copy temp file to storage file", e)
-                }
+            // 不降级为覆盖式 copy：失败时必须保留旧的完整文件。
+            if (!tempFile.renameTo(storageFile)) {
+                throw IOException("Failed to atomically replace ${storageFile.absolutePath}")
             }
-            if (renameSuccess) {
-                // 7. 再次确保最终文件的权限 (防止 copy 后权限丢失)
-                setWorldReadableWritable(storageFile)
-
-                // 更新加载时间，避免 Watcher 再次触发加载
-                lastLoadedTime.set(storageFile.lastModified())
-            }
+            data.clear()
+            data.putAll(snapshot)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save config", e)
+            throw e
         } finally {
             if (tempFile?.exists() == true) {
                 tempFile.delete()
@@ -358,7 +289,9 @@ object DataStore {
                     var shouldReload = false
                     key.pollEvents().forEach { event ->
                         val changedPath = event.context() as? Path
-                        if (changedPath?.toString() == storageFile.name) {
+                        if (event.kind() == StandardWatchEventKinds.OVERFLOW ||
+                            changedPath?.toString() == storageFile.name
+                        ) {
                             shouldReload = true
                         }
                     }
@@ -388,18 +321,18 @@ object DataStore {
         Log.i(TAG, "DataStore watcher started: ${storageFile.absolutePath}")
     }
 
-    fun put(key: String, value: Any) = lock.write {
-        // 在写入前，强制从磁盘重新加载，以获取其他进程的修改
+    fun put(key: String, value: Any) = withStorageLock {
         forceLoadFromDisk()
-        data[key] = value
-        saveToDisk()
+        val updated = HashMap(data)
+        updated[key] = value
+        saveToDisk(updated)
     }
 
-    fun remove(key: String) = lock.write {
-        // 在写入前，强制从磁盘重新加载，以获取其他进程的修改
+    fun remove(key: String) = withStorageLock {
         forceLoadFromDisk()
-        data.remove(key)
-        saveToDisk()
+        val updated = HashMap(data)
+        updated.remove(key)
+        saveToDisk(updated)
     }
 }
 

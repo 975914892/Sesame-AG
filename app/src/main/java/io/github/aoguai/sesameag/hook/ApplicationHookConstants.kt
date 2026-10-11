@@ -439,19 +439,24 @@ object ApplicationHookConstants {
     data class TriggerQueueResult(
         val accepted: Boolean,
         val displaced: TriggerInfo? = null,
+        val replaced: List<TriggerInfo> = emptyList(),
     )
 
     fun setPendingTrigger(trigger: TriggerInfo): TriggerQueueResult =
         synchronized(triggerLock) {
+            val replaced = mutableListOf<TriggerInfo>()
             val dedupeKey = trigger.dedupeKey
             if (!dedupeKey.isNullOrBlank()) {
-                if (pendingTrigger?.dedupeKey == dedupeKey) {
+                pendingTrigger?.takeIf { it.dedupeKey == dedupeKey }?.let {
+                    replaced.add(it)
                     pendingTrigger = null
                 }
                 if (triggerQueue.isNotEmpty()) {
                     val it = triggerQueue.iterator()
                     while (it.hasNext()) {
-                        if (it.next().dedupeKey == dedupeKey) {
+                        val queued = it.next()
+                        if (queued.dedupeKey == dedupeKey) {
+                            replaced.add(queued)
                             it.remove()
                         }
                     }
@@ -476,7 +481,7 @@ object ApplicationHookConstants {
                 }
 
             record(TAG, "📥 trigger queued: ${trigger.summary()} | pending=${pendingTrigger?.summary()} | q=${triggerQueue.size}")
-            TriggerQueueResult(accepted = true, displaced = displaced)
+            TriggerQueueResult(accepted = true, displaced = displaced, replaced = replaced)
         }
 
     fun consumePendingTrigger(): TriggerInfo? {

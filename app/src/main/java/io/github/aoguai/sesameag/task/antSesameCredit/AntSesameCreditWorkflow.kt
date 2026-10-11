@@ -83,7 +83,6 @@ internal suspend fun AntSesameCredit.prepareSesameWorkflows(
             } else {
                 claimSesame = true
                 claimProgress = true
-                Log.sesame("🎯 芝麻相关任务执行中，稍后统一领取芝麻粒")
             }
         }
     }
@@ -108,7 +107,8 @@ internal suspend fun AntSesameCredit.prepareSesameWorkflows(
     }
 
     return AntSesameCreditWorkflowPlan(
-        claimSesame = claimSesame,
+        claimSesame = (claimSesame || sesameAlchemy?.value == true) &&
+            !hasFlagToday(StatusFlags.FLAG_SESAME_COLLECT_DONE),
         claimProgress = claimProgress,
         allowed = true,
         alchemyExecutionState = alchemyExecutionState,
@@ -135,8 +135,7 @@ internal suspend fun AntSesameCredit.finishSesameWorkflows(plan: AntSesameCredit
         if (ApplicationHookConstants.isOffline()) {
             Log.sesame("⏭️ 当前处于离线模式，跳过统一领取芝麻粒")
         } else {
-            Log.sesame("🎯 芝麻相关流程执行完成，开始统一领取芝麻粒")
-            collectSesame(collectSesameWithOneClick?.value == true)
+            collectSesame(collectSesameWithOneClick?.value == true || sesameAlchemy?.value == true)
         }
     }
 

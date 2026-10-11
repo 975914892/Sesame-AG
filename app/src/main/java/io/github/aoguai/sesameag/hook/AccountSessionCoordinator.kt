@@ -178,6 +178,9 @@ object AccountSessionCoordinator {
             sessionEpoch = epoch,
             switchedAtMs = now
         )
+        if (context != null) {
+            PersistentScheduleRegistry.recoverInterruptedExecutions(safeUserId, epoch)
+        }
         synchronizeEpochGenerator(epoch)
         currentSession = session
         switchInProgress = false

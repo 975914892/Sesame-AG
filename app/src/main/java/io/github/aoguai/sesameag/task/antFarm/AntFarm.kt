@@ -256,6 +256,7 @@ class AntFarm : ModelTask() {
     internal var loveChickenTime: StringModelField? = null
     internal var loveChickenRefreshInterval: IntegerModelField? = null
     internal var loveChickenOvertakeAmount: IntegerModelField? = null
+    internal var loveChickenContributionMargin: IntegerModelField? = null
     internal var loveChickenTrySpecialFood: BooleanModelField? = null
     internal var donationCompetitionMode: ChoiceModelField? = null
     internal var donationCompetitionTrySpecialFood: BooleanModelField? = null
@@ -726,7 +727,7 @@ modelFields.addField(
                 .also { loveChickenGathering = it })
         modelFields.addField(ChoiceModelField(
             "loveChickenMode", "爱心鸡结号 | 模式", 0, arrayOf("激进", "稳定")
-        ).withDesc("激进模式持续积累爱心值并在周结算前争取第一；稳定模式按剩余周数争取最高累计奖励，达标后停止主动耗蛋。")
+        ).withDesc("激进模式持续积累爱心值并在周结算前争取第一；稳定模式按剩余周数争取最高累计奖励和全球一等奖门槛，保留配置的爱心值余量；达标后继续回查排名。")
             .also { loveChickenMode = it })
         modelFields.addField(BooleanModelField(
             "loveChickenAnytimeCheck", "爱心鸡结号 | 稳定模式非蹲点评估", false
@@ -748,6 +749,10 @@ modelFields.addField(
             "loveChickenOvertakeAmount", "爱心鸡结号 | 反超额外捐蛋数", 1, 1, 10000
         ).withDesc("目标总捐蛋量比对手多出的数量；不把同分当作反超成功。")
             .also { loveChickenOvertakeAmount = it })
+        modelFields.addField(IntegerModelField(
+            "loveChickenContributionMargin", "爱心鸡结号 | 一等奖爱心值余量", 10, 1, 10000
+        ).withDesc("两种模式均以最高成就门槛与一等奖末位爱心值加余量中的较高值为目标。")
+            .also { loveChickenContributionMargin = it })
         modelFields.addField(BooleanModelField(
             "loveChickenTrySpecialFood", "爱心鸡结号 | 蛋不足使用特殊食品", false
         ).withDesc("仅活动补捐时使用，还需开启通用“使用特殊食品”，与捐蛋排位赛共用活动每日次数限制。")
@@ -1095,12 +1100,18 @@ modelFields.addField(
     internal fun pendingZhimaPigeonRewardFeedbackId(): String? =
         currentUserDataStore()?.get(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, String::class.java)
 
+    internal fun pendingZhimaPigeonRewardRound(): String =
+        currentUserDataStore()?.get(ZHIMA_PIGEON_REWARD_ROUND_KEY, String::class.java).orEmpty()
+
     private fun markZhimaPigeonRewardReceiptPending(): Boolean {
         val userDataStore = currentUserDataStore() ?: run {
             Log.error(TAG, "芝麻大表鸽🤖[无法取得账号私有存储，未登记芝麻粒待收状态]")
             return false
         }
-        if (!hasPendingZhimaPigeonRewardReceipt()) userDataStore.put(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, "")
+        if (!hasPendingZhimaPigeonRewardReceipt()) {
+            userDataStore.put(ZHIMA_PIGEON_REWARD_ROUND_KEY, java.util.UUID.randomUUID().toString())
+            userDataStore.put(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, "")
+        }
         Status.removeFlag(StatusFlags.FLAG_SESAME_ALCHEMY_TASKS_DONE)
         return userDataStore.get(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, String::class.java) != null
     }
@@ -1134,6 +1145,7 @@ modelFields.addField(
             Log.error(TAG, "芝麻大表鸽🤖[清除芝麻粒待收状态失败，保留后续重试]")
             return false
         }
+        userDataStore.remove(ZHIMA_PIGEON_REWARD_ROUND_KEY)
         Status.removeFlag(StatusFlags.FLAG_SESAME_ALCHEMY_TASKS_DONE)
         Status.removeFlag(StatusFlags.FLAG_FARM_ZHIMA_PIGEON_HIRE_DONE)
         Log.farm("芝麻大表鸽🤖[88芝麻粒已领取并回查确认，等待炼金列表确认后续雇佣资格]")
@@ -7718,7 +7730,7 @@ modelFields.addField(
      * 厨房和乐园动作完成后，统一补收大表鸽已完成任务并回查产出是否达到 88 粒。
      */
     internal fun runZhimaPigeonTaskFlow() {
-        if (!isZhimaPigeonConfigured() || hasPendingZhimaPigeonRewardReceipt()) {
+        if (!isZhimaPigeonConfigured()) {
             return
         }
 
@@ -8449,6 +8461,7 @@ modelFields.addField(
 
         private const val FARM_ANSWER_CACHE_KEY = "farmAnswerQuestionCache"
         private const val ZHIMA_PIGEON_REWARD_RECEIPT_KEY = "antFarmZhimaPigeonRewardReceipt"
+        private const val ZHIMA_PIGEON_REWARD_ROUND_KEY = "antFarmZhimaPigeonRewardRound"
     }
 
     /**

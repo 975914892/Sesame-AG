@@ -4,6 +4,7 @@ import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.Status.TodayFlagState
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
+import io.github.aoguai.sesameag.task.TaskExecutionReport
 import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TaskBlacklist
@@ -177,6 +178,7 @@ data class TaskFlowRunResult(
     val interrupted: Boolean = false,
     val deferredCount: Int = 0,
     val deferredReasonCounts: Map<DeferredReason, Int> = emptyMap(),
+    val failureCount: Int = 0,
 )
 
 private data class TaskFlowActionCandidate(
@@ -357,7 +359,16 @@ class TaskFlowEngine(
         const val ROUND_SLEEP_JITTER_MS = 1500L
     }
 
-    fun run(): TaskFlowRunResult {
+    fun run(): TaskFlowRunResult = try {
+        runFlow()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        TaskExecutionReport.current()?.recordException()
+        throw t
+    }
+
+    private fun runFlow(): TaskFlowRunResult {
         // 调用方在一次模块执行内共享快照；下次模块执行创建新状态，允许正常续接。
         val executedActionSnapshotKeys = executionState.executedActionSnapshotKeys
         val pendingActionConfirmations = executionState.pendingActionConfirmations
@@ -372,6 +383,7 @@ class TaskFlowEngine(
         var failureCountAny = 0
         var tailFollowUpRefreshBudget = 1
         var confirmationRefreshOnlyRound = false
+        val loggedBlacklistMatches = mutableSetOf<String>()
         var failureStoppedActions = false
 
         while (round <= roundLimit) {
@@ -417,6 +429,7 @@ class TaskFlowEngine(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (t: Throwable) {
+                    TaskExecutionReport.current()?.recordException()
                     adapter.logError("${adapter.flowName}[查询异常：${t.message}]")
                     return finishRunResult(
                         completed = false,
@@ -468,6 +481,13 @@ class TaskFlowEngine(
             }
 
             val items = adapter.extractItems(response)
+            for (item in items) {
+                if (adapter.mapPhase(item) in setOf(TaskFlowPhase.REWARD_READY, TaskFlowPhase.TERMINAL)) continue
+                if (item.id in loggedBlacklistMatches) continue
+                val match = item.blacklistKeys.firstNotNullOfOrNull { TaskBlacklist.findMatch(adapter.moduleName, it) } ?: continue
+                loggedBlacklistMatches += item.id
+                adapter.logInfo("${adapter.flowName}[黑名单命中] taskId=${item.id} source=${match.first} entry=${match.second}")
+            }
             if (round == 1) {
                 roundLimit =
                     adapter
@@ -887,7 +907,9 @@ class TaskFlowEngine(
             interrupted = interrupted,
             deferredCount = deferredCount,
             deferredReasonCounts = deferredReasonCounts,
-        )
+        ).copy(failureCount = failureCount).also {
+            TaskExecutionReport.current()?.recordFlow(executionState, adapter.moduleName, adapter.flowName, it)
+        }
     }
 
     private fun actionSnapshotKey(
@@ -995,6 +1017,7 @@ class TaskFlowEngine(
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
+                TaskExecutionReport.current()?.recordException()
                 TaskFlowActionResult.failure(
                     failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
                     message = t.message.orEmpty(),

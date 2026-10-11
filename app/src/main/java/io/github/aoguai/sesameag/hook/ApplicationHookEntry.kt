@@ -9,7 +9,7 @@ object ApplicationHookEntry {
         deferGenericStartupTrigger: Boolean = false,
     ) {
         if (reason == "broadcast_restart" || reason == "config_reload") {
-            if (!ApplicationHook.consumeReloadResumeDecision(reason)) {
+            if (!ApplicationHook.resumeSchedulingAfterReload(reason)) {
                 ApplicationHookCore.dispatchIfNeeded()
                 return
             }

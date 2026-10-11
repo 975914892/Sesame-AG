@@ -8,6 +8,11 @@ import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.MapperEntity
 import io.github.aoguai.sesameag.entity.SesameGift
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.ApplicationHook
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
 import io.github.aoguai.sesameag.hook.HookReadyChecker
@@ -20,6 +25,9 @@ import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.SelectModelField
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
+import io.github.aoguai.sesameag.task.TaskExecutionOutcome
+import io.github.aoguai.sesameag.task.TaskExecutionReport
+import kotlin.coroutines.EmptyCoroutineContext
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antOrchard.AntOrchard
 import io.github.aoguai.sesameag.task.antOrchard.UrlUtil
@@ -46,7 +54,6 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
 import io.github.aoguai.sesameag.util.CoroutineUtils
-import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
@@ -56,11 +63,14 @@ import io.github.aoguai.sesameag.util.UserDataStoreManager
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.SesameGiftMap
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -88,6 +98,7 @@ class AntSesameCredit : ModelTask() {
     internal var sesameGrainExchange: BooleanModelField? = null
     private var sesameGrainExchangeList: SelectModelField? = null
 
+    private val sesameWorkflowMutex = Mutex()
     private val sesameCreditTaskBlacklistModule = "芝麻信用"
     private val sesameAlchemyTaskBlacklistModule = "芝麻炼金"
     private val sesamePushModelTaskSnapshots = linkedMapOf<String, SesamePushModelTaskSnapshot>()
@@ -359,7 +370,8 @@ class AntSesameCredit : ModelTask() {
     }
 
     override fun runJava() {
-        runBlocking {
+        runBlocking(TaskExecutionReport.current()?.context ?: EmptyCoroutineContext) {
+            sesameWorkflowMutex.withLock {
             try {
                 Log.sesame("执行开始-${getName()}")
                 requestLocationSuspend()
@@ -368,10 +380,107 @@ class AntSesameCredit : ModelTask() {
                 val sesamePlan = prepareSesameWorkflows(this, deferredTasks)
                 deferredTasks.awaitAll()
                 finishSesameWorkflows(sesamePlan)
+            } catch (e: CancellationException) {
+                throw e
             } catch (t: Throwable) {
+                TaskExecutionReport.current()?.recordException()
                 Log.printStackTrace(TAG, t)
             } finally {
                 Log.sesame("执行结束-${getName()}")
+            }
+            }
+        }
+    }
+
+    private fun scheduleSesameConfirmation(payload: JSONObject) {
+        val context = ApplicationHook.appContext ?: return
+        val owner = AccountSessionCoordinator.currentUserId()?.takeIf { it.isNotBlank() } ?: return
+        val epoch = AccountSessionCoordinator.currentSessionEpoch()
+        val record = if (payload.optBoolean("pigeon")) {
+            val farm = Model.getModel(AntFarm::class.java) ?: return
+            if (!farm.hasPendingZhimaPigeonRewardReceipt()) return
+            val round = farm.pendingZhimaPigeonRewardRound()
+            if (payload.has("pigeon_round") && payload.optString("pigeon_round") != round) return
+            payload.put("pigeon_round", round)
+            "pigeon:$round"
+        } else payload.optString("recordId")
+        if (record.isBlank() || hasFlagToday("sesame_confirmation_checked:$record")) return
+        val dedupe = "$PERSISTENT_CONFIRMATION_KIND:$owner:$record"
+        if (PersistentScheduleRegistry.list().any {
+                it.dedupeKey == dedupe && it.sessionEpoch == epoch &&
+                    it.state in setOf(PersistentScheduleState.SCHEDULED, PersistentScheduleState.QUEUED, PersistentScheduleState.RUNNING)
+            }) return
+        val attempt = payload.optInt("attempt", 0)
+        if (attempt >= 3) {
+            setFlagToday("sesame_confirmation_checked:$record")
+            Log.sesame("芝麻任务[回查仍待确认，保留业务状态，结束本次自动回查] record=$record")
+            return
+        }
+        payload.put("child_kind", PERSISTENT_CONFIRMATION_KIND)
+            .put("owner_user_id", owner).put("session_epoch", epoch).put("attempt", attempt + 1)
+        val schedule = UnifiedScheduler.schedulePersistentTrigger(
+            context = context, name = "芝麻任务与奖励回查", kind = PersistentScheduleKind.MODULE_CHILD,
+            triggerAtMs = System.currentTimeMillis() + (attempt + 1) * 60_000L,
+            dedupeKey = dedupe, payloadJson = payload.toString(), ownerUserId = owner, sessionEpoch = epoch,
+        )
+        if (schedule.state == PersistentScheduleState.FAILED) {
+            Log.error(TAG, "芝麻任务回查调度注册失败:${schedule.lastError}")
+        }
+    }
+
+    internal fun triggerPersistentConfirmation(payloadJson: String, scheduleId: String, source: String): Boolean {
+        val payload = JSONObject(payloadJson)
+        var needsConfirmation = false
+        return executePersistentChild(
+            scheduleId = scheduleId,
+            ownerUserId = payload.optString("owner_user_id"),
+            sessionEpoch = payload.optLong("session_epoch"),
+            source = "$PERSISTENT_CONFIRMATION_KIND:$source",
+            workflowMutex = sesameWorkflowMutex,
+            afterExecution = { if (needsConfirmation) scheduleSesameConfirmation(payload) },
+        ) {
+            val eligible = isEnable() &&
+                if (payload.optBoolean("pigeon")) sesameAlchemy?.value == true || collectSesame?.value == true
+                else if (payload.optString("version") == "alchemy") sesameAlchemy?.value == true else sesameTask?.value == true
+            if (!eligible) return@executePersistentChild TaskExecutionOutcome.SKIPPED
+            var confirmed = false
+            var queryFailed = false
+            if (payload.optBoolean("pigeon")) {
+                Model.getModel(AntFarm::class.java)?.let { farm ->
+                    if (payload.optString("pigeon_round") != farm.pendingZhimaPigeonRewardRound()) {
+                        return@executePersistentChild TaskExecutionOutcome.SKIPPED
+                    }
+                    confirmed = !farm.hasPendingZhimaPigeonRewardReceipt() || collectPendingZhimaPigeonReward(farm)
+                    if (confirmed && farm.isZhimaPigeonConfigured() && sesameAlchemy?.value == true) {
+                        resetSesamePushModelTaskSnapshots()
+                        processAlchemyTaskListsUntilStable(TaskFlowExecutionState())
+                    }
+                }
+            } else {
+                val raw = AntSesameCreditRpcCall.queryLastOperateTask(payload.optString("version"))
+                val response = JSONObject(raw)
+                if (!ResChecker.checkRes(TAG, response)) {
+                    queryFailed = true
+                    Log.error(TAG, "芝麻生活记录回查失败 record=${payload.optString("recordId")} raw=$raw")
+                } else {
+                    val task = response.optJSONObject("data")?.optJSONObject("lastOperateTaskVO")
+                    confirmed = task != null && task.optString("templateId") == payload.optString("templateId") &&
+                        task.optString("recordId") == payload.optString("recordId") && task.optBoolean("finishFlag")
+                    if (confirmed) {
+                        UserDataStoreManager.getInstance(payload.optString("owner_user_id"))
+                            ?.remove("sesame_user_growth_pending:${payload.optString("recordId")}")
+                        Log.sesame("芝麻生活记录[已回查确认完成] record=${payload.optString("recordId")}")
+                    }
+                }
+            }
+            if (collectSesame?.value == true || sesameAlchemy?.value == true) {
+                collectSesame(collectSesameWithOneClick?.value == true || sesameAlchemy?.value == true)
+            }
+            needsConfirmation = !confirmed
+            when {
+                queryFailed -> TaskExecutionOutcome.FAILED
+                confirmed -> TaskExecutionOutcome.SUCCESS
+                else -> TaskExecutionOutcome.DEFERRED
             }
         }
     }
@@ -1906,10 +2015,12 @@ class AntSesameCredit : ModelTask() {
 
     /**
      * 领取已由庄园确认遣返的大表鸽奖励。
-     * 该专项只处理账号私有待收记录绑定的反馈，绕过通用芝麻粒当日完成标记且不扩大为一键收取。
+     * 该专项只处理账号私有待收记录绑定的反馈，遵守芝麻粒当日标记且不扩大为一键收取。
      */
     internal suspend fun collectPendingZhimaPigeonReward(antFarm: AntFarm): Boolean {
-        if (!antFarm.hasPendingZhimaPigeonRewardReceipt() || ApplicationHookConstants.isOffline()) {
+        if (hasFlagToday(StatusFlags.FLAG_SESAME_COLLECT_DONE) ||
+            !antFarm.hasPendingZhimaPigeonRewardReceipt() || ApplicationHookConstants.isOffline()
+        ) {
             return false
         }
 
@@ -1920,7 +2031,8 @@ class AntSesameCredit : ModelTask() {
             val target = if (pendingFeedbackId.isBlank()) {
                 unclaimedItems.firstOrNull { it.cateId == zhimaPigeonFeedbackCategory }
                     ?: run {
-                        Log.sesame("芝麻大表鸽🤖[奖励反馈尚未生成，保留后续自然重试]")
+                        scheduleSesameConfirmation(JSONObject().put("pigeon", true))
+                        Log.sesame("芝麻大表鸽🤖[奖励反馈尚未生成，保留待收状态并等待持久回查]")
                         return false
                     }
             } else {
@@ -1988,12 +2100,16 @@ class AntSesameCredit : ModelTask() {
      */
     internal suspend fun collectSesame(withOneClick: Boolean): Unit =
         CoroutineUtils.run {
+            if (hasFlagToday(StatusFlags.FLAG_SESAME_COLLECT_DONE)) {
+                Log.sesame("⏭️ 今天已处理过芝麻粒领取，跳过执行")
+                return@run
+            }
             var flagState = Status.TodayFlagState.RETRY_LATER
             if (ApplicationHookConstants.isOffline()) {
                 return@run
             }
             try {
-                val items = queryUnclaimedSesameFeedbackItems("芝麻信用💳") ?: return@run
+                val items = queryExplicitUnclaimedSesameFeedbackItems("芝麻信用💳") ?: return@run
                 if (items.isEmpty()) {
                     Log.sesame("芝麻信用💳[当前无待收取芝麻粒]")
                     // 即使无待收取芝麻粒，积分宝箱也可能处于 WAIT_CLAIM；仅在回查确认后写无待处理状态。
@@ -2013,7 +2129,7 @@ class AntSesameCredit : ModelTask() {
                 if (ApplicationHookConstants.isOffline()) {
                     return@run
                 }
-                val remainingItems = queryUnclaimedSesameFeedbackItems("芝麻信用💳[复核]") ?: return@run
+                val remainingItems = queryExplicitUnclaimedSesameFeedbackItems("芝麻信用💳[复核]") ?: return@run
                 if (remainingItems.isEmpty() && treasureBoxConfirmed) {
                     flagState = Status.TodayFlagState.DONE
                 } else if (remainingItems.isNotEmpty()) {
@@ -2024,6 +2140,13 @@ class AntSesameCredit : ModelTask() {
             } catch (t: Throwable) {
                 Log.printStackTrace("$TAG.collectSesame", t)
             } finally {
+                // 领取汇合后仍有任务或专项奖励待确认时，不提前把当日领取流程标成完成。
+                if ((sesameTask?.value == true && !hasFlagToday(StatusFlags.FLAG_SESAME_DO_ALL_AVAILABLE_TASK)) ||
+                    (sesameAlchemy?.value == true && !hasFlagToday(StatusFlags.FLAG_SESAME_ALCHEMY_TASKS_DONE)) ||
+                    Model.getModel(AntFarm::class.java)?.hasPendingZhimaPigeonRewardReceipt() == true
+                ) {
+                    flagState = Status.TodayFlagState.RETRY_LATER
+                }
                 setFlagToday(StatusFlags.FLAG_SESAME_COLLECT_DONE, flagState)
             }
         }
@@ -2088,7 +2211,7 @@ class AntSesameCredit : ModelTask() {
                 val withdrawState = SesameAlchemyWithdrawState()
                 runSesameAlchemyCycles(withdrawState)
                 if (!withdrawState.confirmationPending) {
-                    if (restoreSesameAlchemyStaminaIfNeeded()) {
+                    if (restoreSesameAlchemyStaminaIfNeeded(executionState)) {
                         runSesameAlchemyCycles(withdrawState)
                     }
                 }
@@ -2164,64 +2287,13 @@ class AntSesameCredit : ModelTask() {
                     Log.sesame("芝麻炼金⚗️[任务动作已提交]#本次${processedTaskCount}项，等待服务端列表确认")
                 }
 
-                // ================= Step 4: [新增] 任务完成后一键收取芝麻粒 =================
-                Log.sesame("芝麻炼金⚗️[任务处理完毕，准备收取芝麻粒]")
-                delay(2000) // 稍作等待，确保任务奖励到账
-                val feedbackItems = queryUnclaimedSesameFeedbackItems("芝麻炼金⚗️")
-                if (feedbackItems == null) {
-                    Log.sesame("芝麻炼金⚗️[查询待收取芝麻粒失败]")
-                } else if (feedbackItems.isEmpty()) {
-                    Log.sesame("芝麻炼金⚗️[当前无待收取芝麻粒]")
-                } else {
-                    Log.sesame("芝麻炼金⚗️[发现" + feedbackItems.size + "个待收取项，执行一键收取]")
-                    val originalFeedbackIds =
-                        feedbackItems
-                            .map { it.creditFeedbackId.trim() }
-                            .filter { it.isNotEmpty() }
-                            .toSet()
-                    collectSesameFeedbackItems(feedbackItems, true, "芝麻炼金⚗️")
-                    val remainingItems = queryExplicitUnclaimedSesameFeedbackItems("芝麻炼金⚗️[收取后回查]")
-                    when {
-                        remainingItems == null -> {
-                            Log.sesame("芝麻炼金⚗️[芝麻粒收取待确认] 回查失败，保留后续重试机会")
-                        }
-
-                        remainingItems.any { it.creditFeedbackId.isBlank() } -> {
-                            Log.sesame("芝麻炼金⚗️[芝麻粒收取待确认] 回查存在缺少反馈ID的未领取项，保留后续重试机会")
-                        }
-
-                        originalFeedbackIds.isEmpty() && remainingItems.isEmpty() -> {
-                            Log.sesame("芝麻炼金⚗️[芝麻粒收取确认] 回查已无未领取项")
-                        }
-
-                        originalFeedbackIds.isEmpty() -> {
-                            Log.sesame("芝麻炼金⚗️[芝麻粒收取待确认] 初始反馈缺少可用ID且回查仍有未领取项，保留后续重试机会")
-                        }
-
-                        else -> {
-                            val remainingFeedbackIds =
-                                remainingItems
-                                    .map { it.creditFeedbackId.trim() }
-                                    .filter { it.isNotEmpty() }
-                                    .toSet()
-                            val unclaimedOriginalIds = originalFeedbackIds.intersect(remainingFeedbackIds)
-                            if (unclaimedOriginalIds.isEmpty()) {
-                                Log.sesame("芝麻炼金⚗️[芝麻粒收取确认]#本次确认${originalFeedbackIds.size}项")
-                            } else {
-                                Log.sesame(
-                                    "芝麻炼金⚗️[芝麻粒收取待确认] 仍有${unclaimedOriginalIds.size}个原反馈未领取，" +
-                                        "保留后续重试机会",
-                                )
-                            }
-                        }
-                    }
-                }
+                // 待收反馈在信用、炼金及关联任务汇合后统一领取。
 
                 // 新增浏览任务可能奖励炼金次数（LJCS），任务后仅补跑免费炼金，避免额外消耗新到账芝麻粒。
                 if (!withdrawState.confirmationPending) {
                     runSesameAlchemyCycles(withdrawState, allowPaidAlchemy = false)
                     if (!withdrawState.confirmationPending) {
-                        if (restoreSesameAlchemyStaminaIfNeeded()) {
+                        if (restoreSesameAlchemyStaminaIfNeeded(executionState)) {
                             runSesameAlchemyCycles(withdrawState)
                         }
                     }
@@ -2408,7 +2480,7 @@ class AntSesameCredit : ModelTask() {
         return code in setOf("NOT_REACH_MAX_LEVEL", "NOT_WITHDRAWABLE")
     }
 
-    private suspend fun restoreSesameAlchemyStaminaIfNeeded(): Boolean {
+    private suspend fun restoreSesameAlchemyStaminaIfNeeded(executionState: TaskFlowExecutionState): Boolean {
         val homeRes = AntSesameCreditRpcCall.Zmxy.Alchemy.alchemyQueryHome()
         val homeJo = parseSesameAlchemyRpcResponse(homeRes, "精力状态查询") ?: return false
         if (!ResChecker.checkRes(TAG, homeJo)) {
@@ -2439,7 +2511,7 @@ class AntSesameCredit : ModelTask() {
             SesameAlchemyBottleUseResult.NOT_FOUND -> Unit
         }
 
-        if (!completeOneSesameAlchemyTaskForBottle()) {
+        if (!completeOneSesameAlchemyTaskForBottle(executionState)) {
             return false
         }
 
@@ -2526,7 +2598,7 @@ class AntSesameCredit : ModelTask() {
         return SesameAlchemyBottleUseResult.USED
     }
 
-    private suspend fun completeOneSesameAlchemyTaskForBottle(): Boolean {
+    private suspend fun completeOneSesameAlchemyTaskForBottle(executionState: TaskFlowExecutionState): Boolean {
         val listRes = AntSesameCreditRpcCall.Zmxy.Alchemy.alchemyQueryListV3()
         val listJo = parseSesameAlchemyRpcResponse(listRes, "精力瓶任务列表查询") ?: return false
         if (!ResChecker.checkRes(TAG, listJo)) {
@@ -2555,11 +2627,14 @@ class AntSesameCredit : ModelTask() {
                 if (!isExecutableSesameAlchemyBottleTask(task)) {
                     continue
                 }
-                return completeSesameAlchemyTaskForBottle(task)
+                val snapshotKey = "bottle:${task.optString("templateId")}:${task.optInt("completedNum")}:${task.optInt("needCompleteNum", 1)}"
+                if (!executionState.deferredActionKeys.add(snapshotKey)) continue
+                if (completeSesameAlchemyTaskForBottle(task)) return true
+                if (ApplicationHookConstants.isOffline()) return false
             }
         }
 
-        Log.sesame("芝麻炼金⚗️[没有可闭环的精力瓶任务]")
+        Log.sesame("芝麻炼金⚗️[本轮没有新的可执行精力瓶任务，保留未完成状态]")
         return false
     }
 
@@ -2643,6 +2718,10 @@ class AntSesameCredit : ModelTask() {
             Log.sesame("芝麻炼金⚗️[精力瓶任务完成动作已提交，等待后续物品回查]#$title")
             return true
         }
+        if (result.deferredReason != null) {
+            Log.sesame("芝麻炼金⚗️[精力瓶任务待处理]#$title ${result.message}")
+            return false
+        }
         autoBlacklistSesameTaskIfNeeded(
             moduleName = sesameAlchemyTaskBlacklistModule,
             taskId = templateId,
@@ -2652,12 +2731,12 @@ class AntSesameCredit : ModelTask() {
             rawResponse = result.raw,
             action = "finish",
         )
-        Log.error(TAG, "芝麻炼金⚗️[精力瓶任务完成动作失败]#$title code=${result.code} raw=${result.raw}")
+        Log.error(TAG, "芝麻炼金⚗️[精力瓶任务完成动作失败]#$title classification=${result.failureType} code=${result.code} message=${result.message} raw=${result.raw}")
         return false
     }
 
     internal suspend fun processAlchemyTaskListsUntilStable(executionState: TaskFlowExecutionState): Int {
-        val adapter = SesameAlchemyTaskFlowAdapter()
+        val adapter = SesameAlchemyTaskFlowAdapter(executionState)
         val result = TaskFlowEngine(adapter, roundSleepMs = 1000L, executionState = executionState).run()
         if (adapter.interrupted || result.stopped || ApplicationHookConstants.isOffline()) {
             Log.sesame("芝麻炼金⚗️[任务流中断]#轮次=${result.rounds}")
@@ -2665,7 +2744,7 @@ class AntSesameCredit : ModelTask() {
         return adapter.submittedActionCount
     }
 
-    private inner class SesameAlchemyTaskFlowAdapter : TaskFlowAdapter {
+    private inner class SesameAlchemyTaskFlowAdapter(private val executionState: TaskFlowExecutionState) : TaskFlowAdapter {
         override val moduleName: String = sesameAlchemyTaskBlacklistModule
         override val flowName: String = "芝麻炼金任务"
         override val continueCurrentRoundOnRetryableFailure: Boolean = true
@@ -2742,6 +2821,8 @@ class AntSesameCredit : ModelTask() {
             if (mapPhase(item) == TaskFlowPhase.TERMINAL) {
                 return false
             }
+            val bottleSnapshot = "bottle:${item.id}:${item.current ?: 0}:${item.limit ?: 1}"
+            if (bottleSnapshot in executionState.deferredActionKeys) return true
             if (raw.optString("templateId").trim() in sesameAlchemyBottleCompletionPending) {
                 logSkipOnce(item, "精力瓶任务已有提交待确认，跳过本轮重复提交")
                 return true
@@ -2767,7 +2848,8 @@ class AntSesameCredit : ModelTask() {
             if (isBlacklisted(item)) return false
             val raw = item.raw ?: return true
             return mapPhase(item) != TaskFlowPhase.TERMINAL &&
-                (raw.optString("templateId").trim() in sesameAlchemyBottleCompletionPending ||
+                ("bottle:${item.id}:${item.current ?: 0}:${item.limit ?: 1}" in executionState.deferredActionKeys ||
+                raw.optString("templateId").trim() in sesameAlchemyBottleCompletionPending ||
                     item.id.isBlank() ||
                     shouldSkipShareAssistSesameTask(raw) ||
                     (raw.optString("templateId") == AntFarm.ZHIMA_PIGEON_ALCHEMY_TEMPLATE_ID &&
@@ -3027,6 +3109,8 @@ class AntSesameCredit : ModelTask() {
                 )
             }
             if (antFarm.hasPendingZhimaPigeonRewardReceipt()) {
+                antFarm.runZhimaPigeonTaskFlow()
+                scheduleSesameConfirmation(JSONObject().put("pigeon", true))
                 return TaskFlowActionResult.defer(
                     DeferredReason.STATE_CONFIRMATION,
                     message = "当前大表鸽奖励仍待收取，暂缓新的反馈与雇佣",
@@ -4809,6 +4893,7 @@ class AntSesameCredit : ModelTask() {
     }
 
     companion object {
+        const val PERSISTENT_CONFIRMATION_KIND = "sesame_confirmation"
         private val TAG: String = AntSesameCredit::class.java.simpleName
         private val RENT_PUSH_MODEL_SNAPSHOT_SOURCES =
             setOf(
@@ -5883,8 +5968,11 @@ class AntSesameCredit : ModelTask() {
             )
         }
 
+        val pendingStore = UserMap.currentUid?.let { UserDataStoreManager.getInstance(it) }
+        val pendingKey = "sesame_user_growth_pending:$recordId"
         val feedbackResult =
-            reportSesameTaskFeedbackResult(
+            if (pendingStore?.get(pendingKey, Boolean::class.java) == true) TaskFlowActionResult.success()
+            else reportSesameTaskFeedbackResult(
                 task = task,
                 taskTitle = taskTitle,
                 logPrefix = spec.logPrefix,
@@ -5926,6 +6014,7 @@ class AntSesameCredit : ModelTask() {
         if (lastTask != null && lastTask.optString("templateId") == templateId &&
             lastTask.optString("recordId") == recordId && lastTask.optBoolean("finishFlag", false)
         ) {
+            pendingStore?.remove(pendingKey)
             spec.joinedRecordIds?.remove(templateId)
             Log.sesame("${spec.logPrefix}[生活记录回查确认完成]#$taskTitle templateId=$templateId recordId=$recordId")
             return TaskFlowActionResult.success(refreshAfterAction = true)
@@ -5940,6 +6029,8 @@ class AntSesameCredit : ModelTask() {
 
         // userGrowth 外跳任务由业务侧确认完成，不能用普通生活记录推送代替。
         if (extractQueryParam(task.optString("actionUrl"), "jumpAction") == "userGrowth") {
+            pendingStore?.put(pendingKey, true)
+            scheduleSesameConfirmation(JSONObject().put("templateId", templateId).put("recordId", recordId).put("version", spec.version))
             return TaskFlowActionResult.defer(
                 deferredReason = DeferredReason.PREREQUISITE_PENDING,
                 message = "外跳业务尚未确认完成，保留任务并等待回查",

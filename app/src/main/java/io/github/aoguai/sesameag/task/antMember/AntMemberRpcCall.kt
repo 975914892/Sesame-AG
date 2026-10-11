@@ -362,10 +362,10 @@ object AntMemberRpcCall {
     }
 
     @JvmStatic
-    fun signPageTaskList(pageNo: Int = 1): String = RequestManager.requestString(
+    fun signPageTaskList(pageNo: Int = 1, session: String = java.util.UUID.randomUUID().toString()): String = RequestManager.requestString(
         "com.alipay.amic.memtask.h5.MemTaskListQueryFacade.signPageTaskList",
         JSONArray().put(JSONObject().put("pageNo", pageNo).put("pageSize", 8)
-            .put("previewTime", "").put("source", "antmember")
+            .put("session", session).put("switchNormal", true).put("source", "antmember")
             .put("sourcePassMap", buildMemberSourcePassMap())
             .put("spaceCode", "ant_member_xlight_task").put("taskTopConfigId", "")).toString(),
     )
@@ -374,6 +374,14 @@ object AntMemberRpcCall {
     fun queryGameEntranceInfo(): String = RequestManager.requestString(
         "com.alipay.amic.biz.rpc.game.h5.GameCenterQueryFacade.queryGameEntranceInfo",
         JSONArray().put(JSONObject().put("sourcePassMap", buildMemberSourcePassMap())).toString(),
+    )
+
+    @JvmStatic
+    fun batchApplyMemberTasks(taskConfigIds: List<String>): String = RequestManager.requestString(
+        "com.alipay.amic.memtask.h5.MemTaskManagerFacade.batchApplyTask",
+        JSONArray().put(JSONObject().put("pageMark", "adFeeds")
+            .put("sourcePassMap", buildMemberSourcePassMap())
+            .put("taskConfigIdList", JSONArray(taskConfigIds))).toString(),
     )
 
     @JvmStatic
@@ -1838,6 +1846,23 @@ object AntMemberRpcCall {
             JSONArray().put(args).toString(),
         )
     }
+
+    @JvmStatic
+    fun queryBillCoinShop(): String = RequestManager.requestString(
+        "alipay.memberasset.sticker.prize.coin.shop.home", "[{}]",
+    )
+
+    @JvmStatic
+    fun queryBillCoinProducts(pageNo: Int): String = RequestManager.requestString(
+        "alipay.memberasset.sticker.prize.query.product.list",
+        JSONArray().put(JSONObject().put("pageNo", pageNo).put("pageSize", 20).put("queryType", "COIN")).toString(),
+    )
+
+    @JvmStatic
+    fun queryBillCoinProductDetail(prizeId: String): String = RequestManager.requestString(
+        "alipay.memberasset.sticker.prize.query.product.detail",
+        JSONArray().put(JSONObject().put("prizeId", prizeId).put("scene", "coin")).toString(),
+    )
 
     @JvmStatic
     fun queryStickerPrizeHomePage(): String {

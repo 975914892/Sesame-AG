@@ -510,6 +510,7 @@ object GameCenterPlayRpcCall {
     ): Contract? {
         val seconds = objects.asSequence().flatMap { value ->
             sequenceOf(
+                value.optInt("browseSeconds", 0),
                 value.optInt("playTime", 0),
                 value.optInt("timeCount", 0),
                 value.optInt("floatBallDuration", 0),
@@ -525,7 +526,7 @@ object GameCenterPlayRpcCall {
                     .takeIf { it <= Int.MAX_VALUE.toLong() }
                     ?.toInt()
             }
-            ?: urlParameters.valuesFor("playTime", "timeCount", "floatBallDuration", "requiredDuration", "duration")
+            ?: urlParameters.valuesFor("browseSeconds", "playTime", "timeCount", "floatBallDuration", "requiredDuration", "duration")
                 .mapNotNull { it.toIntOrNull()?.takeIf { seconds -> seconds > 0 } }
                 .firstOrNull()
             ?: return null

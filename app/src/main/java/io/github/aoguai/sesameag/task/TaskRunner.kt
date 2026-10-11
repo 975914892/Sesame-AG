@@ -27,6 +27,9 @@ import io.github.aoguai.sesameag.util.Notify.updateRunningTaskOrder
 import io.github.aoguai.sesameag.util.TimeUtil
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
@@ -65,6 +68,9 @@ class CoroutineTaskRunner(allModels: List<Model>) {
     private val successCount = AtomicInteger(0)
     private val failureCount = AtomicInteger(0)
     private val skippedCount = AtomicInteger(0)
+    private val cancelledCount = AtomicInteger(0)
+    private val deferredCount = AtomicInteger(0)
+    private val allTasksSucceeded = AtomicBoolean(true)
     private val taskExecutionTimes = ConcurrentHashMap<String, Long>()
     private val longRunningJobs = ConcurrentLinkedQueue<LongRunningJob>()
     private var runSessionOwnerUserId: String? = null
@@ -77,7 +83,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         val taskId: String,
         val startTime: Long,
         val task: ModelTask,
-        val job: Job,
+        val job: Deferred<TaskExecutionOutcome>,
         val releaseResources: () -> Unit
     ) {
         private val released = AtomicBoolean(false)
@@ -102,24 +108,23 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         runSessionOwnerUserId = activeSession?.userId
         runSessionEpoch = activeSession?.sessionEpoch ?: 0L
 
-        // 【互斥检查】如果手动任务流正在运行，则跳过本次自动执行
-        if (ManualTask.isManualRunning) {
-            Log.record(TAG, "⏸ 检测到“手动庄园任务流”正在运行中，跳过本次自动任务调度")
-            return@coroutineScope
-        }
-
         val startSessionCheck = runSessionCheck()
         if (startSessionCheck !is AccountSessionCheck.Current) {
             logSessionInvalid("runner_start", startSessionCheck)
             return@coroutineScope
         }
 
-        if (isFirst) {
-            ApplicationHook.updateDay()
-            resetCounters()
-        }
-
         try {
+            // 手动任务优先，但合法跳过仍须经过 finally 安排下一轮。
+            if (ManualTask.isManualRunning) {
+                Log.record(TAG, "⏸ 检测到“手动庄园任务流”正在运行中，跳过本轮自动执行并保留下轮调度")
+                return@coroutineScope
+            }
+            if (isFirst) {
+                ApplicationHook.updateDay()
+                resetCounters()
+            }
+
             maxConcurrency = BaseModel.taskMaxConcurrency.value ?: DEFAULT_MAX_CONCURRENCY
             taskConcurrencyLimiter = Semaphore(maxConcurrency)
             longRunningTaskLimiter = Semaphore(1)
@@ -139,6 +144,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             for (roundIndex in 0 until rounds) {
                 val roundSessionCheck = runSessionCheck()
                 if (roundSessionCheck !is AccountSessionCheck.Current) {
+                    allTasksSucceeded.set(false)
                     logSessionInvalid("before_round_${roundIndex + 1}", roundSessionCheck)
                     break
                 }
@@ -162,12 +168,19 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                     Log.record(TAG, "⏸ 检测到离线模式，不设置 ${StatusFlags.FLAG_ONCE_DAILY_FINISHED} 标记")
                 } else if (TaskCommon.IS_MODULE_SLEEP_TIME) {
                     Log.record(TAG, "💤 当前处于模块休眠时间，不设置 ${StatusFlags.FLAG_ONCE_DAILY_FINISHED} 标记")
+                } else if (!allTasksSucceeded.get()) {
+                    Log.record(TAG, "仍有失败、中断或待续接任务，不设置 ${StatusFlags.FLAG_ONCE_DAILY_FINISHED} 标记")
                 } else {
                     Status.setFlagToday(StatusFlags.FLAG_ONCE_DAILY_FINISHED)
                 }
             }
 
         } catch (e: CancellationException) {
+            allTasksSucceeded.set(false)
+            longRunningJobs.forEach {
+                it.task.stopTask()
+                it.job.cancel()
+            }
             Log.record(TAG, "🚫 任务流程被取消")
             throw e
         } catch (e: Exception) {
@@ -233,6 +246,10 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 break
             }
             scheduleTaskBatch(round, totalRounds, batchIndex + 1, taskBatches.size, batchTasks).joinAll()
+            if (batchTasks.any(::isLongRunningTask)) {
+                // 只等待本轮主流程；未来到期的 ChildModelTask 仍由模块作用域独立管理。
+                awaitLongRunningJobs()
+            }
         }
 
         val roundTime = System.currentTimeMillis() - roundStartTime
@@ -251,6 +268,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         }
         val batchSessionCheck = runSessionCheck()
         if (batchSessionCheck !is AccountSessionCheck.Current) {
+            allTasksSucceeded.set(false)
             logSessionInvalid("batch_${round}_$batchIndex", batchSessionCheck)
             skippedCount.addAndGet(tasks.size)
             return emptyList()
@@ -270,11 +288,14 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             async {
                 val taskSessionCheck = runSessionCheck()
                 if (taskSessionCheck !is AccountSessionCheck.Current) {
+                    allTasksSucceeded.set(false)
                     Log.record(TAG, "⏸ 任务 ${task.getName()} 因${runSessionCheckDescription(taskSessionCheck)}而中止")
                     skippedCount.incrementAndGet()
                     return@async
                 }
                 if (ManualTask.isManualRunning) {
+                    allTasksSucceeded.set(false)
+                    skippedCount.incrementAndGet()
                     Log.record(TAG, "⏸ 任务 ${task.getName()} 因手动模式启动而中止")
                     return@async
                 }
@@ -297,8 +318,8 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             return matched
         }
 
-        // 批次限定主流程入队边界，不因随机/手动排序跨批，也不清除每日标识或补跑模块。
-        // 普通任务由外层逐批等待；运动、森林、庄园仍走原后台长任务机制，不保证在下一批前完成。
+        // 批次限定依赖顺序，不因随机/手动排序跨批，也不清除每日标识或补跑模块。
+        // 运动、森林、庄园保留长任务超时策略，但本轮主流程结束后才允许后续批次执行。
         val batches = buildList<List<ModelTask>> {
             // 1) 固定：运动优先更新步数，并处理森林可用道具兑换；不能随机到消费者之后。
             takeBatch { it is AntSports }
@@ -393,6 +414,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
 
         val taskSessionCheck = runSessionCheck()
         if (taskSessionCheck !is AccountSessionCheck.Current) {
+            allTasksSucceeded.set(false)
             skippedCount.incrementAndGet()
             Log.record(TAG, "⏸ ${runSessionCheckDescription(taskSessionCheck)}，跳过: $taskName")
             return
@@ -406,6 +428,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
 
         TaskCommon.update()
         if (TaskCommon.IS_ENERGY_TIME && task !is AntForest) {
+            allTasksSucceeded.set(false)
             skippedCount.incrementAndGet()
             Log.record(TAG, "⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，跳过: $taskName")
             return
@@ -438,11 +461,14 @@ class CoroutineTaskRunner(allModels: List<Model>) {
 
             val acquiredSlotSessionCheck = runSessionCheck()
             if (acquiredSlotSessionCheck !is AccountSessionCheck.Current) {
+                allTasksSucceeded.set(false)
                 skippedCount.incrementAndGet()
                 Log.record(TAG, "⏸ 任务 ${task.getName()} 在等待并发槽位后因${runSessionCheckDescription(acquiredSlotSessionCheck)}而中止")
                 return
             }
             if (ManualTask.isManualRunning) {
+                allTasksSucceeded.set(false)
+                skippedCount.incrementAndGet()
                 Log.record(TAG, "⏸ 任务 ${task.getName()} 在等待并发槽位后因手动模式启动而中止")
                 return
             }
@@ -453,7 +479,6 @@ class CoroutineTaskRunner(allModels: List<Model>) {
             }
 
             Log.record(TAG, "▶️ 启动: $taskId")
-            task.addRunCents()
 
             val job = task.startTask(force = false, rounds = 1)
             if (isLongRunning) {
@@ -464,44 +489,33 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                     longRunningJob.releaseResourcesOnce()
                 }
                 if (job.isActive) {
-                    Log.record(TAG, "✨ $taskId 启动成功 (后台运行中)")
+                    Log.record(TAG, "✨ $taskId 已启动，等待本轮执行结果")
                 }
                 return
-            } else {
-                withTimeout(timeout) {
-                    job.join()
-                }
             }
-
-            // 成功
-            val time = System.currentTimeMillis() - startTime
-            val completedTaskSessionCheck = runSessionCheck()
-            if (completedTaskSessionCheck !is AccountSessionCheck.Current) {
-                skippedCount.incrementAndGet()
-                Log.record(TAG, "⏸ ${runSessionCheckDescription(completedTaskSessionCheck)}，中断: $taskId (耗时: ${time}ms)")
-            } else if (ApplicationHookConstants.isOffline()) {
-                skippedCount.incrementAndGet()
-                Log.record(TAG, "⏸ 离线模式中断: $taskId (耗时: ${time}ms)")
-            } else {
-                successCount.incrementAndGet()
-                taskExecutionTimes[taskId] = time
-                Log.record(TAG, "✅ 完成: $taskId (耗时: ${time}ms)")
+            val outcome = withTimeout(timeout) {
+                awaitTaskOutcome(job, taskId)
             }
+            recordTaskOutcome(taskId, startTime, outcome)
 
         } catch (e: TimeoutCancellationException) {
             val time = System.currentTimeMillis() - startTime
 
+            allTasksSucceeded.set(false)
             failureCount.incrementAndGet()
             Log.error(TAG, "⏰ 超时: $taskId (${time}ms > ${timeout}ms)")
             // 尝试停止任务
             task.stopTask()
 
         } catch (e: CancellationException) {
-            skippedCount.incrementAndGet()
+            allTasksSucceeded.set(false)
+            cancelledCount.incrementAndGet()
             Log.record(TAG, "⏸ 任务取消: $taskId (${e.message})")
+            task.stopTask()
             throw e
         } catch (e: Exception) {
             val time = System.currentTimeMillis() - startTime
+            allTasksSucceeded.set(false)
             failureCount.incrementAndGet()
             Log.error(TAG, "❌ 失败: $taskId (${e.message})")
         } finally {
@@ -522,7 +536,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 longRunningJob.job.cancel()
                 longRunningJob.releaseResourcesOnce()
                 longRunningJobs.remove(longRunningJob)
-                skippedCount.incrementAndGet()
+                recordTaskOutcome(longRunningJob.taskId, longRunningJob.startTime, TaskExecutionOutcome.CANCELLED)
                 continue
             }
             if (ApplicationHookConstants.isOffline()) {
@@ -531,28 +545,58 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 longRunningJob.job.cancel()
                 longRunningJob.releaseResourcesOnce()
                 longRunningJobs.remove(longRunningJob)
-                skippedCount.incrementAndGet()
+                recordTaskOutcome(longRunningJob.taskId, longRunningJob.startTime, TaskExecutionOutcome.CANCELLED)
                 continue
             }
             if (!loggedWait) {
                 loggedWait = true
-                Log.record(TAG, "⏳ 等待长任务完成后再调度下次执行")
+                Log.record(TAG, "⏳ 等待前置长任务本轮主流程完成")
             }
-            longRunningJob.job.join()
+            val outcome = awaitTaskOutcome(longRunningJob.job, longRunningJob.taskId)
             longRunningJob.releaseResourcesOnce()
             longRunningJobs.remove(longRunningJob)
-            val time = System.currentTimeMillis() - longRunningJob.startTime
-            val completedLongRunningSessionCheck = runSessionCheck()
-            if (completedLongRunningSessionCheck !is AccountSessionCheck.Current) {
-                skippedCount.incrementAndGet()
-                Log.record(TAG, "⏸ ${runSessionCheckDescription(completedLongRunningSessionCheck)}，中断: ${longRunningJob.taskId} (耗时: ${time}ms)")
-            } else if (ApplicationHookConstants.isOffline()) {
-                skippedCount.incrementAndGet()
-                Log.record(TAG, "⏸ 离线模式中断: ${longRunningJob.taskId} (耗时: ${time}ms)")
-            } else {
+            recordTaskOutcome(longRunningJob.taskId, longRunningJob.startTime, outcome)
+        }
+    }
+
+    private suspend fun awaitTaskOutcome(job: Deferred<TaskExecutionOutcome>, taskId: String): TaskExecutionOutcome =
+        try {
+            job.await()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            TaskExecutionOutcome.CANCELLED
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, "任务执行异常: $taskId", e)
+            TaskExecutionOutcome.FAILED
+        }
+
+    private fun recordTaskOutcome(taskId: String, startTime: Long, result: TaskExecutionOutcome) {
+        val time = System.currentTimeMillis() - startTime
+        val outcome = if (result != TaskExecutionOutcome.FAILED &&
+            (runSessionCheck() !is AccountSessionCheck.Current || ApplicationHookConstants.isOffline())
+        ) TaskExecutionOutcome.CANCELLED else result
+        if (outcome != TaskExecutionOutcome.SUCCESS) allTasksSucceeded.set(false)
+        when (outcome) {
+            TaskExecutionOutcome.SUCCESS -> {
                 successCount.incrementAndGet()
-                taskExecutionTimes[longRunningJob.taskId] = time
-                Log.record(TAG, "✅ 完成: ${longRunningJob.taskId} (耗时: ${time}ms)")
+                taskExecutionTimes[taskId] = time
+                Log.record(TAG, "✅ 完成: $taskId (耗时: ${time}ms)")
+            }
+            TaskExecutionOutcome.FAILED -> {
+                failureCount.incrementAndGet()
+                Log.error(TAG, "❌ 执行失败: $taskId (耗时: ${time}ms)，详见任务错误记录")
+            }
+            TaskExecutionOutcome.SKIPPED -> {
+                skippedCount.incrementAndGet()
+                Log.record(TAG, "⏭ 未执行: $taskId (耗时: ${time}ms)")
+            }
+            TaskExecutionOutcome.CANCELLED -> {
+                cancelledCount.incrementAndGet()
+                Log.record(TAG, "⏸ 中断: $taskId (耗时: ${time}ms)")
+            }
+            TaskExecutionOutcome.DEFERRED -> {
+                deferredCount.incrementAndGet()
+                Log.record(TAG, "⏳ 待续接: $taskId (耗时: ${time}ms)")
             }
         }
     }
@@ -578,6 +622,9 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         successCount.set(0)
         failureCount.set(0)
         skippedCount.set(0)
+        cancelledCount.set(0)
+        deferredCount.set(0)
+        allTasksSucceeded.set(true)
         taskExecutionTimes.clear()
     }
 
@@ -616,7 +663,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
 
         Log.summary(TAG, "=== 执行统计 (并发模式) ===")
         Log.summary(TAG, "总耗时: ${totalTime}ms")
-        Log.summary(TAG, "成功: ${successCount.get()} | 失败: ${failureCount.get()} | 跳过: ${skippedCount.get()}")
+        Log.summary(TAG, "成功: ${successCount.get()} | 失败: ${failureCount.get()} | 跳过: ${skippedCount.get()} | 中断: ${cancelledCount.get()} | 待续接: ${deferredCount.get()}")
         if (taskExecutionTimes.isNotEmpty()) {
             Log.summary(TAG, "平均耗时: %.0fms".format(avgTime))
         }

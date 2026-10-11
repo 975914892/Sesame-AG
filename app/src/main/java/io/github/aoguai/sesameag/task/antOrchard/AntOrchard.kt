@@ -1672,8 +1672,16 @@ class AntOrchard : ModelTask() {
         return resolveTaskUrlSource(task, listOf("source", "chInfo", "alipayFarmSource"))
     }
 
-    private fun resolveTaobaoVisitSource(task: JSONObject): String? =
-        resolveTaskUrlSource(task, listOf("alipayFarmSource", "source", "chInfo"))
+    private fun resolveTaobaoVisitSource(task: JSONObject): String? {
+        resolveTaskUrlSource(task, listOf("alipayFarmSource", "source", "chInfo"))?.let { return it }
+        if (task.optString("taskPlantType") != "TAOBAO" || task.optString("actionType") != "VISIT") {
+            return null
+        }
+        val targetUrl = task.optJSONObject("taskDisplayConfig")?.optString("targetUrl").orEmpty()
+        val pageUrl = UrlUtil.getFullNestedUrl(targetUrl, "url") ?: targetUrl
+        val page = android.net.Uri.parse(pageUrl)
+        return "h5".takeIf { page.scheme in setOf("http", "https") && !page.host.isNullOrBlank() }
+    }
 
     private fun resolveTaskUrlSource(
         task: JSONObject,

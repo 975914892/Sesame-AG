@@ -46,7 +46,7 @@ class BaseModel : Model() {
         modelFields.addField(wakenAtTimeList) // 定时唤醒的时间点列表
         modelFields.addField(allowPersistentForegroundLaunch) // 是否允许持久调度前台拉起目标应用
         modelFields.addField(energyTime) // 能量收集的时间范围
-        modelFields.addField(timedTaskModel) // 定时任务模式选择
+        modelFields.addField(timedTaskModel) // 辅助等待模式选择
         modelFields.addField(timeoutRestart) // 超时是否重启
         modelFields.addField(waitWhenException) // 异常发生时的等待时间
         modelFields.addField(exceptionPauseThreshold) // 连续失败自动挂起阈值
@@ -58,7 +58,7 @@ class BaseModel : Model() {
         modelFields.addField(sendHookData) // 启用Hook数据转发
         modelFields.addField(sendHookDataUrl) // Hook数据转发地址
 
-        modelFields.addField(batteryPerm) // 是否申请模块电池优化豁免
+        modelFields.addField(batteryPerm) // 是否检查模块电池优化豁免
         modelFields.addField(recordLog) // 是否记录record日志
         modelFields.addField(runtimeLog) // 是否记录runtime日志
         modelFields.addField(showToast) // 是否显示气泡提示
@@ -93,7 +93,7 @@ class BaseModel : Model() {
          */
         val stayAwake: BooleanModelField =
             BooleanModelField("stayAwake", "保持唤醒", false).withDesc(
-                "开启后，模块只在任务到期执行窗口短时保持 CPU 唤醒；长时间等待仍依赖系统闹钟或进程内计时。",
+                "为主任务和程序计时的执行窗口申请 CPU 唤醒锁，不控制屏幕常亮；关闭后，持久子任务和定时广播仍保留必要短锁。",
             )
 
         /**
@@ -124,7 +124,7 @@ class BaseModel : Model() {
                 0,
                 24 * 60,
                 60000,
-            ).withDesc("触发网络异常或离线熔断后的冷却时长；填 0 时跟随执行间隔，并受最小保护时间限制。")
+            ).withDesc("用于离线恢复判断的冷却时长；0 跟随执行间隔，至少 3 分钟。到期不自动解除离线，需完成验证或处理异常后返回目标应用。")
 
         /**
          * 任务执行轮数配置
@@ -238,15 +238,15 @@ class BaseModel : Model() {
             ).withDesc("命中该时间段时暂停常规任务执行。")
 
         /**
-         * 定时任务模式选择
+         * 辅助等待模式选择
          */
         val timedTaskModel: ChoiceModelField =
             ChoiceModelField(
                 "timedTaskModel",
-                "定时任务模式",
+                "辅助等待模式",
                 TimedTaskModel.Companion.SYSTEM,
                 TimedTaskModel.Companion.nickNames,
-            ).withDesc("控制进程存活时的等待策略：系统计时使用普通协程等待；程序计时使用进程内等待并在执行窗口短时唤醒，不保证进程被杀后仍执行。")
+            ).withDesc("仅控制辅助等待：系统计时使用普通协程等待；程序计时在开启保持唤醒后为执行窗口申请短锁。轮询、定时唤醒和持久子任务不随此选项切换调度方式。")
 
         /**
          * 超时是否重启
@@ -317,11 +317,11 @@ class BaseModel : Model() {
             )
 
         /**
-         * 是否申请模块自身的电池优化豁免
+         * 是否检查模块自身的电池优化豁免
          */
         val batteryPerm: BooleanModelField =
-            BooleanModelField("batteryPerm", "申请模块电池优化豁免", false).withDesc(
-                "打开模块界面时检查并按标准 Android 流程申请模块自身的忽略电池优化权限；自动调度链路只读取状态并在缺失时降级，不会主动跳转授权页。",
+            BooleanModelField("batteryPerm", "检查模块电池优化豁免", false).withDesc(
+                "初始化时检查模块的电池优化豁免，缺失时记录日志；授权请通过模块首页的权限卡手动申请。",
             )
 
         /**

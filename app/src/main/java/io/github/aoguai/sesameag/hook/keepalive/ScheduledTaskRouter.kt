@@ -13,6 +13,7 @@ import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antForest.EnergyWaitingManager
 import io.github.aoguai.sesameag.task.antMember.AntMember
+import io.github.aoguai.sesameag.task.antSesameCredit.AntSesameCredit
 import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.antStall.AntStall
 import io.github.aoguai.sesameag.util.DataStore
@@ -50,7 +51,7 @@ object ScheduledTaskRouter {
 
     suspend fun fireDueFromModule(context: Context, source: String): Int = deliveryMutex.withLock {
         val now = System.currentTimeMillis()
-        val due = PersistentScheduleRegistry.list().filter {
+        val due = PersistentScheduleRegistry.listFresh().filter {
             it.state == PersistentScheduleState.SCHEDULED && it.triggerAtMs <= now
         }.sortedBy { it.deadlineAtMs() }
         try {
@@ -75,7 +76,7 @@ object ScheduledTaskRouter {
             if (deliverable.isEmpty()) return@withLock due.size
             val identity = AccountSessionCoordinator.currentOrPersistedSessionIdentity()
             val readiness = HookReadyChecker.probe(context, identity?.userId.orEmpty())
-            var launchAttempted = PersistentScheduleRegistry.list().any {
+            var launchAttempted = PersistentScheduleRegistry.listFresh().any {
                 it.state == PersistentScheduleState.SCHEDULED && it.lastError == "launch_pending"
             }
             for (schedule in deliverable) {
@@ -371,6 +372,16 @@ object ScheduledTaskRouter {
                 } else {
                     RouteResult.FAILED
                 }
+            }
+            return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
+        }
+        if (childKind == AntSesameCredit.PERSISTENT_CONFIRMATION_KIND) {
+            if (targetProcess) {
+                val sesame = Model.getModel(AntSesameCredit::class.java) ?: return RouteResult.DEFERRED
+                if (!sesame.isEnable()) return RouteResult.SKIPPED
+                return if (sesame.triggerPersistentConfirmation(schedule.payloadJson, schedule.id, source)) {
+                    RouteResult.HANDLED
+                } else RouteResult.FAILED
             }
             return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
         }

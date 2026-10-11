@@ -33,12 +33,12 @@ object PersistentScheduleRegistry {
     @Volatile
     private var storageReady = false
 
-    // 内存缓存：注册表的真实来源。读路径(get/list/markFired 等)只读缓存副本，
-    // 避免每次从磁盘整表解析；写路径写穿透到磁盘，保留进程被杀后的持久恢复能力。
+    // 普通查询复用缓存；认领、更新和物理规划在跨进程锁内从磁盘刷新。
     private val cacheLock = Any()
     private var cache: MutableList<PersistentSchedule>? = null
     private val registryMutationLock = Any()
     private val registryLockDepth = ThreadLocal<Int>()
+    private var recoveredExecutionsInProcess = false
 
     data class ReconcileResult(
         val dueSchedules: List<PersistentSchedule>,
@@ -49,7 +49,12 @@ object PersistentScheduleRegistry {
     fun upsert(
         context: Context,
         schedule: PersistentSchedule,
-    ): PersistentSchedule = withRegistryLock { upsertUnlocked(context, schedule) }
+    ): PersistentSchedule = try {
+        withRegistryLock { upsertUnlocked(context, schedule) }
+    } catch (e: Exception) {
+        Log.printStackTrace(TAG, "持久调度读写失败[${schedule.name}]", e)
+        schedule.withFailure("persistent_storage_unavailable")
+    }
 
     private fun upsertUnlocked(
         context: Context,
@@ -71,10 +76,21 @@ object PersistentScheduleRegistry {
         val prepared = PersistentLaunchPolicy.prepareScheduleForRegistration(context, normalized)
         val effectiveSchedule = prepared.schedule
         val schedules = loadMutable()
+        val globalSuccessor = effectiveSchedule.kind in setOf(
+            PersistentScheduleKind.GLOBAL_POLL,
+            PersistentScheduleKind.GLOBAL_WAKEUP,
+            PersistentScheduleKind.GLOBAL_PREWAKEUP,
+        )
         val removed =
             schedules.filter {
+                // 后继全局计划不能覆盖已认领或延期中的当前次；子任务保留原替换语义。
+                val currentOccurrence = it.state == PersistentScheduleState.QUEUED ||
+                    it.state == PersistentScheduleState.RUNNING ||
+                    (it.state == PersistentScheduleState.SCHEDULED && it.lastFireAtMs > 0L)
                 it.id == effectiveSchedule.id ||
-                    (effectiveSchedule.dedupeKey.isNotBlank() && it.dedupeKey == effectiveSchedule.dedupeKey)
+                    (effectiveSchedule.dedupeKey.isNotBlank() && it.dedupeKey == effectiveSchedule.dedupeKey &&
+                        !(globalSuccessor && currentOccurrence &&
+                            it.ownerUserId == effectiveSchedule.ownerUserId && it.sessionEpoch == effectiveSchedule.sessionEpoch))
             }
         if (prepared.blockedReason != null) {
             if (removed.isNotEmpty()) {
@@ -95,8 +111,8 @@ object PersistentScheduleRegistry {
         schedules.removeAll(removed.toSet())
         schedules.add(effectiveSchedule)
         save(schedules)
-        removed.forEach { SystemWakeScheduler.cancelLaunchConfirmationTimeout(it.id) }
         if (SystemWakeScheduler.schedule(context, effectiveSchedule, silent = true)) {
+            removed.forEach { SystemWakeScheduler.cancelLaunchConfirmationTimeout(it.id) }
             Log.runtime(TAG, "${if (removed.isEmpty()) "新增" else "替换"}持久调度[${effectiveSchedule.name}] 已重排物理闹钟")
             return effectiveSchedule
         }
@@ -211,6 +227,8 @@ object PersistentScheduleRegistry {
         return loadMutable().firstOrNull { it.id == id }
     }
 
+    fun listFresh(): List<PersistentSchedule> = withRegistryLock { list() }
+
     fun list(): List<PersistentSchedule> {
         if (!ensureStorage()) return emptyList()
         return loadMutable().toList()
@@ -244,7 +262,7 @@ object PersistentScheduleRegistry {
         now: Long = System.currentTimeMillis(),
     ): Int {
         val due =
-            list()
+            listFresh()
                 .asSequence()
                 .filter { schedule ->
                     schedule.state == PersistentScheduleState.SCHEDULED &&
@@ -275,6 +293,27 @@ object PersistentScheduleRegistry {
         save(emptyList())
         schedules.forEach { SystemWakeScheduler.cancelLaunchConfirmationTimeout(it.id) }
         context?.let { ctx -> SystemWakeScheduler.schedule(ctx, PersistentSchedule(), silent = true) }
+    }
+
+    /** 在宿主发布首个运行时会话前调用；恢复广播不能重置当前进程的 Worker。 */
+    internal fun recoverInterruptedExecutions(ownerUserId: String, sessionEpoch: Long) = withRegistryLock {
+        if (recoveredExecutionsInProcess || ownerUserId.isBlank() || sessionEpoch <= 0L || !ensureStorage()) {
+            return@withRegistryLock
+        }
+        val now = System.currentTimeMillis()
+        val schedules = loadMutable()
+        val recovered = schedules.map { schedule ->
+            if (schedule.ownerUserId?.trim() == ownerUserId.trim() &&
+                schedule.sessionEpoch == sessionEpoch && schedule.state in activeModuleChildStates
+            ) {
+                // QUEUED 也可能已交给 Worker，不能用旧执行态推断 RPC 未提交。
+                SystemWakeScheduler.cancelLaunchConfirmationTimeout(schedule.id)
+                Log.error(TAG, "持久任务因宿主进程退出而中断[${schedule.name}] id=${schedule.id} state=${schedule.state}，保留业务待确认数据")
+                schedule.withFailure("host_process_restarted_unconfirmed", now)
+            } else schedule
+        }
+        if (recovered != schedules) save(recovered)
+        recoveredExecutionsInProcess = true
     }
 
     fun activateSession(
@@ -379,14 +418,15 @@ object PersistentScheduleRegistry {
         id: String,
         now: Long = System.currentTimeMillis(),
         source: String = "registry",
-    ) {
-        updateSchedule(id, source) { schedule ->
-            if (schedule.state == PersistentScheduleState.QUEUED || schedule.state == PersistentScheduleState.SCHEDULED) {
-                schedule.withRunning(now)
-            } else {
-                schedule
-            }
-        }
+        expected: PersistentSchedule? = null,
+    ): Boolean = withRegistryLock {
+        val current = get(id) ?: return@withRegistryLock false
+        if (expected != null && current != expected) return@withRegistryLock false
+        if (current.state != PersistentScheduleState.QUEUED &&
+            (expected != null || current.state != PersistentScheduleState.SCHEDULED)
+        ) return@withRegistryLock false
+        updateSchedule(id, source) { it.withRunning(now) }
+        true
     }
 
     fun beginDeliveryWait(
@@ -619,10 +659,8 @@ object PersistentScheduleRegistry {
                         retained.add(schedule)
                         Log.record(TAG, "发现到期持久任务[${schedule.name}] ${TimeUtil.getCommonDate(schedule.triggerAtMs)}")
                     } else {
-                        expired++
-                        SystemWakeScheduler.cancelLaunchConfirmationTimeout(schedule.id)
-                        retained.add(schedule.withScheduleState(PersistentScheduleState.EXPIRED, now))
-                        Log.runtime(TAG, "恢复重排跳过已到期持久任务[${schedule.name}] ${TimeUtil.getCommonDate(schedule.triggerAtMs)}")
+                        retained.add(schedule)
+                        Log.runtime(TAG, "恢复重排保留窗口内到期任务[${schedule.name}] ${TimeUtil.getCommonDate(schedule.triggerAtMs)}")
                     }
                 } else {
                     expired++
@@ -645,7 +683,7 @@ object PersistentScheduleRegistry {
         save(retained)
         val replanSucceeded =
             SystemWakeScheduler.schedule(context, retained.firstOrNull() ?: PersistentSchedule(), silent = true)
-        if (replanSucceeded && retained.any { it.state == PersistentScheduleState.SCHEDULED && it.triggerAtMs > now }) {
+        if (replanSucceeded && retained.any { it.state == PersistentScheduleState.SCHEDULED }) {
             rescheduled = 1
         }
         return ReconcileResult(
@@ -759,8 +797,8 @@ object PersistentScheduleRegistry {
             try {
                 DataStore.getOrCreate(STORE_KEY, scheduleListType)
             } catch (t: Throwable) {
-                Log.printStackTrace(TAG, "读取持久调度列表失败", t)
-                mutableListOf()
+                Log.printStackTrace(TAG, "读取持久调度列表失败，中止本次操作", t)
+                throw t
             }
         synchronized(cacheLock) {
             if (cache == null) {
@@ -771,7 +809,7 @@ object PersistentScheduleRegistry {
     }
 
     private fun save(schedules: List<PersistentSchedule>) {
-        if (!ensureStorage()) return
+        check(ensureStorage()) { "persistent_storage_unavailable" }
         val snapshot = schedules.toMutableList()
         // DataStore 写入会触发跨进程缓存失效回调；必须先落盘，避免 cacheLock 与 DataStore 写锁反向等待。
         DataStore.put(STORE_KEY, snapshot)
@@ -806,32 +844,17 @@ object PersistentScheduleRegistry {
         }
     }
 
-    private fun <T> withRegistryLock(block: () -> T): T {
+    internal fun <T> withRegistryLock(block: () -> T): T {
         synchronized(registryMutationLock) {
             if ((registryLockDepth.get() ?: 0) > 0) {
                 return block()
             }
-            if (!ensureStorage()) {
-                return block()
-            }
+            check(ensureStorage()) { "persistent_storage_unavailable" }
             val lockFile = java.io.File(Files.CONFIG_DIR, ".persistent-schedules.lock")
-            lockFile.parentFile?.mkdirs()
-            val file =
-                try {
-                    RandomAccessFile(lockFile, "rw")
-                } catch (t: java.io.IOException) {
-                    Log.printStackTrace(TAG, "打开持久调度锁文件失败，退回进程内互斥", t)
-                    return block()
-                }
-            file.use { randomAccessFile ->
-                val fileLock =
-                    try {
-                        randomAccessFile.channel.lock()
-                    } catch (t: java.io.IOException) {
-                        Log.printStackTrace(TAG, "获取持久调度跨进程锁失败，退回进程内互斥", t)
-                        return block()
-                    }
-                fileLock.use {
+            RandomAccessFile(lockFile, "rw").use { randomAccessFile ->
+                lockFile.setReadable(true, false)
+                lockFile.setWritable(true, false)
+                randomAccessFile.channel.lock().use {
                     registryLockDepth.set(1)
                     try {
                         // 锁内一律舍弃本地快照，整表读改写以最新磁盘状态为起点。

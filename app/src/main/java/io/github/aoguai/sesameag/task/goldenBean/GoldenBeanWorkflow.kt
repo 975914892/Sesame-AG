@@ -2,6 +2,10 @@ package io.github.aoguai.sesameag.task.goldenBean
 
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.task.common.GameCenterPlayRpcCall
+import io.github.aoguai.sesameag.task.common.DeferredReason
+import io.github.aoguai.sesameag.util.CoroutineUtils
+import kotlinx.coroutines.runBlocking
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
@@ -185,7 +189,7 @@ private class GoldenBeanTaskFlowAdapter(
             "FINISHED", "TO_RECEIVE" -> TaskFlowPhase.REWARD_READY
             "RECEIVED", "DONE" -> TaskFlowPhase.TERMINAL
             "TODO" -> {
-                if (hasCapturedFinishContract(item)) {
+                if (hasTaskAction(item)) {
                     TaskFlowPhase.READY_TO_COMPLETE
                 } else {
                     TaskFlowPhase.UNKNOWN
@@ -201,13 +205,13 @@ private class GoldenBeanTaskFlowAdapter(
         if (item.status.uppercase() != "TODO") {
             return false
         }
-        if (hasCapturedFinishContract(item)) {
+        if (hasTaskAction(item)) {
             return false
         }
         if (loggedDeferredTaskIds.add(item.id)) {
             Log.goldenBean(
                 "金豆夺宝任务⏭️[taskId=${item.id} actionType=${item.actionType.ifBlank { "UNKNOWN" }} " +
-                    "sceneCode=${item.sceneCode.ifBlank { "UNKNOWN" }}] 未捕获主动动作，仅保留服务端状态",
+                    "sceneCode=${item.sceneCode.ifBlank { "UNKNOWN" }}] 等待对应业务动作完成后回查任务",
             )
         }
         return true
@@ -231,6 +235,43 @@ private class GoldenBeanTaskFlowAdapter(
     override fun complete(item: TaskFlowItem): TaskFlowActionResult {
         if (item.type.isBlank()) {
             return GoldenBeanTreasureSupport.missingTaskTypeFailure(item, "complete")
+        }
+        if (item.actionType == "VISIT") {
+            val decision = GameCenterPlayRpcCall.resolveTaskAction(item.raw)
+            when (decision.action) {
+                GameCenterPlayRpcCall.TaskAction.DURATION_ONLY -> {
+                    val contract = requireNotNull(decision.contract)
+                    var reported = 0
+                    while (reported < contract.playTime) {
+                        val seconds = minOf(30, contract.playTime - reported)
+                        CoroutineUtils.sleepCompat(seconds * 1000L)
+                        val ack = GameCenterPlayRpcCall.submitForAck(contract.copy(playTime = seconds))
+                        if (!ack.accepted) return TaskFlowActionResult.failure(
+                            failureType = ack.failureType, message = "金豆游戏时长上报未成功",
+                            rpc = "submitUserPlayDurationAction", raw = ack.raw,
+                            detail = "taskId=${item.type}", continueCurrentRoundOnFailure = true,
+                        )
+                        reported += seconds
+                    }
+                }
+                GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT -> {
+                    val count = ((item.limit ?: 1) - (item.current ?: 0)).coerceAtLeast(1)
+                    val report = runBlocking {
+                        requireNotNull(decision.mappedTask).reportDetailed(count, GOLDEN_BEAN_GAME_CHANNEL,
+                            includeSafetyReport = false) { Log.goldenBean(it) }
+                    }
+                    if (!report.completed) return TaskFlowActionResult.failure(
+                        failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                        message = report.failureMessage, rpc = "GameTask.reportDetailed",
+                        detail = "taskId=${item.type}", continueCurrentRoundOnFailure = true,
+                    )
+                }
+                else -> return TaskFlowActionResult.defer(
+                    DeferredReason.PREREQUISITE_PENDING, "等待对应游戏业务条件", refreshAfterAction = true,
+                )
+            }
+            nextQuerySyncTypes = TASK_STATUS_SYNC_TYPES
+            return TaskFlowActionResult.success(refreshAfterAction = true)
         }
         val response = GoldenBeanTreasureSupport.parseResponse(GoldenBeanRpcCall.finishTask(item.type, entry))
             ?: return GoldenBeanTreasureSupport.emptyResponseFailure(item, "complete")
@@ -333,19 +374,17 @@ private class GoldenBeanTaskFlowAdapter(
             .any { TaskBlacklist.isTaskInBlacklist(moduleName, it) }
     }
 
-    private fun hasCapturedFinishContract(item: TaskFlowItem): Boolean {
-        if (item.sceneCode != entry.taskSceneCode || item.type.isBlank()) {
-            return false
-        }
-        return when (entry) {
-            GoldenBeanRpcCall.MASTER_ENTRY ->
-                item.actionType == GoldenBeanRpcCall.WAKUANG_ACTION_TYPE ||
-                    (item.type == GoldenBeanRpcCall.JINDOULEYUAN_TASK_TYPE &&
-                        item.actionType == GoldenBeanRpcCall.JINDOULEYUAN_ACTION_TYPE)
-
-            GoldenBeanRpcCall.ZHIMA_ENTRY -> item.actionType == GoldenBeanRpcCall.WAKUANG_ACTION_TYPE
-            else -> false
-        }
+    private fun hasTaskAction(item: TaskFlowItem): Boolean {
+        if (item.sceneCode != entry.taskSceneCode || item.type.isBlank()) return false
+        if (item.actionType == GoldenBeanRpcCall.WAKUANG_ACTION_TYPE ||
+            item.actionType == "COMMON_USED_VISIT" ||
+            (entry == GoldenBeanRpcCall.MASTER_ENTRY && item.type == GoldenBeanRpcCall.JINDOULEYUAN_TASK_TYPE &&
+                item.actionType == GoldenBeanRpcCall.JINDOULEYUAN_ACTION_TYPE)) return true
+        val decision = GameCenterPlayRpcCall.resolveTaskAction(item.raw)
+        return decision.action in setOf(
+            GameCenterPlayRpcCall.TaskAction.DURATION_ONLY,
+            GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT,
+        )
     }
 
     private fun buildTaskProgress(task: JSONObject): String {

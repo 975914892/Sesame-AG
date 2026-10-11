@@ -33,6 +33,7 @@ import io.github.aoguai.sesameag.hook.internal.LocationHelper
 import io.github.aoguai.sesameag.hook.internal.SecurityBodyHelper
 import io.github.aoguai.sesameag.hook.keepalive.PersistentLaunchPolicy
 import io.github.aoguai.sesameag.hook.keepalive.PersistentReconcileMode
+import io.github.aoguai.sesameag.hook.keepalive.PersistentSchedule
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
 import io.github.aoguai.sesameag.hook.keepalive.PersistentSchedulePrecisionPolicy
@@ -427,6 +428,7 @@ class ApplicationHook {
                     val recentlyReopenedByModule = ApplicationResumeCoordinator.wasRecentlyReopenedByModule(resumeAt)
                     if (
                         resumedFromBackground &&
+                        !persistentAlarmLaunch &&
                         !moduleInitiatedResume &&
                         !recentlyReopenedByModule &&
                         !recoveredFromOffline &&
@@ -662,6 +664,9 @@ class ApplicationHook {
             val mainTaskRunning: Boolean,
             val pendingTriggers: Int,
             val schedulerTasks: Int,
+            val poll: PersistentSchedule?,
+            val intervalMs: Int,
+            val execTimes: String?,
         )
 
         @Volatile
@@ -743,6 +748,12 @@ class ApplicationHook {
             val running = mainTask?.isRunning == true
             val pending = ApplicationHookConstants.pendingTriggerCount()
             val scheduled = UnifiedScheduler.activeTaskCount()
+            val session = AccountSessionCoordinator.currentSession()
+            val poll = PersistentScheduleRegistry.listFresh().filter {
+                it.kind == PersistentScheduleKind.GLOBAL_POLL &&
+                    it.state == PersistentScheduleState.SCHEDULED &&
+                    it.ownerUserId == session?.userId && it.sessionEpoch == session?.sessionEpoch
+            }.minByOrNull { it.triggerAtMs }
             val decision =
                 ReloadResumeDecision(
                     reason = reason,
@@ -752,6 +763,9 @@ class ApplicationHook {
                     mainTaskRunning = running,
                     pendingTriggers = pending,
                     schedulerTasks = scheduled,
+                    poll = poll,
+                    intervalMs = checkInterval.value ?: 0,
+                    execTimes = execAtTimeList.value,
                 )
             reloadResumeDecision = decision
             record(
@@ -761,16 +775,25 @@ class ApplicationHook {
             )
         }
 
-        internal fun consumeReloadResumeDecision(reason: String): Boolean {
+        internal fun resumeSchedulingAfterReload(reason: String): Boolean {
             val decision = reloadResumeDecision
             if (decision == null || decision.reason != reason) {
                 if (shouldCaptureReloadState(reason)) {
-                    record(TAG, "reload completed without snapshot, keep idle: reason=$reason")
+                    record(TAG, "reload completed without snapshot, rebuild next poll: reason=$reason")
+                    scheduleNextExecutionInternal(System.currentTimeMillis())
                 }
                 return false
             }
             reloadResumeDecision = null
             if (!decision.shouldResume) {
+                val now = System.currentTimeMillis()
+                val preservedPoll = decision.poll?.takeIf {
+                    it.ownerUserId == AccountSessionCoordinator.currentUserId() &&
+                        now <= it.deadlineAtMs() &&
+                        decision.intervalMs == (checkInterval.value ?: 0) &&
+                        decision.execTimes == execAtTimeList.value
+                }
+                scheduleNextExecutionInternal(now, preservedPoll)
                 record(
                     TAG,
                     "reload idle preserved: reason=$reason mainTaskRunning=${decision.mainTaskRunning} " +
@@ -1066,14 +1089,17 @@ class ApplicationHook {
             }
         }
 
-        fun scheduleNextExecutionInternal(baseTime: Long) {
+        fun scheduleNextExecutionInternal(baseTime: Long, preservedPoll: PersistentSchedule? = null) {
             try {
                 checkInactiveTime()
                 val checkInterval = checkInterval.value ?: 0
                 val execScheduleField = execAtTimeList
                 var delayMillis = checkInterval.toLong()
                 var targetTime: Long = 0
-                if (execScheduleField.isDisabled()) {
+                if (preservedPoll != null) {
+                    targetTime = preservedPoll.triggerAtMs
+                    record(TAG, "配置重载保留原轮询时间:${TimeUtil.getCommonDate(targetTime)}")
+                } else if (execScheduleField.isDisabled()) {
                     record(TAG, "定时执行已关闭，保留轮询间隔调度")
                 } else {
                     val intervalTargetTime = baseTime + checkInterval.toLong()
@@ -1100,10 +1126,12 @@ class ApplicationHook {
                             kind = PersistentScheduleKind.GLOBAL_POLL,
                             triggerAtMs = triggerAt,
                             dedupeKey = "alarm_poll",
-                            precisionPolicy = if (targetTime > 0) PersistentSchedulePrecisionPolicy.USER_EXACT
+                            precisionPolicy = preservedPoll?.effectivePrecisionPolicy()
+                                ?: if (targetTime > 0) PersistentSchedulePrecisionPolicy.USER_EXACT
                                 else PersistentSchedulePrecisionPolicy.FLEXIBLE_POLL,
                             payloadJson = "{}",
-                            toleranceMs = maxOf(checkInterval.toLong(), PersistentScheduleDefaults.DEFAULT_TOLERANCE_MS),
+                            toleranceMs = preservedPoll?.let { (it.deadlineAtMs() - it.triggerAtMs).coerceAtLeast(0L) }
+                                ?: maxOf(checkInterval.toLong(), PersistentScheduleDefaults.DEFAULT_TOLERANCE_MS),
                             ownerUserId = activeSession?.userId ?: currentUid,
                             sessionEpoch = activeSession?.sessionEpoch ?: AccountSessionCoordinator.currentSessionEpoch(),
                         )
@@ -1167,6 +1195,12 @@ class ApplicationHook {
                     return false
                 }
 
+                // 切换会话会先推进 epoch，必须在此之前捕获旧计划及其配置。
+                if (init && shouldCaptureReloadState(reason)) {
+                    captureReloadResumeDecision(reason)
+                } else {
+                    reloadResumeDecision = null
+                }
                 val allowPersistedSessionReuse =
                     !init &&
                         (reason == "onResume" || reason == "service_onCreate")
@@ -1186,14 +1220,8 @@ class ApplicationHook {
                     is AccountSlotAdmission.Allowed -> result
                 }
                 if (init) {
-                    if (shouldCaptureReloadState(reason)) {
-                        captureReloadResumeDecision(reason)
-                    } else {
-                        reloadResumeDecision = null
-                    }
                     destroyHandlerInternal("reinit_$reason", invalidateSession = false)
                 } else {
-                    reloadResumeDecision = null
                     EnergyWaitingManager.resetForSessionSwitch(reason)
                 }
 

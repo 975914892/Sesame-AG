@@ -61,6 +61,7 @@ import java.util.concurrent.ConcurrentHashMap
 class AntStall : ModelTask() {
     private enum class StallTaskCompleteRoute {
         GAME_PLAY_DURATION,
+        BUSINESS_ACTION,
         FINISH,
         DAILY_QA,
         INVITE_REGISTER,
@@ -1466,6 +1467,8 @@ class AntStall : ModelTask() {
                     blacklistKeys = listOf(taskType, taskTitle).filter { it.isNotBlank() },
                     raw = raw,
                     progress = "actionType=${actionType.ifBlank { "UNKNOWN" }} award=$awardCount",
+                    current = if (task.has("taskProgress") && !task.isNull("taskProgress")) task.optInt("taskProgress") else null,
+                    limit = if (task.has("taskRequire") && !task.isNull("taskRequire")) task.optInt("taskRequire") else null,
                 ),
             )
         }
@@ -1513,7 +1516,12 @@ class AntStall : ModelTask() {
             return when {
                 isStallRewardReadyStatus(item.status) -> TaskFlowPhase.REWARD_READY
                 isStallTerminalStatus(item.status) -> TaskFlowPhase.TERMINAL
-                isStallTodoStatus(item.status) -> TaskFlowPhase.READY_TO_COMPLETE
+                isStallTodoStatus(item.status) ->
+                    if (resolveStallTaskCompleteRoute(item) == StallTaskCompleteRoute.BUSINESS_ACTION) {
+                        TaskFlowPhase.BUSINESS_ACTION
+                    } else {
+                        TaskFlowPhase.READY_TO_COMPLETE
+                    }
                 else -> TaskFlowPhase.UNKNOWN
             }
         }
@@ -1524,6 +1532,9 @@ class AntStall : ModelTask() {
             }
 
             val phase = mapPhase(item)
+            if (phase == TaskFlowPhase.BUSINESS_ACTION) {
+                logStallTaskOnce("新村任务⛪[${item.title}]等待游戏业务完成确认，进度=${item.current ?: "未知"}/${item.limit}")
+            }
             if (phase == TaskFlowPhase.REWARD_READY && stallReceiveAward.value != true) {
                 logStallTaskOnce("新村任务⛪[${item.title}]已完成，未开启领奖，跳过领取")
                 return true
@@ -1560,6 +1571,11 @@ class AntStall : ModelTask() {
                 else -> {
                     when (resolveStallTaskCompleteRoute(item)) {
                         StallTaskCompleteRoute.GAME_PLAY_DURATION -> completeGamePlayDurationTask(item)
+                        StallTaskCompleteRoute.BUSINESS_ACTION -> TaskFlowActionResult.defer(
+                            DeferredReason.PREREQUISITE_PENDING,
+                            message = "等待游戏业务完成确认，进度=${item.current ?: "未知"}/${item.limit}",
+                            detail = stallTaskActionDetail(item, "business"),
+                        )
                         StallTaskCompleteRoute.DAILY_QA -> {
                             completeDailyQuestionTask(item)
                         }
@@ -2462,8 +2478,19 @@ class AntStall : ModelTask() {
             item.type == STALL_DAILY_QA_TASK_TYPE -> StallTaskCompleteRoute.DAILY_QA
             item.type == STALL_INVITE_REGISTER_TASK_TYPE -> StallTaskCompleteRoute.INVITE_REGISTER
             item.type == STALL_OPEN_SHOP_TASK_TYPE -> StallTaskCompleteRoute.OPEN_SHOP
-            stallGamePlayContract(item) != null -> StallTaskCompleteRoute.GAME_PLAY_DURATION
-            else -> StallTaskCompleteRoute.FINISH
+            else -> {
+                val descriptor = GameCenterPlayRpcCall.describeTask(item.raw)
+                val bizInfo = item.raw?.optJSONObject("bizInfo")
+                when {
+                    // 新村页面倒计时由原完成接口处理，不等同于游戏中心时长上报。
+                    descriptor.isGameTask && bizInfo?.optString("taskMode") == "COUNT_DOWN" &&
+                        (bizInfo?.optInt("countDownSeconds") ?: 0) > 0 -> StallTaskCompleteRoute.FINISH
+                    descriptor.contract != null -> StallTaskCompleteRoute.GAME_PLAY_DURATION
+                    item.actionType == "VISIT_AUTO_FINISH" -> StallTaskCompleteRoute.FINISH
+                    descriptor.isGameTask && (item.limit ?: 0) > 0 -> StallTaskCompleteRoute.BUSINESS_ACTION
+                    else -> StallTaskCompleteRoute.FINISH
+                }
+            }
         }
 
     private fun isDynamicXLightTask(item: TaskFlowItem): Boolean {

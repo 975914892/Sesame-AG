@@ -2,6 +2,13 @@ package io.github.aoguai.sesameag.task.antMember
 
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
+import io.github.aoguai.sesameag.hook.HookReadyChecker
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
+import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
+import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -10,6 +17,65 @@ import java.util.Calendar
 internal fun AntMember.runBillBlockWorld() {
     BillBlockWorldWorkflow().run()
 }
+
+internal fun AntMember.loadBillCoinOptionsForSettings(): List<ExchangeOptionRow> {
+    val target = ExchangeOptionsRefreshBridge.TARGET_BILL_COIN
+    ExchangeOptionsCache.loadTodaySnapshot(UserMap.currentUid, target)?.let { return it.rows }
+    val cached = ExchangeOptionsCache.loadForSettingsCache(UserMap.currentUid, target)
+    if (HookReadyChecker.isCurrentProcessReadyForRpc(UserMap.currentUid)) {
+        return runCatching { refreshBillCoinOptionsForRemote() }.getOrElse {
+            Log.printStackTrace("AntMemberBillBlockWorld", "贴贴币目录查询失败", it)
+            cached
+        }
+    }
+    if (!HookReadyChecker.isTargetAppReadyForRpc(UserMap.currentUid)) return cached
+    val result = ExchangeOptionsRefreshBridge.requestRefreshOptions(target, UserMap.currentUid)
+    if (!result.success) Log.error("AntMemberBillBlockWorld", "贴贴币目录刷新失败:${result.message}")
+    return if (result.success) result.options else cached
+}
+
+internal fun AntMember.refreshBillCoinOptionsForRemote(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+    ExchangeOptionsCache.getOrFetch(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_BILL_COIN, forceRefresh) { session ->
+        val home = session.read("home", JSONObject(), "贴贴币余额") { JSONObject(AntMemberRpcCall.queryBillCoinShop()) }
+        check(home.optBoolean("success") && home.optInt("resultCode") == 200) { "贴贴币首页查询失败:$home" }
+        val products = linkedMapOf<String, JSONObject>()
+        var finished = false
+        for (page in 1..100) {
+            if (page > 1) session.pageTurnDelay()
+            val response = session.read("products", JSONObject().put("pageNo", page), "贴贴币商品第${page}页") {
+                JSONObject(AntMemberRpcCall.queryBillCoinProducts(page))
+            }
+            check(response.optBoolean("success") && response.optInt("resultCode") == 200) { "贴贴币商品查询失败:$response" }
+            val list = response.optJSONArray("productList") ?: error("贴贴币商品列表缺失")
+            val before = products.size
+            for (i in 0 until list.length()) {
+                val product = list.getJSONObject(i)
+                val id = product.optString("prizeId")
+                check(id.isNotBlank()) { "贴贴币商品缺少prizeId" }
+                products[id] = product
+            }
+            check(response.has("hasNextPage")) { "贴贴币商品分页结束状态缺失" }
+            val hasNext = response.getBoolean("hasNextPage")
+            session.commit(JSONObject().put("pageNo", page + 1), products.size - before,
+                if (hasNext) "贴贴币商品第${page + 1}页" else "商品目录读取完成")
+            if (!hasNext) { finished = true; break }
+            check(products.size > before) { "贴贴币目录重复页面，保留未完成查询" }
+        }
+        check(finished) { "贴贴币目录达到分页上限，保留未完成查询" }
+        val rows = products.map { (id, product) ->
+            ExchangeOptionRow().apply {
+                this.id = id
+                rawName = product.optString("name", id)
+                name = rawName
+                sourceModule = "账单贴贴币"
+                costText = "${product.optInt("needCoinCount", -1)}贴贴币 / ${product.optString("needCashAmount", "未知")}元"
+                statusText = product.optString("tagText")
+                safety = ExchangeSafety.LOG_ONLY.name
+                safetyReason = "兑换前缺少商品类型信息，暂不自动兑换"
+            }
+        }
+        ExchangeOptionsSnapshot(rows, JSONObject().put("home", home).put("products", JSONArray(products.values.toList())))
+    }.rows
 
 private data class BlockWorldCanvas(
     val chapterId: String,

@@ -18,6 +18,7 @@ import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.task.antMember.AntMember
+import io.github.aoguai.sesameag.task.antMember.refreshBillCoinOptionsForRemote
 import io.github.aoguai.sesameag.task.antSesameCredit.AntSesameCredit
 import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.customTasks.CustomTask
@@ -593,7 +594,12 @@ internal object ApplicationBroadcastDispatcher {
                             ?: error("会员模块未初始化")
                     }
 
-                    ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT -> {
+                    ExchangeOptionsRefreshBridge.TARGET_BILL_COIN -> {
+                    Model.getModel(AntMember::class.java)?.refreshBillCoinOptionsForRemote(forceRefresh)
+                        ?: error("会员模块未初始化")
+                }
+
+                ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT -> {
                         Model.getModel(AntMember::class.java)?.refreshBeanExchangeRightOptionsForRemote(forceRefresh)
                             ?: error("会员模块未初始化")
                     }

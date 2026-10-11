@@ -51,7 +51,7 @@ internal object ApplicationResumeCoordinator {
         if (!hostAppForeground) {
             foregroundSessionEpoch++
         }
-        hostAppWentBackground = false
+        // 当前前台状态与“从后台返回”事件分开更新，由入口消费返回事件。
         hostAppForeground = true
         persistHostAppForeground(true)
     }
@@ -174,6 +174,8 @@ internal object ApplicationResumeCoordinator {
                 sessionEpoch = AccountSessionCoordinator.currentSessionEpoch()
             )
         )
+        // Login 入口已恢复时，后续 Launcher.onResume 不应再按人工返回补跑。
+        clearBackgroundFlag()
         return true
     }
 

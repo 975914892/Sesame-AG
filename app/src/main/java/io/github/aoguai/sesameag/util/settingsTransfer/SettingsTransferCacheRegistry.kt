@@ -22,6 +22,7 @@ object SettingsTransferCacheRegistry {
     )
 
     private val rules = listOf(
+        CacheRule("exchange_bill_coin", ConfigPortScope.ACCOUNT_PRIVATE, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_BILL_COIN}.json"),
         CacheRule("exchange_member_point", ConfigPortScope.GENERIC, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT}.json"),
         CacheRule("exchange_mybank_welfare", ConfigPortScope.GENERIC, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE}.json"),
         CacheRule("exchange_bean_right", ConfigPortScope.GENERIC, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT}.json"),

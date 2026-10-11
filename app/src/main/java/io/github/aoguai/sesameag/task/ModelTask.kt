@@ -2,6 +2,11 @@ package io.github.aoguai.sesameag.task
 
 import android.annotation.SuppressLint
 import io.github.aoguai.sesameag.data.RuntimeInfo
+import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.ApplicationHook
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.Model
@@ -15,6 +20,7 @@ import io.github.aoguai.sesameag.util.Notify.sendAlert
 import io.github.aoguai.sesameag.util.Notify.startTaskRunning
 import io.github.aoguai.sesameag.util.Notify.updateRunningNextExec
 import io.github.aoguai.sesameag.util.TimeUtil
+import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -58,7 +64,7 @@ abstract class ModelTask : Model() {
 
     /** 当前已提交的启动 Job，覆盖“等待互斥锁”和“正在运行”两个阶段 */
     @Volatile
-    private var currentStartJob: Job? = null
+    private var currentStartJob: Deferred<TaskExecutionOutcome>? = null
 
     private val startJobLock = Any()
     
@@ -201,6 +207,7 @@ abstract class ModelTask : Model() {
     }
 
     /** 连续执行失败达到阈值后自动挂起本任务，避免反复异常空转 */
+    @Synchronized
     private fun onTaskRunFailure() {
         val name = getName() ?: return
         consecutiveFailures++
@@ -323,6 +330,98 @@ abstract class ModelTask : Model() {
         return true
     }
 
+    /** 业务回查仍由模块完成；持久认领与本地计时回退共用一次执行的收尾。 */
+    protected fun executePersistentChild(
+        scheduleId: String,
+        ownerUserId: String,
+        sessionEpoch: Long,
+        source: String,
+        workflowMutex: Mutex,
+        persistent: Boolean = true,
+        afterExecution: suspend (TaskExecutionOutcome) -> Unit = {},
+        block: suspend () -> TaskExecutionOutcome,
+    ): Boolean {
+        val context = ApplicationHook.appContext ?: return false
+        val schedule = if (persistent) PersistentScheduleRegistry.get(scheduleId) ?: return false else null
+        if (schedule != null &&
+            (schedule.ownerUserId != ownerUserId || schedule.sessionEpoch != sessionEpoch ||
+                !PersistentScheduleRegistry.markRunning(scheduleId, source = source, expected = schedule))
+        ) return false
+        val worker = runCatching {
+            ensureTaskScope()
+            taskScope!!.launch(start = CoroutineStart.LAZY) {
+                val report = TaskExecutionReport()
+                var lease: WakeLockManager.WakeLockLease? = null
+                try {
+                    lease = WakeLockManager.acquire(context, PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
+                        source = source, scheduleId = scheduleId)
+                    workflowMutex.withLock {
+                        ensureActive()
+                        if (!AccountSessionCoordinator.isCurrentSession(ownerUserId, sessionEpoch) ||
+                            ApplicationHookConstants.isOffline() || !WorkflowRootGuard.isExecutionAllowed()
+                        ) throw CancellationException("persistent_child_session_unavailable")
+                        if (schedule != null && System.currentTimeMillis() > schedule.deadlineAtMs()) {
+                            PersistentScheduleRegistry.markFailed(context, scheduleId, "worker_start_after_deadline", source = source)
+                            Log.error(TAG, "持久任务等待执行时超过截止时间[${getName()}] id=$scheduleId")
+                            return@withLock
+                        }
+                        val result = withContext(report.context) { block() }
+                        ensureActive()
+                        if (!AccountSessionCoordinator.isCurrentSession(ownerUserId, sessionEpoch) ||
+                            ApplicationHookConstants.isOffline()
+                        ) throw CancellationException("persistent_child_session_lost")
+                        val reported = report.outcome()
+                        val outcome = if (result in setOf(TaskExecutionOutcome.SUCCESS, TaskExecutionOutcome.DEFERRED) &&
+                            reported != TaskExecutionOutcome.SUCCESS
+                        ) reported else result
+                        when (outcome) {
+                            TaskExecutionOutcome.SUCCESS,
+                            TaskExecutionOutcome.DEFERRED -> {
+                                // FIRED 表示本次执行结束；待确认数据和下一次回查仍由模块保留。
+                                if (persistent) PersistentScheduleRegistry.markFired(context, scheduleId, source = source)
+                                if (outcome == TaskExecutionOutcome.DEFERRED) {
+                                    Log.record(TAG, "持久任务本次执行结束，业务待续接[${getName()}] id=$scheduleId")
+                                }
+                            }
+                            TaskExecutionOutcome.FAILED -> {
+                                Log.error(TAG, "持久任务执行失败[${getName()}] id=$scheduleId，详见业务错误日志")
+                                if (persistent) PersistentScheduleRegistry.markFailed(context, scheduleId, "business_execution_failed", source = source)
+                            }
+                            TaskExecutionOutcome.CANCELLED,
+                            TaskExecutionOutcome.SKIPPED -> {
+                                Log.record(TAG, "持久任务未完成执行[${getName()}] id=$scheduleId outcome=$outcome")
+                                if (persistent) PersistentScheduleRegistry.markFailed(context, scheduleId, "execution_$outcome", source = source)
+                            }
+                        }
+                        if (outcome != TaskExecutionOutcome.CANCELLED && outcome != TaskExecutionOutcome.SKIPPED) {
+                            afterExecution(outcome)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    if (persistent) PersistentScheduleRegistry.markWorkerFailedIfActive(context, scheduleId, "worker_cancelled:${e.message}", source = source)
+                    Log.record(TAG, "持久任务中断[${getName()}] id=$scheduleId reason=${e.message}")
+                    throw e
+                } catch (t: Throwable) {
+                    report.recordException()
+                    Log.printStackTrace(TAG, "持久任务执行异常[${getName()}] id=$scheduleId", t)
+                    if (persistent) PersistentScheduleRegistry.markFailed(context, scheduleId, t.message ?: t.javaClass.name, source = source)
+                } finally {
+                    lease?.close()
+                    if (report.hasException) onTaskRunFailure()
+                }
+            }
+        }.onFailure {
+            Log.printStackTrace(TAG, "持久任务提交失败[${getName()}] id=$scheduleId", it)
+            if (persistent) PersistentScheduleRegistry.markWorkerFailedIfActive(context, scheduleId, "worker_submit_failed", source = source)
+        }.getOrNull() ?: return false
+        worker.invokeOnCompletion { error ->
+            if (persistent) PersistentScheduleRegistry.markWorkerFailedIfActive(context, scheduleId,
+                "worker_completed_without_terminal_state:${error?.javaClass?.simpleName ?: "none"}", source = source)
+        }
+        worker.start()
+        return true
+    }
+
     /**
      * 启动任务（协程版本）
      * @param force 是否强制重启
@@ -331,7 +430,7 @@ abstract class ModelTask : Model() {
     fun startTask(
         force: Boolean = false,
         rounds: Int = 2
-    ): Job {
+    ): Deferred<TaskExecutionOutcome> {
         return scheduleTask(
             force = force,
             rounds = rounds,
@@ -364,7 +463,7 @@ abstract class ModelTask : Model() {
         rounds: Int,
         bypassExecutionChecks: Boolean,
         rejectExisting: Boolean,
-    ): Job? {
+    ): Deferred<TaskExecutionOutcome>? {
         ensureTaskScope()
 
         val startJob = synchronized(startJobLock) {
@@ -378,15 +477,15 @@ abstract class ModelTask : Model() {
                     existingJob
                 }
             } else {
-                taskScope!!.launch(start = CoroutineStart.LAZY) {
+                taskScope!!.async(start = CoroutineStart.LAZY) {
                     executionMutex.withLock {
                         if (!WorkflowRootGuard.isExecutionAllowed()) {
                             Log.record(TAG, "必需权限或使用协议未就绪，拒绝启动任务 ${getName()}")
-                            return@withLock
+                            return@withLock TaskExecutionOutcome.SKIPPED
                         }
                         if (isRunning && !force) {
                             Log.record(TAG, "任务 ${getName()} 正在运行，跳过启动")
-                            return@withLock
+                            return@withLock TaskExecutionOutcome.SKIPPED
                         }
                         if (isRunning && force) {
                             Log.record(TAG, "强制重启任务 ${getName()}")
@@ -394,26 +493,35 @@ abstract class ModelTask : Model() {
                         }
                         if (!bypassExecutionChecks && (!isEnable() || !check())) {
                             Log.record(TAG, "任务 ${getName()} 不满足执行条件")
-                            return@withLock
+                            return@withLock TaskExecutionOutcome.SKIPPED
                         }
                         val runningName = runningStatusName()
+                        val report = TaskExecutionReport()
                         try {
                             isRunning = true
                             addRunCents()
                             startTaskRunning(runningName)
-                            executeMultiRoundTask(rounds)
-                            consecutiveFailures = 0
-                        } catch (_: CancellationException) {
-                            // 协程取消属于正常控制流程（如停止任务/切换用户），不视为错误
+                            withContext(report.context) {
+                                executeMultiRoundTask(rounds)
+                                ensureActive()
+                            }
+                        } catch (e: CancellationException) {
                             Log.record(TAG, "任务被取消: ${getName()}")
+                            throw e
                         } catch (e: Exception) {
                             Log.printStackTrace("startTask err: ${getName()}", e)
-                            onTaskRunFailure()
+                            report.recordException()
                         } finally {
                             isRunning = false
                             finishTaskRunning(runningName)
                             updateRunningNextExec(-1)
                         }
+                        if (report.hasException) {
+                            onTaskRunFailure()
+                        } else {
+                            synchronized(this@ModelTask) { consecutiveFailures = 0 }
+                        }
+                        report.outcome()
                     }
                 }.also { job ->
                     currentStartJob = job
@@ -462,11 +570,16 @@ abstract class ModelTask : Model() {
         stats.recordTaskStart("${getName()}-Round$round")
         try {
             run()
-            stats.recordTaskEnd("${getName()}-Round$round", true)
-        } catch (_: CancellationException) {
-            // 本轮被取消，记录为跳过而非失败
+            currentCoroutineContext().ensureActive()
+            when (TaskExecutionReport.current()?.outcome() ?: TaskExecutionOutcome.SUCCESS) {
+                TaskExecutionOutcome.SUCCESS -> stats.recordTaskEnd("${getName()}-Round$round", true)
+                TaskExecutionOutcome.FAILED -> stats.recordTaskEnd("${getName()}-Round$round", false)
+                else -> stats.recordSkipped("${getName()}-Round$round")
+            }
+        } catch (e: CancellationException) {
             stats.recordSkipped("${getName()}-Round$round")
             Log.debug(TAG, "任务本轮被取消: ${getName()}-Round$round")
+            throw e
         } catch (e: Exception) {
             stats.recordTaskEnd("${getName()}-Round$round", false)
             throw e

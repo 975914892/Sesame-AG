@@ -1,6 +1,7 @@
 package io.github.aoguai.sesameag.hook
 
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants.TriggerInfo
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants.TriggerType
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.util.Log.record
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,6 +20,28 @@ object ApplicationHookCore {
             return false
         }
         val queueResult = ApplicationHookConstants.setPendingTrigger(boundTrigger)
+        // 队列锁外收尾；同一个持久 ID 的重复入队不能提前结束其执行状态。
+        queueResult.replaced.forEach { previous ->
+            val scheduleId = previous.persistentScheduleId?.takeIf { it.isNotBlank() }
+                ?: return@forEach
+            if (scheduleId == boundTrigger.persistentScheduleId) return@forEach
+            val covered = previous.type in setOf(TriggerType.ALARM_POLL, TriggerType.ALARM_WAKEUP) &&
+                previous.type == boundTrigger.type &&
+                previous.ownerUserId == boundTrigger.ownerUserId &&
+                previous.sessionEpoch == boundTrigger.sessionEpoch &&
+                previous.alarmTriggered == boundTrigger.alarmTriggered &&
+                previous.wakenAtTime == boundTrigger.wakenAtTime &&
+                previous.wakenTime == boundTrigger.wakenTime
+            if (covered) {
+                PersistentScheduleRegistry.markFired(
+                    ApplicationHook.appContext, scheduleId, source = "trigger_coalesced",
+                )
+            } else {
+                PersistentScheduleRegistry.rescheduleDeferred(
+                    ApplicationHook.appContext, scheduleId, "trigger_replaced_without_coverage",
+                )
+            }
+        }
         queueResult.displaced
             ?.persistentScheduleId
             ?.takeIf { it.isNotBlank() }

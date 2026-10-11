@@ -38,7 +38,6 @@ private val sesameAlchemyDefaultBlacklist =
         "hjwf_zcylt_zhuanhua",
         "hjwf_eduka_renwu",
         "alchemy_check_in_subscribe_task", // joinActivity 返回 PROMISE_TEMPLATE_NOT_EXIST
-        "hjwf_tbbbnc_shifei_sanfang",
         "hjwf_xiangjiangshikaipao_renwu", // 游戏事件不能由pushActivity完成，返回ILLEGAL_ARGUMENT
         "hjwf_zcylt_chongzhi", // 真实充值不能由pushActivity完成，返回ILLEGAL_ARGUMENT
         "hjwf_langmancanting_renwu", // 完成3个订单的游戏事件，pushActivity返回ILLEGAL_ARGUMENT
@@ -250,6 +249,7 @@ private val stallDefaultBlacklist =
         "ANTSTALL_TASK_XCXYX_langmancanting", // 需要完成游戏订单，普通finishTask返回400000040
         "ANTSTALL_TASK_XCXYX_qingyunjue", // 需要游戏内闯关事件，普通finishTask返回400000040
         "ANTSTALL_TASK_XCXYX_sijiwuyu", // 需要游戏内合成事件，普通finishTask返回400000040
+        "ANTSTALL_TASK_XCXYX_yibuliangbu", // 需要游戏内通关事件，普通finishTask返回400000040
     )
 
 private val yuebaoDefaultBlacklist =
