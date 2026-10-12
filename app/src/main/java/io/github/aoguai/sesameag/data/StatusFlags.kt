@@ -376,6 +376,9 @@ object StatusFlags {
     /** 金豆夺宝：今日任务列表已确认无可执行项 */
     const val FLAG_GOLDEN_BEAN_TASKS_DONE = "GoldenBeanTreasure::tasksDone"
 
+    /** 金豆商城：按商品规格记录今日已确认兑换次数 */
+    const val FLAG_GOLDEN_BEAN_MALL_EXCHANGE_COUNT_PREFIX = "GoldenBeanTreasure::mallExchangeCount::"
+
     /** 摇钱树：今日是否已收取金币树奖励 */
     const val FLAG_ANTORCHARD_MONEY_TREE_COLLECTED = "ANTORCHARD_MONEY_TREE_COLLECTED"
 

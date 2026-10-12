@@ -1,6 +1,12 @@
 package io.github.aoguai.sesameag.task.goldenBean
 
 import io.github.aoguai.sesameag.model.ModelFields
+import io.github.aoguai.sesameag.model.ConfigPortScope
+import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
+import io.github.aoguai.sesameag.model.modelFieldExt.SelectAndCountModelField
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
+import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.model.ModelGroup
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
@@ -16,6 +22,8 @@ class GoldenBeanTreasure : ModelTask() {
     internal lateinit var goldenBeanTreasure: BooleanModelField
     internal lateinit var goldenBeanManureExchangeDailyReserveAmount: IntegerModelField
     internal lateinit var goldenBeanSesameExchangeDailyBeanAmount: IntegerModelField
+    internal lateinit var goldenBeanMallExchange: BooleanModelField
+    internal lateinit var goldenBeanMallExchangeList: SelectAndCountModelField
 
     override fun getName(): String = "金豆夺宝"
 
@@ -61,8 +69,28 @@ class GoldenBeanTreasure : ModelTask() {
                 )
                 .also { goldenBeanSesameExchangeDailyBeanAmount = it },
         )
+        modelFields.addField(
+            BooleanModelField("goldenBeanMallExchange", "金豆商城 | 兑换", false)
+                .withDesc("使用金豆罐兑换所选商品规格。")
+                .also { goldenBeanMallExchange = it },
+        )
+        modelFields.addField(
+            SelectAndCountModelField(
+                "goldenBeanMallExchangeList", "金豆商城 | 商品规格与每日次数", linkedMapOf(),
+                SelectAndCountModelField.SelectListFunc {
+                    ExchangeOptionsCache.loadForSettingsCache(UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL)
+                },
+            ).withDesc("选择商品规格并设置每日兑换次数；0 表示不限，仍遵守服务端额度。")
+                .also {
+                    it.configPortScope = ConfigPortScope.ACCOUNT_PRIVATE
+                    goldenBeanMallExchangeList = it
+                },
+        )
         return modelFields
     }
+
+    fun refreshGoldenBeanMallOptionsForRemote(forceRefresh: Boolean = false): List<ExchangeOptionRow> =
+        GoldenBeanTreasureSupport.queryMallItems(forceRefresh).rows
 
     override suspend fun runSuspend() {
         try {
@@ -77,7 +105,9 @@ class GoldenBeanTreasure : ModelTask() {
                 runGoldenBeanManureExchangeIfNeeded()
                 runGoldenBeanSesameExchangeIfNeeded()
             }
+            runGoldenBeanMall()
         } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException || t is InterruptedException) throw t
             Log.printStackTrace("GoldenBeanTreasure", "start.run err:", t)
         } finally {
             Log.goldenBean("执行结束-${getName()}")

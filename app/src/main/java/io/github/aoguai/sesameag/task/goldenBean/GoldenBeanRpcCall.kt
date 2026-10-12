@@ -249,6 +249,31 @@ internal object GoldenBeanRpcCall {
             },
         )
 
+    fun exchangeBenefit(spuId: String, skuId: String, requestId: String): String = request(
+        "com.alipay.antcommonweal.exchange.h5.exchangeBenefit",
+        JSONObject().apply {
+            put("bizType", MASTER_ENTRY.bizType)
+            put("requestId", requestId)
+            put("sceneCode", "ANTORCHARD_JINDOU_MALL")
+            put("skuId", skuId)
+            put("source", MASTER_ENTRY.bizType)
+            put("spuId", spuId)
+            put("version", VERSION)
+        },
+    )
+
+    fun queryExchangeOrders(pageNum: Int, size: Int = 20): String = request(
+        "com.alipay.antcommonweal.exchange.h5.queryExchangeOrders",
+        JSONObject().apply {
+            put("bizType", MASTER_ENTRY.bizType)
+            put("pageNum", pageNum)
+            put("sceneCode", "ANTORCHARD_JINDOU_MALL")
+            put("size", size)
+            put("source", "antorchard")
+            put("version", VERSION)
+        },
+    )
+
     private fun request(
         method: String,
         requestData: JSONObject,

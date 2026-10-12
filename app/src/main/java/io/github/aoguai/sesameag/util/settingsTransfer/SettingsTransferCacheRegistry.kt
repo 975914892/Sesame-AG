@@ -23,6 +23,7 @@ object SettingsTransferCacheRegistry {
 
     private val rules = listOf(
         CacheRule("exchange_bill_coin", ConfigPortScope.ACCOUNT_PRIVATE, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_BILL_COIN}.json"),
+        CacheRule("exchange_golden_bean_mall", ConfigPortScope.ACCOUNT_PRIVATE, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL}.json"),
         CacheRule("exchange_member_point", ConfigPortScope.GENERIC, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT}.json"),
         CacheRule("exchange_mybank_welfare", ConfigPortScope.GENERIC, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_MYBANK_WELFARE}.json"),
         CacheRule("exchange_bean_right", ConfigPortScope.GENERIC, "exchange_options_${ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT}.json"),
@@ -172,8 +173,11 @@ object SettingsTransferCacheRegistry {
         }
         runCatching {
             if (rule.fileName.startsWith("exchange_options_")) {
+                val rows = if (content.trimStart().startsWith("{")) {
+                    org.json.JSONObject(content).getJSONArray("rows").toString()
+                } else content
                 JsonUtil.parseObject(
-                    content,
+                    rows,
                     object : TypeReference<List<ExchangeOptionRow>>() {}
                 )
             } else {

@@ -104,6 +104,7 @@ object TodayFlagRegistry {
         binding("AntOrchard", "orchardSpreadManureCount", patterns = listOf(exact(StatusFlags.FLAG_ANTORCHARD_SPREAD_MANURE_COUNT))),
         binding("AntOrchard", "orchardSpreadManureCountYeb", patterns = listOf(exact(StatusFlags.FLAG_ANTORCHARD_SPREAD_MANURE_COUNT_YEB))),
         binding("GoldenBeanTreasure", "goldenBeanTreasure", patterns = listOf(exact(StatusFlags.FLAG_GOLDEN_BEAN_TASKS_DONE))),
+        binding("GoldenBeanTreasure", "goldenBeanMallExchange", "goldenBeanMallExchangeList", patterns = listOf(prefix(StatusFlags.FLAG_GOLDEN_BEAN_MALL_EXCHANGE_COUNT_PREFIX))),
         binding("GoldenBeanTreasure", "goldenBeanManureExchangeDailyReserveAmount", patterns = listOf(exact(StatusFlags.FLAG_GOLDEN_BEAN_MANURE_EXCHANGE_AMOUNT))),
         binding("GoldenBeanTreasure", "goldenBeanSesameExchangeDailyBeanAmount", patterns = listOf(exact(StatusFlags.FLAG_GOLDEN_BEAN_ZHIMA_EXCHANGE_BEAN_AMOUNT))),
         binding("AntStall", "stallThrowManure", patterns = listOf(exact(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT))),

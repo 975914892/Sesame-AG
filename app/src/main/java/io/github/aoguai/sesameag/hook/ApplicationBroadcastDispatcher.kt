@@ -25,6 +25,7 @@ import io.github.aoguai.sesameag.task.customTasks.CustomTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchProgress
+import io.github.aoguai.sesameag.task.goldenBean.GoldenBeanTreasure
 import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.JsonUtil
@@ -622,6 +623,11 @@ internal object ApplicationBroadcastDispatcher {
                     ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY -> {
                         Model.getModel(AntForest::class.java)?.refreshVitalityExchangeOptionsForRemote(forceRefresh)
                             ?: error("森林模块未初始化")
+                    }
+
+                    ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL -> {
+                        Model.getModel(GoldenBeanTreasure::class.java)?.refreshGoldenBeanMallOptionsForRemote(forceRefresh)
+                            ?: error("金豆夺宝模块未初始化")
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN -> {

@@ -1,7 +1,16 @@
 package io.github.aoguai.sesameag.task.goldenBean
 
+import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
+
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
+import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
+import io.github.aoguai.sesameag.util.TimeUtil
+import io.github.aoguai.sesameag.util.UserDataStore
+import io.github.aoguai.sesameag.util.UserDataStoreManager
+import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.task.common.GameCenterPlayRpcCall
 import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.util.CoroutineUtils
@@ -52,7 +61,14 @@ internal suspend fun GoldenBeanTreasure.runGoldenBeanTreasure() {
         GoldenBeanEntryRun(entry, GoldenBeanTaskFlowAdapter(entry))
     }
     val masterRun = entryRuns.firstOrNull { it.entry == GoldenBeanRpcCall.MASTER_ENTRY }
-    masterRun?.let { GoldenBeanTreasureSupport.queryMallItems() }
+    masterRun?.let {
+        try {
+            GoldenBeanTreasureSupport.queryMallItems()
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException || t is InterruptedException) throw t
+            Log.printStackTrace(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城目录暂未完成，保留已有目录与查询进度", t)
+        }
+    }
     val attemptedGameSnapshots = mutableSetOf<String>()
     var convergenceRound = 1
     var taskResults = entryRuns.associateWith { it.runTaskFlow(executeIntervalInt) }
@@ -98,6 +114,152 @@ internal suspend fun GoldenBeanTreasure.runGoldenBeanTreasure() {
     } else {
         Log.goldenBean("金豆夺宝仍有非黑名单待完成或待领奖任务，不写入今日完成标记")
     }
+}
+
+private const val GOLDEN_BEAN_MALL_PENDING = "goldenBeanMallPending"
+
+internal fun GoldenBeanTreasure.runGoldenBeanMall() {
+    val store = UserDataStoreManager.getCurrentInstance() ?: return
+    val identity = RpcDailyCircuit.captureIdentity()
+    val startedAt = System.currentTimeMillis()
+    val checkCurrent = {
+        check(identity.userId == store.uid && UserMap.currentUid == store.uid && RpcDailyCircuit.isCurrent(identity)) {
+            "金豆商城账号会话已变化"
+        }
+        check(!ApplicationHookConstants.isOffline() && !Thread.currentThread().isInterrupted &&
+            TimeUtil.isSameDay(startedAt, System.currentTimeMillis())) { "金豆商城本轮已中断或跨天" }
+    }
+    synchronized(store) {
+        checkCurrent()
+        val saved = store.get(GOLDEN_BEAN_MALL_PENDING, String::class.java)
+        val pending = saved?.takeIf { it.isNotBlank() }?.let(::JSONObject) ?: JSONObject()
+        if (pending.length() > 0 && !confirmGoldenBeanMallExchange(store, pending, checkCurrent)) return
+        if (goldenBeanMallExchange.value != true) return
+        GoldenBeanTreasureSupport.queryMallItems()
+        val selected = goldenBeanMallExchangeList.value?.toMap().orEmpty()
+        if (selected.isEmpty()) {
+            Log.goldenBean("金豆商城未选择商品，仅更新兑换候选")
+            return
+        }
+        var confirmed = 0
+        for ((selectedId, configuredCount) in selected) {
+            if (selectedId.isNullOrBlank() || configuredCount == null || configuredCount < 0) continue
+            val countFlag = StatusFlags.FLAG_GOLDEN_BEAN_MALL_EXCHANGE_COUNT_PREFIX + selectedId
+            while (confirmed < GOLDEN_BEAN_CONVERGENCE_LIMIT) {
+                checkCurrent()
+                val done = Status.getIntFlagToday(countFlag) ?: 0
+                if (configuredCount > 0 && done >= configuredCount) break
+                val snapshot = GoldenBeanTreasureSupport.queryLiveMallItems()
+                val products = snapshot.payload.getJSONArray("items")
+                var selectedProduct: Pair<JSONObject, JSONObject>? = null
+                for (i in 0 until products.length()) {
+                    val spu = products.getJSONObject(i)
+                    val skus = spu.optJSONArray("skuModelList") ?: continue
+                    for (j in 0 until skus.length()) {
+                        val sku = skus.getJSONObject(j)
+                        if ("${spu.optString("spuId")}:${sku.optString("skuId")}" == selectedId) {
+                            selectedProduct = spu to sku
+                            break
+                        }
+                    }
+                    if (selectedProduct != null) break
+                }
+                if (selectedProduct == null) {
+                    Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城所选规格已不在当前目录:$selectedId")
+                    break
+                }
+                val (spu, sku) = selectedProduct
+                val item = GoldenBeanTreasureSupport.mallExchangeItem(spu, sku)
+                if (item.safety != ExchangeSafety.AUTO) {
+                    Log.goldenBean("金豆商城[${item.name}]本轮不兑换：${item.safetyReason}")
+                    break
+                }
+                val index = GoldenBeanTreasureSupport.parseResponse(GoldenBeanRpcCall.index())
+                    ?: error("金豆商城余额查询返回空")
+                check(GoldenBeanTreasureSupport.isSuccess(index)) { "金豆商城余额查询失败:$index" }
+                val balance = index.optJSONObject("jarInfo")?.optString("jarCount")?.toBigDecimalOrNull()
+                    ?: error("金豆商城未取得有效金豆罐余额")
+                val cost = java.math.BigDecimal.valueOf(sku.getJSONObject("price").getLong("cent"), 2)
+                check(balance.signum() >= 0) { "金豆罐余额无效:$balance" }
+                if (balance < cost) {
+                    Log.goldenBean("金豆商城[${item.name}]金豆罐不足，余额$balance，需$cost")
+                    break
+                }
+                val beforeOrders = GoldenBeanTreasureSupport.queryMallOrders(checkCurrent).map { it.getString("orderNo") }
+                val request = JSONObject()
+                    .put("itemId", selectedId).put("spuId", spu.getString("spuId")).put("skuId", sku.getString("skuId"))
+                    .put("name", item.name).put("requestId", java.util.UUID.randomUUID().toString())
+                    .put("requestedAt", System.currentTimeMillis()).put("beforeOrderNos", JSONArray(beforeOrders))
+                checkCurrent()
+                store.put(GOLDEN_BEAN_MALL_PENDING, request.toString(), requirePersistence = true)
+                checkCurrent()
+                val response = GoldenBeanTreasureSupport.parseResponse(GoldenBeanRpcCall.exchangeBenefit(
+                    request.getString("spuId"), request.getString("skuId"), request.getString("requestId"),
+                ))
+                checkCurrent()
+                if (response == null) {
+                    Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城兑换响应为空，保留待确认:$selectedId")
+                    return
+                }
+                val acknowledged = GoldenBeanTreasureSupport.isSuccess(response)
+                val failure = if (acknowledged) null else GoldenBeanTreasureSupport.actionResult(
+                    TaskFlowItem(selectedId, item.name, "TODO", type = sku.getString("skuId"), sceneCode = "ANTORCHARD_JINDOU_MALL"),
+                    response, "exchangeBenefit",
+                )
+                if (response.opt("canBuy") == false || failure?.failureType in setOf(
+                        TaskRpcFailureType.NON_RETRYABLE_INVALID, TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
+                    )) {
+                    Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城未受理兑换[${item.name}]:$response")
+                    store.put(GOLDEN_BEAN_MALL_PENDING, "{}", requirePersistence = true)
+                    break
+                }
+                request.put("acknowledged", acknowledged).put("orderNo", response.optString("orderNo"))
+                store.put(GOLDEN_BEAN_MALL_PENDING, request.toString(), requirePersistence = true)
+                if (!acknowledged) Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城兑换未确认成功，保留订单回查:$response")
+                if (!confirmGoldenBeanMallExchange(store, request, checkCurrent)) return
+                confirmed++
+                CoroutineUtils.sleepCompat(executeIntervalInt.toLong().coerceAtLeast(500L))
+            }
+            if (confirmed >= GOLDEN_BEAN_CONVERGENCE_LIMIT) {
+                Log.goldenBean("金豆商城本轮已确认${confirmed}笔，剩余配置留待后续调度")
+                return
+            }
+        }
+    }
+}
+
+private fun confirmGoldenBeanMallExchange(store: UserDataStore, pending: JSONObject, checkCurrent: () -> Unit): Boolean {
+    checkCurrent()
+    val itemId = pending.getString("itemId")
+    val orderNo = pending.optString("orderNo")
+    if (!pending.has("confirmedAt")) {
+        val orders = GoldenBeanTreasureSupport.queryMallOrders(checkCurrent)
+        checkCurrent()
+        val before = pending.getJSONArray("beforeOrderNos")
+        val existed = (0 until before.length()).any { before.optString(it) == orderNo }
+        if (!pending.optBoolean("acknowledged") || orderNo.isBlank() || existed ||
+            orders.none { it.optString("orderNo") == orderNo }
+        ) {
+            Log.error(GOLDEN_BEAN_BLACKLIST_MODULE,
+                "金豆商城待确认[${pending.optString("name")}] requestId=${pending.optString("requestId")} " +
+                    "orderNo=$orderNo，未确认对应新增订单，不重复提交")
+            return false
+        }
+        pending.put("confirmedAt", System.currentTimeMillis())
+        pending.put("confirmedCount", (Status.getIntFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_MALL_EXCHANGE_COUNT_PREFIX + itemId) ?: 0) + 1)
+        store.put(GOLDEN_BEAN_MALL_PENDING, pending.toString(), requirePersistence = true)
+    }
+    checkCurrent()
+    if (TimeUtil.isSameDay(pending.getLong("confirmedAt"), System.currentTimeMillis())) {
+        val flag = StatusFlags.FLAG_GOLDEN_BEAN_MALL_EXCHANGE_COUNT_PREFIX + itemId
+        val expected = pending.getInt("confirmedCount")
+        if ((Status.getIntFlagToday(flag) ?: 0) < expected) Status.setIntFlagToday(flag, expected)
+        else Status.save()
+    }
+    checkCurrent()
+    store.put(GOLDEN_BEAN_MALL_PENDING, "{}", requirePersistence = true)
+    Log.goldenBean("金豆商城已确认兑换[${pending.optString("name")}][订单$orderNo]")
+    return true
 }
 
 private data class GoldenBeanEntryRun(
@@ -275,10 +437,17 @@ private class GoldenBeanTaskFlowAdapter(
         }
         val response = GoldenBeanTreasureSupport.parseResponse(GoldenBeanRpcCall.finishTask(item.type, entry))
             ?: return GoldenBeanTreasureSupport.emptyResponseFailure(item, "complete")
+        val result = GoldenBeanTreasureSupport.actionResult(item, response, "complete")
+        if (result.code == "400000040") {
+            nextQuerySyncTypes = TASK_STATUS_SYNC_TYPES
+            return AntFarmRpcCall.doSceneTask(item.type, entry.taskSceneCode) { fallback ->
+                GoldenBeanTreasureSupport.actionResult(item, fallback, "complete")
+            }
+        }
         if (GoldenBeanTreasureSupport.isSuccess(response)) {
             nextQuerySyncTypes = TASK_STATUS_SYNC_TYPES
         }
-        return GoldenBeanTreasureSupport.actionResult(item, response, "complete")
+        return result
     }
 
     override fun actionKey(
