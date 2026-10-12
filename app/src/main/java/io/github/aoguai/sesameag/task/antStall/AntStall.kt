@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antStall
 
+import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
+
 import android.util.Base64
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
@@ -2098,11 +2100,16 @@ class AntStall : ModelTask() {
         return if (isStallTaskRpcSuccess(json)) {
             completedStallTaskResult(item)
         } else {
-            stallTaskActionFailureResult(
+            val failure = stallTaskActionFailureResult(
                 response = json,
                 rpc = "AntStallRpcCall.finishTask",
                 detail = stallTaskActionDetail(item, "finishTask"),
             )
+            if (failure.code == "400000040") {
+                AntFarmRpcCall.doSceneTask(item.type, "ANTSTALL_TASK") { fallback ->
+                    stallTaskActionFailureResult(fallback, "AntFarmRpcCall.doFarmTask", stallTaskActionDetail(item, "finishTask"))
+                }
+            } else failure
         }
     }
 
