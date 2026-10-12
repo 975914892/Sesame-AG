@@ -665,6 +665,15 @@ object AntSportsRpcCall {
         return RequestManager.requestString("com.alipay.sportsplay.biz.rpc.walk.queryUser", data)
     }
 
+    fun queryThemeList(): String = RequestManager.requestString(
+        "com.alipay.sportsplay.biz.rpc.walk.theme.queryThemeList", "[{}]",
+    )
+
+    fun queryWorldMap(themeId: String): String = RequestManager.requestString(
+        "com.alipay.sportsplay.biz.rpc.walk.queryWorldMap",
+        JSONArray().put(JSONObject().put("themeId", themeId)).toString(),
+    )
+
     /**
      * @brief 查询城市路线 - 新版
      *
@@ -1484,6 +1493,15 @@ object AntSportsRpcCall {
      */
     object NeverlandRpcCall {
         private const val DEFAULT_SOURCE = "ch_toufang__yundongshouye"
+
+        fun offlineAward(): String = RequestManager.requestString(
+            "com.alipay.neverland.biz.rpc.offlineAward", "[{\"isAdvertisement\":true}]",
+        )
+
+        fun receiveSpecialPrize(sceneType: String): String = RequestManager.requestString(
+            "com.alipay.neverland.biz.rpc.receiveSpecialPrize",
+            JSONArray().put(JSONObject().put("sceneType", sceneType)).toString(),
+        )
 
         /**
          * @brief 查询签到状态
