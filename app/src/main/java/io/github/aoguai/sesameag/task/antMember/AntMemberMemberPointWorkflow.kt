@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.withLock
 
 internal data class AntMemberPointWorkflowPlan(
     val claimTaskAwards: Boolean,
@@ -42,7 +43,9 @@ internal fun AntMember.prepareMemberPointWorkflows(
     if ((memberSign?.value == true || memberTask?.value == true) &&
         !hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY)
     ) {
-        deferredTasks.add(scope.async(Dispatchers.IO) { doMemberGameEntrance() })
+        deferredTasks.add(scope.async(Dispatchers.IO) {
+            memberFloatingBallMutex.withLock { doMemberGameEntrance() }
+        })
     }
 
     if (yebExpGold?.value == true) {

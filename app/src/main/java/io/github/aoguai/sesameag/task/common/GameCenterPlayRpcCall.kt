@@ -2,7 +2,11 @@ package io.github.aoguai.sesameag.task.common
 
 import android.net.Uri
 import io.github.aoguai.sesameag.hook.RequestManager
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.util.GameTask
+import io.github.aoguai.sesameag.util.TimeUtil
+import io.github.aoguai.sesameag.util.UserDataStoreManager
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -566,6 +570,63 @@ object GameCenterPlayRpcCall {
         )
     }
 
+    /** 分段计时只推进已到期的上报；模块通过 afterDeferred 安排原任务流续接。 */
+    fun advanceDuration(
+        stateKey: String,
+        contract: Contract,
+        firstChunkSeconds: Int = 30,
+    ): TaskFlowActionResult {
+        require(contract.playTime > 0 && firstChunkSeconds > 0)
+        val identity = RpcDailyCircuit.captureIdentity()
+        val store = UserDataStoreManager.getCurrentInstance() ?: return TaskFlowActionResult.failure(
+            TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW, message = "无法保存游戏时长进度",
+        )
+        synchronized(store) {
+            check(store.uid == identity.userId && RpcDailyCircuit.isCurrent(identity)) { "游戏时长账号会话已变化" }
+            if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) {
+                return TaskFlowActionResult.defer(
+                    DeferredReason.STATE_CONFIRMATION, "游戏时长执行已中断", stopCurrentRound = true,
+                )
+            }
+            val now = System.currentTimeMillis()
+            val saved = store.get(stateKey, String::class.java)?.let(::JSONObject)
+            val state = saved?.takeIf {
+                TimeUtil.isSameDay(it.optLong("startedAt"), now) &&
+                    it.optString("gameAppId") == contract.gameAppId &&
+                    it.optString("source") == contract.source && it.optInt("total") == contract.playTime
+            } ?: JSONObject().put("startedAt", now).put("gameAppId", contract.gameAppId)
+                .put("source", contract.source).put("total", contract.playTime)
+            var reported = state.optInt("reported")
+            if (reported >= contract.playTime) return TaskFlowActionResult.success(progressChanged = false)
+            if (!state.has("readyAt")) {
+                val chunk = minOf(firstChunkSeconds, contract.playTime)
+                state.put("chunk", chunk).put("readyAt", now + chunk * 1000L)
+                store.put(stateKey, state.toString(), requirePersistence = true)
+            }
+            if (now >= state.getLong("readyAt")) {
+                val chunk = state.getInt("chunk")
+                val ack = submitForAck(contract.copy(playTime = chunk))
+                check(RpcDailyCircuit.isCurrent(identity)) { "游戏时长上报期间账号会话已变化" }
+                if (!ack.accepted) return TaskFlowActionResult.failure(
+                    ack.failureType, message = "游戏时长上报失败", rpc = "GameCenterPlayRpcCall.submit",
+                    raw = ack.raw, continueCurrentRoundOnFailure = true,
+                ).copy(refreshAfterAction = true)
+                reported += chunk
+                state.put("reported", reported)
+                if (reported < contract.playTime) {
+                    val nextChunk = minOf(30, contract.playTime - reported)
+                    state.put("chunk", nextChunk).put("readyAt", System.currentTimeMillis() + nextChunk * 1000L)
+                }
+                store.put(stateKey, state.toString(), requirePersistence = true)
+                if (reported >= contract.playTime) return TaskFlowActionResult.success(progressChanged = false)
+            }
+            return TaskFlowActionResult.defer(
+                DeferredReason.TIME_WINDOW, "游戏时长已上报${reported}/${contract.playTime}秒，等待下一段",
+                rpc = "GameCenterPlayRpcCall.submit", deferredUntil = state.getLong("readyAt"),
+            )
+        }
+    }
+
     fun submitP2eDurationForAck(
         contract: P2eFloatingBallContract,
         playSource: String = contract.source,
@@ -1021,6 +1082,19 @@ object GameCenterPlayRpcCall {
             .put("source", source)
             .put("deviceLevel", "high")
             .put("unityDeviceLevel", "high"),
+    )
+
+    fun queryExternalGameFeeds(sceneId: String, source: String, pageNum: Int, pageSize: Int = 10): FloatingBallAck = requestAck(
+        "com.alipay.gamecenteruprod.biz.rpc.external.gamecenter.queryGameFeeds",
+        JSONObject().put("__git", GAME_CENTER_GIT).put("sceneId", sceneId).put("source", source)
+            .put("pageNum", pageNum).put("pageSize", pageSize).put("filterGameIdList", JSONArray())
+            .put("deviceLevel", "high").put("unityDeviceLevel", "high"),
+    )
+
+    fun batchReceiveExternalTaskPrize(sceneId: String, source: String): FloatingBallAck = requestAck(
+        "com.alipay.gamecenteruprod.biz.rpc.external.gamecenter.batchReceiveTaskPrize",
+        JSONObject().put("__git", GAME_CENTER_GIT).put("sceneId", sceneId).put("source", source)
+            .put("deviceLevel", "high").put("unityDeviceLevel", "high"),
     )
 
     fun completeExternalBrowseTask(sceneId: String, sceneExtInfo: String): FloatingBallAck = requestAck(

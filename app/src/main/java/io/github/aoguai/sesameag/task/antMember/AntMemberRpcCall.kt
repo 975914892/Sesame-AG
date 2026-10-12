@@ -24,6 +24,19 @@ object AntMemberRpcCall {
     private const val METHOD_GAIN_MY_AND_FAMILY_SUM_INSURED =
         "com.alipay.insgiftbff.insgiftMain.gainMyAndFamilySumInsured"
 
+    fun queryExpressTasks(recommended: Boolean): String = RequestManager.requestString(
+        "alipay.promoprod.task.listQuery",
+        JSONArray().put(JSONObject().put("consultAccessFlag", true)
+            .put("taskCenInfo", if (recommended) "MZVPQ0DScvD6NjaPJzk8iCCWtq%2FRt4kh" else "MZVPQ0DScvD6NjaPJzk8iNRgSSvWpCuA")
+            .apply { if (recommended) put("extInfo", JSONObject().put("componentCode", "musi_test")) }).toString(),
+    )
+
+    fun triggerExpressTask(taskId: String, stage: String): String = RequestManager.requestString(
+        "alipay.promoprod.applet.trigger",
+        JSONArray().put(JSONObject().put("appletId", taskId).put("stageCode", stage)
+            .put("taskCenInfo", "MZVPQ0DScvD6NjaPJzk8iNRgSSvWpCuA")).toString(),
+    )
+
     private fun getUniqueId(): String = System.currentTimeMillis().toString() + RandomUtil.nextLong()
 
     private fun normalizeInsuredGoldEntrance(entrance: String?): String =
