@@ -78,10 +78,14 @@ object AntOceanRpcCall {
     }
     
     @JvmStatic
-    fun queryHomePage(showTaskPanel: Boolean = false): String {
+    fun queryHomePage(
+        showTaskPanel: Boolean = false,
+        source: String = SOURCE_APP_CENTER,
+        firstTaskType: String? = null,
+    ): String {
         val payload = StringBuilder()
             .append("[{\"source\":\"")
-            .append(SOURCE_APP_CENTER)
+            .append(source)
             .append("\",\"uniqueId\":\"")
             .append(getUniqueId())
             .append("\",\"version\":\"")
@@ -89,6 +93,9 @@ object AntOceanRpcCall {
             .append("\"")
         if (showTaskPanel) {
             payload.append(",\"showTaskPanel\":\"yes\"")
+        }
+        if (!firstTaskType.isNullOrBlank()) {
+            payload.append(",\"firstTaskType\":").append(JSONObject.quote(firstTaskType))
         }
         payload.append("}]")
         return RequestManager.requestString(
@@ -186,10 +193,12 @@ object AntOceanRpcCall {
     }
     
     @JvmStatic
-    fun receiveTaskAward(sceneCode: String, taskType: String): String {
+    fun receiveTaskAward(sceneCode: String, taskType: String, source: String = SOURCE_OCEAN): String {
         return RequestManager.requestString(
             "com.alipay.antiep.receiveTaskAward",
-            "[{\"ignoreLimit\":false,\"requestType\":\"RPC\",\"sceneCode\":\"$sceneCode\",\"source\":\"$SOURCE_OCEAN\",\"taskType\":\"$taskType\",\"uniqueId\":\"${getUniqueId()}\"}]"
+            JSONArray().put(JSONObject().put("ignoreLimit", false).put("requestType", "RPC")
+                .put("sceneCode", sceneCode).put("source", source).put("taskType", taskType)
+                .put("uniqueId", getUniqueId())).toString()
         )
     }
     
@@ -387,7 +396,6 @@ object AntOceanRpcCall {
         userId: String,
         fromAct: String? = null,
         interactFlags: String = "",
-        currentUserId: String? = null
     ): String {
         val payload = JSONObject().apply {
             put("friendUserId", userId)
@@ -398,9 +406,7 @@ object AntOceanRpcCall {
             if (!fromAct.isNullOrBlank()) {
                 put("fromAct", fromAct)
             }
-            if (!currentUserId.isNullOrBlank()) {
-                put("userId", currentUserId)
-            }
+            put("userId", userId)
         }
         return RequestManager.requestString(
             "alipay.antocean.ocean.h5.queryFriendPage",
@@ -505,10 +511,14 @@ object AntOceanRpcCall {
     }
     
     @JvmStatic
-    fun queryTaskList(): String {
+    fun queryTaskList(source: String = SOURCE_APP_CENTER, firstTaskType: String? = null): String {
+        val extend = JSONObject().put("taskEntranceSubscript", true)
+        if (!firstTaskType.isNullOrBlank()) extend.put("firstTaskType", firstTaskType)
         return RequestManager.requestString(
             "alipay.antocean.ocean.h5.queryTaskList",
-            "[{\"extend\":{\"taskEntranceSubscript\":true},\"fromAct\":\"dynamic_task\",\"sceneCode\":\"ANTOCEAN_TASK\",\"source\":\"$SOURCE_APP_CENTER\",\"uniqueId\":\"${getUniqueId()}\",\"version\":\"$VERSION\"}]"
+            JSONArray().put(JSONObject().put("extend", extend).put("fromAct", "dynamic_task")
+                .put("sceneCode", "ANTOCEAN_TASK").put("source", source).put("uniqueId", getUniqueId())
+                .put("version", VERSION)).toString()
         )
     }
     
