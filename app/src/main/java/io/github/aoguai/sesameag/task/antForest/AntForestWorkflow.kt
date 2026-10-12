@@ -217,7 +217,12 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
 
     if (forestMarket?.value == true) {
         GreenLife.ForestMarket("GREEN_LIFE")
+        GreenLife.checkIn()
         tc.countDebug("森林集市")
+    }
+    if (greenRent?.value == true) {
+        GreenLife.collectRentEnergy()
+        tc.countDebug("绿色租赁")
     }
 
     if (medicalHealth?.value == true) {

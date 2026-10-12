@@ -219,6 +219,12 @@ class Status {
         }
 
         @JvmStatic
+        fun getWaterFriendTodayCount(id: String, taskUid: String): Int? {
+            if (taskUid != UserMap.currentUid) return null
+            return INSTANCE.waterFriendLogList["$taskUid-$id"] ?: 0
+        }
+
+        @JvmStatic
         fun canWaterFriendToday(id: String, newCount: Int): Boolean {
             val key = "${UserMap.currentUid}-$id"
             val count = INSTANCE.waterFriendLogList[key] ?: return true
@@ -682,7 +688,9 @@ class Status {
                 INSTANCE.currentUid = targetUid
                 INSTANCE.saveTime = System.currentTimeMillis()
                 val statusFile = Files.getStatusFile(targetUid)!!
-                Files.write2File(JsonUtil.formatJson(INSTANCE), statusFile)
+                check(Files.write2File(JsonUtil.formatJson(INSTANCE), statusFile)) {
+                    "状态保存失败: ${statusFile.absolutePath}"
+                }
                 // 关键：更新标记，防止下一次 load 触发冗余读取
                 lastModifiedTime = statusFile.lastModified()
                 lastUid = targetUid

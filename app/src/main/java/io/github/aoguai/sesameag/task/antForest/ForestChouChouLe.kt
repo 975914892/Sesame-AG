@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
+
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.task.TaskStatus
@@ -672,7 +674,7 @@ class ForestChouChouLe {
                     val source = taskBaseInfo.optString("source").ifBlank { SOURCE }
                     AntForestRpcCall.finishTaskopengreen(item.type, item.sceneCode, source).toJson()
                 }
-            return handleActionResponse(
+            val actionResult = handleActionResponse(
                 item = item,
                 response = response,
                 action = TaskFlowAction.COMPLETE,
@@ -683,6 +685,11 @@ class ForestChouChouLe {
                         "AntForestRpcCall.finishTaskopengreen"
                     },
             )
+            return if (!exchangeDrawTask && actionResult.code == "400000040" && item.sceneCode.isNotBlank()) {
+                AntFarmRpcCall.doSceneTask(item.type, item.sceneCode) { fallback ->
+                    handleActionResponse(item, fallback, TaskFlowAction.COMPLETE, "AntFarmRpcCall.doFarmTask")
+                }
+            } else actionResult
         }
 
         override fun receive(item: TaskFlowItem): TaskFlowActionResult {

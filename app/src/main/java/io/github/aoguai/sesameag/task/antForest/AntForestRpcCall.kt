@@ -1507,6 +1507,25 @@ object AntForestRpcCall {
             "[{\"actionType\":\"GOODS_BROWSE\",\"requestId\":\"${RandomUtil.getRandomString(8)}\",\"sourceType\":\"$sourceType\"}]",
         )
 
+    fun retrieveCurrentMarketActivity(): String = RequestManager.requestString(
+        "alipay.bizfmcg.greenlife.retrieveCurrentActivity", "[{}]",
+    )
+
+    fun finishCurrentMarketTask(taskTemplateId: String): String = RequestManager.requestString(
+        "alipay.bizfmcg.greenlife.finishCurrentTask",
+        JSONArray().put(JSONObject().put("taskTemplateId", taskTemplateId)).toString(),
+    )
+
+    fun checkUserSecondSceneChance(): String = RequestManager.requestString(
+        "com.alipay.creditapollon.biz.rpc.api.rent.green.checkUserSecondSceneChance",
+        "[{\"requestSceneCode\":\"rentBrowse\"}]",
+    )
+
+    fun generateRentEnergy(): String = RequestManager.requestString(
+        "com.alipay.creditapollon.biz.rpc.api.rent.green.generateEnergy",
+        "[{\"requestSceneCode\":\"rentBrowse\"}]",
+    )
+
     @JvmStatic
     fun collectRobExpandEnergy(
         propId: String,
