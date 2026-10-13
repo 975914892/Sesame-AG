@@ -1,7 +1,17 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.task.common.DeferredReason
+import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
+import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
+import io.github.aoguai.sesameag.task.common.TaskFlowEngine
+import io.github.aoguai.sesameag.task.common.TaskFlowItem
+import io.github.aoguai.sesameag.task.common.TaskFlowPhase
+import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.util.CoroutineUtils
+import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.Log
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
@@ -50,29 +60,114 @@ object GreenLife {
             .distinct()
             .ifEmpty { listOf("GREEN_LIFE") }
 
-        candidates.forEachIndexed { index, sourceType ->
+        var collected = false
+        for ((index, sourceType) in candidates.withIndex()) {
             if (unsupportedMarketSourcesThisRound.contains(sourceType)) {
                 Log.forest("森林集市[$sourceType] 本轮已判定来源未支持，跳过重复探测")
-                return@forEachIndexed
+                continue
             }
-            val attemptResult = tryForestMarket(sourceType)
-            if (attemptResult.collected) {
-                return true
+            while (!ApplicationHookConstants.isOffline() && !Thread.currentThread().isInterrupted) {
+                val attemptResult = tryForestMarket(sourceType)
+                if (attemptResult.collected) {
+                    collected = true
+                    CoroutineUtils.sleepCompat(300)
+                    continue
+                }
+                if (collected || !attemptResult.shouldContinue) return collected
+                break
             }
-            if (!attemptResult.shouldContinue) {
-                return false
-            }
+            if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) return collected
             if (index < candidates.lastIndex) {
                 Log.forest("森林集市[$sourceType] 未获得能量，继续尝试备用来源")
             }
         }
-        return false
+        return collected
     }
 
     @JvmStatic
     fun resetForestMarketRound() {
         unsupportedMarketWarnings.clear()
         unsupportedMarketSourcesThisRound.clear()
+    }
+
+    fun checkIn() {
+        TaskFlowEngine(object : TaskFlowAdapter {
+            override val moduleName = "AntForest"
+            override val flowName = "森林集市打卡"
+
+            override fun query(): JSONObject = JSONObject(AntForestRpcCall.retrieveCurrentMarketActivity())
+            override fun isQuerySuccess(response: JSONObject): Boolean =
+                isSuccessResponse(response) && response.optJSONObject("data") != null
+
+            override fun isQueryComplete(response: JSONObject): Boolean {
+                val data = response.optJSONObject("data") ?: return false
+                return !data.has("currentActivity") || data.optJSONObject("currentTask") != null
+            }
+
+            override fun extractItems(response: JSONObject): List<TaskFlowItem> {
+                val data = response.optJSONObject("data") ?: return emptyList()
+                if (data.optJSONObject("currentActivity") == null) return emptyList()
+                val task = data.optJSONObject("currentTask") ?: return emptyList()
+                val taskId = task.optString("taskTemplateId")
+                val status = when {
+                    task.optBoolean("checkInCompleted") -> "DONE"
+                    task.has("checkInCompleted") && taskId.isNotBlank() -> "TODO"
+                    else -> "UNKNOWN"
+                }
+                return listOf(TaskFlowItem(taskId, "绿色知识打卡", status, raw = task))
+            }
+
+            override fun mapPhase(item: TaskFlowItem): TaskFlowPhase = when (item.status) {
+                "DONE" -> TaskFlowPhase.TERMINAL
+                "TODO" -> TaskFlowPhase.READY_TO_COMPLETE
+                else -> TaskFlowPhase.UNKNOWN
+            }
+
+            override fun complete(item: TaskFlowItem): TaskFlowActionResult {
+                val response = JSONObject(AntForestRpcCall.finishCurrentMarketTask(item.id))
+                if (!isSuccessResponse(response)) {
+                    val failure = extractMarketFailure(response)
+                    return TaskFlowActionResult.failure(
+                        if (failure.code == "1009") TaskRpcFailureType.BUSINESS_LIMIT else TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                        code = failure.code, message = failure.message, raw = response.toString(),
+                        rpc = "AntForestRpcCall.finishCurrentMarketTask",
+                    )
+                }
+                val prizes = response.optJSONObject("data")?.optJSONArray("prizes")
+                val names = (0 until (prizes?.length() ?: 0)).mapNotNull { prizes?.optJSONObject(it)?.optString("name") }
+                Log.forest("森林集市打卡已受理${names.filter { it.isNotBlank() }.joinToString("、", prefix = " 奖励：")}")
+                return TaskFlowActionResult.defer(
+                    DeferredReason.STATE_CONFIRMATION, "回查集市打卡状态", refreshAfterAction = true,
+                )
+            }
+
+            override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "森林集市打卡查询失败:$response")
+            override fun logInfo(message: String) = Log.forest(message)
+            override fun logError(message: String) = Log.error(TAG, message)
+        }).run()
+    }
+
+    fun collectRentEnergy() {
+        try {
+            if (ApplicationHookConstants.isOffline()) return
+            val chance = JSONObject(AntForestRpcCall.checkUserSecondSceneChance())
+            if (!ResChecker.checkRes(TAG, "绿色租赁资格查询失败:", chance)) return
+            val data = chance.optJSONObject("resultObject")
+            if (data?.has("canSendEnergy") == true && !data.optBoolean("canSendEnergy")) return
+            if (ApplicationHookConstants.isOffline()) return
+            val response = JSONObject(AntForestRpcCall.generateRentEnergy())
+            if (!ResChecker.checkRes(TAG, "绿色租赁浏览奖励失败:", response)) return
+            val amount = response.optJSONObject("resultObject")?.optJSONObject("energyGenerated")
+                ?.optInt("zulinshangpinliulan", 0) ?: 0
+            Log.forest(if (amount > 0) "绿色租赁浏览产生能量 ${amount}g" else "绿色租赁浏览已受理，回查奖励资格")
+            if (!ApplicationHookConstants.isOffline()) {
+                val refreshed = JSONObject(AntForestRpcCall.checkUserSecondSceneChance())
+                ResChecker.checkRes(TAG, "绿色租赁奖励后回查失败:", refreshed)
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException || t is InterruptedException) throw t
+            Log.printStackTrace(TAG, "绿色租赁执行失败", t)
+        }
     }
 
     private fun tryForestMarket(sourceType: String): MarketAttemptResult {
@@ -88,7 +183,7 @@ object GreenLife {
                 MarketConsultDecision.UNSUPPORTED -> {
                     logMarketFailure(sourceType, "consult", consultResult.failure)
                     CoroutineUtils.sleepCompat(300)
-                    return MarketAttemptResult(collected = false, shouldContinue = false)
+                    return MarketAttemptResult(collected = false, shouldContinue = true)
                 }
                 MarketConsultDecision.FAILED -> {
                     logMarketFailure(sourceType, "consult", consultResult.failure)
@@ -97,7 +192,7 @@ object GreenLife {
                 }
             }
 
-            var response = JSONObject(AntForestRpcCall.sendEnergyByAction(sourceType))
+            val response = JSONObject(AntForestRpcCall.sendEnergyByAction(sourceType))
             if (!isSuccessResponse(response)) {
                 logMarketFailure(sourceType, "send", extractMarketFailure(response))
                 return MarketAttemptResult(collected = false, shouldContinue = true)
@@ -115,6 +210,7 @@ object GreenLife {
             Log.forest("森林集市[$sourceType] 请求成功，但未获得能量")
             return MarketAttemptResult(collected = false, shouldContinue = true)
         } catch (t: Throwable) {
+            if (t is CancellationException || t is InterruptedException) throw t
             Log.runtime(TAG, "ForestMarket err: sourceType=$sourceType")
             Log.printStackTrace(TAG, t)
             return MarketAttemptResult(collected = false, shouldContinue = true)

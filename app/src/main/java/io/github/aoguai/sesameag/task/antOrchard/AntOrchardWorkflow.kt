@@ -54,6 +54,7 @@ internal suspend fun AntOrchard.runOrchardRewardWorkflow(indexJson: JSONObject, 
         syncTaobaoLimitBalloon()
         doOrchardDailyTask(userId)
         receiveLeyuanDailyTaskAwards()
+        runCampTakeover()
     }
 
     if (orchardChouChouLe.value == true) {

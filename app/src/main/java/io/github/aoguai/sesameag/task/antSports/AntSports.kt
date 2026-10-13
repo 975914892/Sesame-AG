@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antSports
 
+import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
+
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.util.Base64
@@ -34,6 +36,8 @@ import io.github.aoguai.sesameag.model.modelFieldExt.StringModelField
 import io.github.aoguai.sesameag.task.AnswerAI.AnswerAI
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.TaskCommon
+import io.github.aoguai.sesameag.task.common.DeferredReason
+import io.github.aoguai.sesameag.task.common.TaskFlowExecutionState
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
@@ -370,7 +374,7 @@ class AntSports : ModelTask() {
 
         // 行走路线
         modelFields.addField(BooleanModelField("walk", "行走路线 | 开启", false).withDesc(
-            "开启新版运动路线自动行走，仅在用户已走路线或显式配置路线内推进并领取奖励。"
+            "按所选主题、路线和循环策略自动行走并领取奖励。"
         ).also { walk = it })
         modelFields.addField(
             ChoiceModelField(
@@ -378,7 +382,7 @@ class AntSports : ModelTask() {
                 "行走路线 | 主题",
                 WalkPathTheme.DA_MEI_ZHONG_GUO,
                 WalkPathTheme.nickNames
-            ).withDesc("选择新版行走路线主题，仅用于筛选用户已走路线，不会自动加入该主题的新路线。").also { walkPathTheme = it }
+            ).withDesc("普通主题筛选已走路线；选择自动主题时，按完成次数优先加入可用路线。显式路线配置优先。").also { walkPathTheme = it }
         )
         modelFields.addField(
             BooleanModelField("walkCustomPath", "行走路线 | 开启自定义路线", false).withDesc(
@@ -397,7 +401,7 @@ class AntSports : ModelTask() {
                 "walkThemeIds",
                 "行走路线 | 自定义主题ID列表",
                 ""
-            ).withDesc("新版路线主题 ID 列表，支持逗号、空格或换行分隔；仅筛选用户已走路线，不能为空主题自动加入新路线。").also { walkThemeIds = it }
+            ).withDesc("主题 ID 列表，支持逗号、空格或换行分隔；普通模式筛选已走路线，自动主题模式限定选线范围。").also { walkThemeIds = it }
         )
         modelFields.addField(
             StringModelField(
@@ -2492,6 +2496,19 @@ class AntSports : ModelTask() {
             } else {
                 val errorCode = extractSportsRpcErrorCode(result)
                 val errorMsg = extractSportsRpcErrorMessage(result)
+                val sceneCode = taskDetail.optString("sceneCode")
+                if (errorCode == "400000040" && sceneCode.isNotBlank()) {
+                    return AntFarmRpcCall.doSceneTask(taskId, sceneCode) { fallback ->
+                        TaskFlowActionResult.failure(
+                            failureType = classifySportsTaskFailure(fallback),
+                            code = extractSportsRpcErrorCode(fallback),
+                            message = extractSportsRpcErrorMessage(fallback),
+                            rpc = "AntFarmRpcCall.doFarmTask",
+                            raw = fallback.toString(),
+                            stopCurrentRound = shouldTemporarilyStopSportsTask(extractSportsRpcErrorCode(fallback)),
+                        )
+                    }
+                }
                 val completeSource = when {
                     useVerifiedNewCompleteRpc -> "AntSportsRpcCall.completeTask"
                     useAdTaskFinishRpc -> "AntSportsRpcCall.finishAdTask"
@@ -3726,7 +3743,9 @@ class AntSports : ModelTask() {
         val configuredThemeIds = parseRouteIds(if (::walkThemeIds.isInitialized) walkThemeIds.value else null)
         val fallbackThemeId = walkPathThemeId?.takeIf { it.isNotBlank() }
             ?: WalkPathTheme.themeIds[WalkPathTheme.DA_MEI_ZHONG_GUO]
-        val themeIds = configuredThemeIds.ifEmpty { listOf(fallbackThemeId) }
+        val themeIds = configuredThemeIds.ifEmpty {
+            if (walkPathTheme.value == WalkPathTheme.LOWEST_COMPLETION) emptyList() else listOf(fallbackThemeId)
+        }
 
         val configuredPathIds = parseRouteIds(if (::walkPathIds.isInitialized) walkPathIds.value else null)
         val legacyPathIds = if (::walkCustomPath.isInitialized && walkCustomPath.value == true) {
@@ -3977,6 +3996,14 @@ class AntSports : ModelTask() {
                 ?.let { RouteDecision(it, "显式配置路线") }
         }
 
+        if (walkPathTheme.value == WalkPathTheme.LOWEST_COMPLETION) {
+            val currentTheme = currentCandidate?.themeId
+            val themes = if (config.themeLoop && !currentTheme.isNullOrBlank() &&
+                (config.themeIds.isEmpty() || currentTheme in config.themeIds)
+            ) listOf(currentTheme) else config.themeIds
+            return selectLeastCompletedRoute(themes, currentPathId)
+        }
+
         findMissingKnowledgeRoute(
             excludePathId = currentPathId.takeIf { currentRouteTerminal },
             excludePathName = currentCandidate?.name?.takeIf {
@@ -4019,6 +4046,56 @@ class AntSports : ModelTask() {
             }
         }
         return historyCandidates.firstOrNull()?.let { RouteDecision(it, "用户已走路线未完成优先") }
+    }
+
+    private fun selectLeastCompletedRoute(restrictedThemes: List<String>, currentPathId: String?): RouteDecision? {
+        val themes = if (restrictedThemes.isNotEmpty()) restrictedThemes else {
+            val response = JSONObject(AntSportsRpcCall.queryThemeList())
+            if (!ResChecker.checkRes(TAG, "查询路线主题失败:", response)) return null
+            val list = unwrapSportsRpcPayload(response).optJSONObject("data")?.optJSONArray("themeList") ?: return null
+            (0 until list.length()).mapNotNull { list.optJSONObject(it)?.optString("themeId") }
+                .filter { it.isNotBlank() }.distinct()
+        }
+        val candidates = mutableListOf<Pair<RouteCandidate, Int>>()
+        for (themeId in themes) {
+            if (ApplicationHookConstants.isOffline()) return null
+            val world = JSONObject(AntSportsRpcCall.queryWorldMap(themeId))
+            if (!ResChecker.checkRes(TAG, "查询主题城市失败:", world)) continue
+            val cities = unwrapSportsRpcPayload(world).optJSONObject("data")?.optJSONArray("cityList") ?: continue
+            for (i in 0 until cities.length()) {
+                if (ApplicationHookConstants.isOffline()) return null
+                val city = cities.optJSONObject(i) ?: continue
+                val cityId = city.optString("cityId").takeIf { it.isNotBlank() } ?: continue
+                val response = JSONObject(AntSportsRpcCall.queryCityPath(cityId))
+                if (!ResChecker.checkRes(TAG, "查询城市路线失败:", response)) continue
+                val paths = unwrapSportsRpcPayload(response).optJSONObject("data")?.optJSONArray("cityPathList") ?: continue
+                for (j in 0 until paths.length()) {
+                    val path = paths.optJSONObject(j) ?: continue
+                    val pathId = path.optString("pathId")
+                    if (pathId.isBlank() || path.optBoolean("locked", true)) continue
+                    candidates.add(RouteCandidate(pathId, path.optString("name"), themeId, cityId) to
+                        path.optInt("completeCount", 0).coerceAtLeast(0))
+                }
+            }
+        }
+        val ordered = candidates.distinctBy { it.first.pathId }
+            .sortedWith(compareBy<Pair<RouteCandidate, Int>> { it.second }.thenBy { it.first.pathId == currentPathId })
+        for ((candidate, count) in ordered) {
+            if (ApplicationHookConstants.isOffline()) return null
+            val data = fetchRoutePathData(candidate.pathId) ?: continue
+            val verified = buildRouteCandidateFromPathData(data) ?: continue
+            if (verified.pathId != candidate.pathId) continue
+            if (restrictedThemes.isNotEmpty() && !verified.themeId.isNullOrBlank() && verified.themeId !in restrictedThemes) continue
+            val step = data.optJSONObject("userPathStep")
+            if (step?.optBoolean("dayLimit", false) == true) continue
+            if (isActiveRouteStatus(verified.status) && isRouteStepUnavailable(data, step)) continue
+            return RouteDecision(
+                verified.copy(name = verified.name.ifBlank { candidate.name }, themeId = verified.themeId ?: candidate.themeId,
+                    cityId = verified.cityId ?: candidate.cityId),
+                "优先低完成次数路线，当前${count}次",
+            )
+        }
+        return null
     }
 
     private fun selectConfiguredRoute(
@@ -6471,6 +6548,7 @@ class AntSports : ModelTask() {
         // 任务大厅/签到/建造按最新抓包固定运动首页 source；泡泡可独立记忆可用辅助 source。
         private var activeNeverlandSource: String = NEVERLAND_SOURCE_SPORT_HOME
         private var activeNeverlandAuxSource: String = NEVERLAND_SOURCE_SPORT_HOME
+        private val strategyBubbleState = TaskFlowExecutionState()
 
         private fun neverlandRewardUnavailableFlag(mapId: String): String {
             return StatusFlags.FLAG_NEVERLAND_REWARD_UNAVAILABLE_PREFIX + mapId
@@ -6580,6 +6658,8 @@ class AntSports : ModelTask() {
                 activeNeverlandAuxSource = activeNeverlandSource
                 Log.sports("开始执行健康岛任务")
                 if (neverlandTask.value == true) {
+                    receiveNeverlandOfflineAwards()
+                    if (ApplicationHookConstants.isOffline()) return
                     // 1. 签到
                     neverlandDoSign()
                     if (ApplicationHookConstants.isOffline()) return
@@ -7642,6 +7722,81 @@ class AntSports : ModelTask() {
         /**
          * @brief 健康岛捡泡泡 + 浏览类泡泡任务
          */
+        private fun receiveNeverlandOfflineAwards() {
+            TaskFlowEngine(object : TaskFlowAdapter {
+                override val moduleName = SPORTS_TASK_BLACKLIST_MODULE
+                override val flowName = "健康岛离线奖励"
+                override fun query(): JSONObject = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryBaseinfo(activeNeverlandSource))
+                override fun isQuerySuccess(response: JSONObject): Boolean = isSportsRpcSuccess(response)
+                override fun isQueryComplete(response: JSONObject): Boolean = response.optJSONObject("data")?.optJSONArray("offlineAwards") != null
+                override fun extractItems(response: JSONObject): List<TaskFlowItem> {
+                    val awards = response.optJSONObject("data")?.optJSONArray("offlineAwards") ?: return emptyList()
+                    if (awards.length() == 0) return emptyList()
+                    return listOf(TaskFlowItem("offlineAwards", "离线奖励", "READY", progress = awards.length().toString()))
+                }
+                override fun mapPhase(item: TaskFlowItem) = TaskFlowPhase.REWARD_READY
+                override fun receive(item: TaskFlowItem): TaskFlowActionResult {
+                    val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.offlineAward())
+                    if (!ResChecker.checkRes(TAG, "离线奖励领取失败:", response)) return TaskFlowActionResult.failure(
+                        classifySportsTaskFailure(response), code = extractSportsRpcErrorCode(response),
+                        message = extractSportsRpcErrorMessage(response), raw = response.toString(),
+                    )
+                    val awards = response.optJSONObject("data")?.optJSONArray("userItems")
+                    val rewards = (0 until (awards?.length() ?: 0)).mapNotNull { awards?.optJSONObject(it) }
+                        .filter { it.optInt("modifyCount") > 0 }
+                    if (rewards.any { it.optString("itemId") == "H1" }) {
+                        Status.removeFlag(StatusFlags.FLAG_ANTSPORTS_NEVERLAND_ENERGY_LIMIT)
+                    }
+                    Log.sports("健康岛离线奖励已受理 " + rewards.joinToString("、") {
+                        "${it.optString("name").ifBlank { it.optString("itemId") }}+${it.optInt("modifyCount")}" })
+                    return TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, "回查离线奖励", refreshAfterAction = true)
+                }
+                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "健康岛离线奖励查询失败:$response")
+                override fun logInfo(message: String) = Log.sports(message)
+                override fun logError(message: String) = Log.error(TAG, message)
+            }).run()
+        }
+
+        private fun receiveStrategyBubble(source: String): Boolean {
+            return TaskFlowEngine(object : TaskFlowAdapter {
+                override val moduleName = SPORTS_TASK_BLACKLIST_MODULE
+                override val flowName = "健康岛策略气泡"
+                override fun query(): JSONObject = JSONObject(AntSportsRpcCall.NeverlandRpcCall.queryBubbleTask(source))
+                override fun isQuerySuccess(response: JSONObject): Boolean = isSportsRpcSuccess(response)
+                override fun isQueryComplete(response: JSONObject): Boolean = response.optJSONObject("data")?.optJSONArray("bubbleTaskVOS") != null
+                override fun extractItems(response: JSONObject): List<TaskFlowItem> {
+                    val bubbles = response.optJSONObject("data")?.optJSONArray("bubbleTaskVOS") ?: return emptyList()
+                    val matched = (0 until bubbles.length()).mapNotNull { bubbles.optJSONObject(it) }
+                        .filter { it.optString("taskId") == "STRATEGY_BALL" }
+                    if (isNeverlandTaskSubmittedToday("STRATEGY_BALL") &&
+                        (matched.isEmpty() || matched.all { isNeverlandBubbleTerminal(it.optString("bubbleTaskStatus")) })
+                    ) {
+                        markNeverlandTaskDoneToday("STRATEGY_BALL")
+                        clearNeverlandTaskPendingConfirmation("STRATEGY_BALL")
+                    }
+                    if (isNeverlandTaskDoneToday("STRATEGY_BALL")) return emptyList()
+                    return matched.filter { it.optString("bubbleTaskStatus") == "INIT" }.map {
+                        TaskFlowItem("STRATEGY_BALL", it.optString("title", "策略气泡"), "INIT", raw = it,
+                            progress = it.optString("medEnergyBallInfoRecordId"))
+                    }
+                }
+                override fun mapPhase(item: TaskFlowItem) = TaskFlowPhase.READY_TO_COMPLETE
+                override fun complete(item: TaskFlowItem): TaskFlowActionResult {
+                    val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.receiveSpecialPrize("STRATEGY_BALL_ACTIVITY"))
+                    if (!ResChecker.checkRes(TAG, "策略气泡奖励领取失败:", response)) return TaskFlowActionResult.failure(
+                        classifySportsTaskFailure(response), code = extractSportsRpcErrorCode(response),
+                        message = extractSportsRpcErrorMessage(response), raw = response.toString(),
+                    )
+                    markNeverlandTaskSubmittedToday(item.id)
+                    Log.sports("健康岛[${item.title}]领取已受理，回查气泡状态")
+                    return TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, "回查策略气泡", refreshAfterAction = true)
+                }
+                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "健康岛策略气泡查询失败:$response")
+                override fun logInfo(message: String) = Log.sports(message)
+                override fun logError(message: String) = Log.error(TAG, message)
+            }, executionState = strategyBubbleState).run().completed
+        }
+
         fun neverlandPickAllBubble(vararg sources: String?): Boolean {
             try {
                 val querySources = if (sources.isEmpty()) candidateNeverlandSources() else sources.toList()
@@ -7652,7 +7807,7 @@ class AntSports : ModelTask() {
                 for (source in querySources) {
                     if (ApplicationHookConstants.isOffline()) return false
                     Log.sports("健康岛 · 检查可领取泡泡[source=$source]")
-                    val bubbleTasks = queryNeverlandBubbleTasks(source)
+                    var bubbleTasks = queryNeverlandBubbleTasks(source)
                     if (bubbleTasks == null) {
                         rewardsConfirmed = false
                         continue
@@ -7660,6 +7815,16 @@ class AntSports : ModelTask() {
                     queriedAny = true
                     if (bubbleTasks.isEmpty()) {
                         continue
+                    }
+
+                    if (source != null && bubbleTasks.any {
+                            it.optString("taskId") == "STRATEGY_BALL" && it.optString("bubbleTaskStatus") == "INIT"
+                        }
+                    ) {
+                        foundActionable = true
+                        if (!receiveStrategyBubble(source)) rewardsConfirmed = false
+                        val refreshed = queryNeverlandBubbleTasks(source)
+                        if (refreshed != null) bubbleTasks = refreshed else rewardsConfirmed = false
                     }
 
                     val ids = mutableListOf<String>()
@@ -7674,6 +7839,10 @@ class AntSports : ModelTask() {
                         val title = item.optString("title", item.optString("taskId", "未知泡泡任务"))
                         val centerTask = item.optJSONObject("taskCenterTaskVO")
 
+                        if (item.optString("taskId") == "STRATEGY_BALL" && bubbleTaskStatus == "INIT") {
+                            if (!isNeverlandTaskDoneToday("STRATEGY_BALL")) rewardsConfirmed = false
+                            continue
+                        }
                         if (centerTask != null) {
                             // 无来源的问答入口只收取已有奖励，任务动作仍由其所属来源处理。
                             if (source == null) continue
@@ -8938,6 +9107,7 @@ class AntSports : ModelTask() {
     interface WalkPathTheme {
         companion object {
             const val DA_MEI_ZHONG_GUO = 0  ///< 大美中国 (默认)
+            const val LOWEST_COMPLETION = 6
 
             /** @brief 界面显示的名称列表 */
             val nickNames = arrayOf(
@@ -8946,7 +9116,8 @@ class AntSports : ModelTask() {
                 "登顶芝麻山",
                 "维C大挑战",
                 "龙年祈福",
-                "守护体育梦"
+                "守护体育梦",
+                "自动（全主题完成次数最少）"
             )
 
             /**
@@ -8959,7 +9130,8 @@ class AntSports : ModelTask() {
                 "V202405271625",  ///< [2] 登顶芝麻山
                 "202404221422",   ///< [3] 维C大挑战
                 "WF202312050200", ///< [4] 龙年祈福
-                "V202409061650"   ///< [5] 守护体育梦
+                "V202409061650",  ///< [5] 守护体育梦
+                ""               ///< [6] 自动查询主题列表
             )
         }
     }

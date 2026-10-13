@@ -366,7 +366,7 @@ object ScheduledTaskRouter {
         if (childKind == AntMember.PERSISTENT_FLOATING_BALL_KIND) {
             if (targetProcess) {
                 val antMember = Model.getModel(AntMember::class.java) ?: return RouteResult.DEFERRED
-                if (!antMember.isEnable() || antMember.memberTask?.value != true) return RouteResult.SKIPPED
+                if (!antMember.isEnable()) return RouteResult.SKIPPED
                 return if (antMember.triggerPersistentMemberFloatingBall(schedule.payloadJson, schedule.id, source)) {
                     RouteResult.HANDLED
                 } else {

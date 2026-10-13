@@ -344,6 +344,19 @@ object ModelFieldTodayStateResolver {
                 flag(StatusFlags.FLAG_GOLDEN_BEAN_TASKS_DONE, "今日金豆夺宝任务已处理")
             }
 
+            "GoldenBeanTreasure.goldenBeanMallExchange",
+            "GoldenBeanTreasure.goldenBeanMallExchangeList",
+            -> {
+                val selected = countMapValue(modelFields["goldenBeanMallExchangeList"])
+                if (selected.isNotEmpty() && selected.all { (id, limit) ->
+                        limit > 0 && (Status.getIntFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_MALL_EXCHANGE_COUNT_PREFIX + id) ?: 0) >= limit
+                    }) {
+                    inactive("今日所选商品规格已达兑换次数")
+                } else {
+                    ModelFieldTodayState()
+                }
+            }
+
             "GoldenBeanTreasure.goldenBeanManureExchangeDailyReserveAmount" -> {
                 limitReached(
                     current = Status.getIntFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_MANURE_EXCHANGE_AMOUNT),

@@ -210,15 +210,17 @@ class UserDataStore(val uid: String, private val storageFile: File) {
         return File.createTempFile("${storageFile.name}.", ".tmp", parentDir)
     }
 
-    private fun saveToDisk() {
+    private fun saveToDisk(requirePersistence: Boolean = false) {
         var tempFile: File? = null
         try {
             tempFile = createWriteTempFile()
             mapper.writer(prettyPrinter).writeValue(tempFile, data)
+            if (requirePersistence) java.io.FileOutputStream(tempFile, true).use { it.fd.sync() }
             setWorldReadableWritable(tempFile)
             lastWriteTime.set(System.currentTimeMillis())
             var renameSuccess = tempFile.renameTo(storageFile)
             if (!renameSuccess) {
+                if (requirePersistence) throw java.io.IOException("Failed to atomically persist user data")
                 Log.w(tag, "renameTo failed, falling back to copy stream.")
                 try {
                     tempFile.copyTo(storageFile, overwrite = true)
@@ -233,6 +235,7 @@ class UserDataStore(val uid: String, private val storageFile: File) {
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to save config", e)
+            if (requirePersistence) throw e
         } finally {
             if (tempFile?.exists() == true) {
                 tempFile.delete()
@@ -297,6 +300,18 @@ class UserDataStore(val uid: String, private val storageFile: File) {
         forceLoadFromDisk()
         data[key] = value
         saveToDisk()
+    }
+
+    /** 消费动作的待确认记录必须落盘成功，调用方才能提交请求。 */
+    fun put(key: String, value: Any, requirePersistence: Boolean) = lock.write {
+        forceLoadFromDisk()
+        val previous = data.put(key, value)
+        try {
+            saveToDisk(requirePersistence)
+        } catch (e: Exception) {
+            if (previous == null) data.remove(key) else data[key] = previous
+            throw e
+        }
     }
 
     fun remove(key: String) = lock.write {

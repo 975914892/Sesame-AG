@@ -24,7 +24,6 @@ internal class TaskExecutionReport {
 
     val context = activeReport.asContextElement(this)
     private val flows = ConcurrentHashMap<Triple<TaskFlowExecutionState, String, String>, TaskFlowRunResult>()
-    private val failed = AtomicBoolean(false)
     private val exception = AtomicBoolean(false)
 
     val hasException: Boolean
@@ -36,11 +35,10 @@ internal class TaskExecutionReport {
 
     fun recordFlow(state: TaskFlowExecutionState, module: String, flow: String, result: TaskFlowRunResult) {
         flows[Triple(state, module, flow)] = result
-        if (result.failureCount > 0) failed.set(true)
     }
 
     fun outcome(): TaskExecutionOutcome = when {
-        hasException || failed.get() -> TaskExecutionOutcome.FAILED
+        hasException || flows.values.any { it.failureCount > 0 } -> TaskExecutionOutcome.FAILED
         flows.values.any { it.interrupted } -> TaskExecutionOutcome.CANCELLED
         flows.values.any { !it.completed } -> TaskExecutionOutcome.DEFERRED
         else -> TaskExecutionOutcome.SUCCESS

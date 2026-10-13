@@ -192,6 +192,7 @@ private data class TaskFlowActionCandidate(
  */
 class TaskFlowExecutionState {
     internal val failedActionSnapshotKeys = mutableSetOf<String>()
+    internal val unresolvedActionFailures = mutableMapOf<String, Pair<TaskFlowItem, TaskFlowAction>>()
     internal val deferredActionKeys = mutableSetOf<String>()
     internal val executedActionSnapshotKeys = mutableSetOf<String>()
     internal val pendingActionConfirmations = mutableMapOf<String, Pair<TaskFlowItem, TaskFlowAction>>()
@@ -380,7 +381,7 @@ class TaskFlowEngine(
         var noProgressSuccessAny = false
         var deferredCountAny = 0
         val deferredReasonCountsAny = linkedMapOf<DeferredReason, Int>()
-        var failureCountAny = 0
+        var failureCountAny = unresolvedFailureCount
         var tailFollowUpRefreshBudget = 1
         var confirmationRefreshOnlyRound = false
         val loggedBlacklistMatches = mutableSetOf<String>()
@@ -481,6 +482,8 @@ class TaskFlowEngine(
             }
 
             val items = adapter.extractItems(response)
+            confirmRecoveredFailures(items)
+            failureCountAny = unresolvedFailureCount
             for (item in items) {
                 if (adapter.mapPhase(item) in setOf(TaskFlowPhase.REWARD_READY, TaskFlowPhase.TERMINAL)) continue
                 if (item.id in loggedBlacklistMatches) continue
@@ -650,6 +653,10 @@ class TaskFlowEngine(
                     continue
                 }
                 if (result.success) {
+                    if (action == TaskFlowAction.RECEIVE && result.progressChanged) {
+                        confirmRecoveredFailures(listOf(item), rewardReceived = true)
+                        failureCountAny = unresolvedFailureCount
+                    }
                     executedActionSnapshotKeys.add(actionSnapshotKey)
                     adapter.afterSuccess(item, action, result)
                     if (result.progressChanged) {
@@ -673,6 +680,10 @@ class TaskFlowEngine(
                 }
 
                 if (failureType == TaskRpcFailureType.TERMINAL_DONE) {
+                    if (action == TaskFlowAction.RECEIVE) {
+                        confirmRecoveredFailures(listOf(item), rewardReceived = true)
+                        failureCountAny = unresolvedFailureCount
+                    }
                     logFailure(item, action, result, failureType, TaskFlowDecision.MARK_HANDLED)
                     adapter.afterFailure(item, action, result, TaskFlowDecision.MARK_HANDLED)
                     executionState.failedActionSnapshotKeys.add(actionSnapshotKey)
@@ -687,7 +698,8 @@ class TaskFlowEngine(
                 if (decision == TaskFlowDecision.BLACKLIST) {
                     adapter.blacklist(item, result)
                 }
-                failureCountAny++
+                executionState.unresolvedActionFailures[actionSnapshotKey] = item to action
+                failureCountAny = unresolvedFailureCount
                 logFailure(item, action, result, failureType, decision)
                 adapter.afterFailure(item, action, result, decision)
                 executionState.failedActionSnapshotKeys.add(actionSnapshotKey)
@@ -767,7 +779,8 @@ class TaskFlowEngine(
             if (!stopCurrentRound &&
                 !failureStoppedActions &&
                 !ApplicationHookConstants.isOffline() &&
-                snapshot.isComplete && adapter.isQueryComplete(response) && !noProgressSuccessAny
+                snapshot.isComplete && adapter.isQueryComplete(response) && !noProgressSuccessAny &&
+                failureCountAny == 0
             ) {
                 adapter.onAllTasksDone(snapshot)
                 return finishRunResult(
@@ -909,6 +922,42 @@ class TaskFlowEngine(
             deferredReasonCounts = deferredReasonCounts,
         ).copy(failureCount = failureCount).also {
             TaskExecutionReport.current()?.recordFlow(executionState, adapter.moduleName, adapter.flowName, it)
+        }
+    }
+
+    private val unresolvedFailureCount: Int
+        get() = executionState.unresolvedActionFailures.count { (key, failed) ->
+            key == actionSnapshotKey(failed.first, failed.second)
+        }
+
+    private fun confirmRecoveredFailures(items: List<TaskFlowItem>, rewardReceived: Boolean = false) {
+        val failures = executionState.unresolvedActionFailures.iterator()
+        while (failures.hasNext()) {
+            val (key, failed) = failures.next()
+            val (previous, action) = failed
+            if (key != actionSnapshotKey(previous, action)) continue
+            val refreshed = items.firstOrNull { candidate ->
+                previous.id.isNotBlank() && candidate.id == previous.id &&
+                    candidate.type == previous.type && candidate.sceneCode == previous.sceneCode &&
+                    adapter.actionKey(candidate.copy(
+                        status = previous.status, current = previous.current,
+                        limit = previous.limit, progress = previous.progress,
+                    ), action) == adapter.actionKey(previous, action)
+            } ?: continue
+            val phase = adapter.mapPhase(refreshed)
+            val recovered = rewardReceived || when (action) {
+                TaskFlowAction.RECEIVE -> phase == TaskFlowPhase.TERMINAL
+                TaskFlowAction.COMPLETE, TaskFlowAction.SEND ->
+                    phase == TaskFlowPhase.REWARD_READY || phase == TaskFlowPhase.TERMINAL
+                TaskFlowAction.SIGNUP -> phase in setOf(
+                    TaskFlowPhase.SIGNUP_COMPLETE, TaskFlowPhase.READY_TO_COMPLETE,
+                    TaskFlowPhase.REWARD_READY, TaskFlowPhase.TERMINAL,
+                )
+            }
+            if (!recovered) continue
+            // 消解结果但保留失败快照，避免重新提交原动作。
+            failures.remove()
+            adapter.logInfo("${adapter.flowName}[已确认${action.logName}失败恢复：${refreshed.title}]")
         }
     }
 

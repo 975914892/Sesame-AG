@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
+
 import android.annotation.SuppressLint
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
@@ -247,6 +249,8 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private var robMultiplierCardTime: TimeTriggerModelField? = null // 收好友N倍卡时间
     private var robMultiplierCardReplaceRemainDays: IntegerModelField? = null // 高倍率替换剩余天数
     private var robMultiplierCardForceReplaceExpireDays: IntegerModelField? = null // 临期强制替换天数
+
+    internal var greenRent: BooleanModelField? = null
 
     internal var energyRainChance: BooleanModelField? = null
     internal var energyRainTime: TimePointModelField? = null // 能量雨执行时间
@@ -811,8 +815,10 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             ).also { medicalHealthOption = it })
 
         modelFields.addField(BooleanModelField("forestMarket", "森林集市", false).withDesc(
-            "执行森林集市任务并领取奖励。"
+            "领取集市逛街能量并完成绿色知识打卡。"
         ).also { forestMarket = it })
+        modelFields.addField(BooleanModelField("greenRent", "绿色租赁 | 浏览能量", false)
+            .also { greenRent = it })
         modelFields.addField(BooleanModelField("ecoLife", "绿色行动 | 开启", false).withDesc(
             "执行绿色行动任务。"
         ).also { ecoLife = it })
@@ -1496,7 +1502,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 }
                 waterCount = min(waterCount, 3)
 
-                if (Status.canWaterFriendToday(uid, waterCount, taskUid)) {
+                val completedCount = Status.getWaterFriendTodayCount(uid, taskUid) ?: break
+                val remainingCount = (waterCount - completedCount).coerceAtLeast(0)
+                if (remainingCount > 0) {
                     try {
                         val jo = queryFriendHome(uid, "waterFriend") ?: continue
                         if (ResChecker.checkRes(TAG, jo)) {
@@ -1505,15 +1513,14 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                                 continue
                             }
 
-                            // ✅ 关键改动：传入通知开关
                             val friendGram = friendGramMap[uid]?.takeIf { it > 0 } ?: maxFriendWaterCount
                             val waterCountKVNode = returnFriendWater(
-                                uid, bizNo, waterCount, friendGram, notify, taskUid
+                                uid, bizNo, remainingCount, friendGram, notify, taskUid
                             )
 
                             val actualWaterCount: Int = waterCountKVNode.key!!
                             if (actualWaterCount > 0) {
-                                Status.waterFriendToday(uid, actualWaterCount, taskUid)
+                                Status.waterFriendToday(uid, completedCount + actualWaterCount, taskUid)
                             }
                             if (java.lang.Boolean.FALSE == waterCountKVNode.value) {
                                 break
@@ -4492,6 +4499,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 ),
             )
             when {
+                extractForestTaskFailureCode(finishTaskResponse) == "400000040" -> {
+                    val result = AntFarmRpcCall.doSceneTask(childTaskType, childSceneCode) { fallback ->
+                        forestTaskActionFailureResult(fallback, "AntFarmRpcCall.doFarmTask", "taskType=$childTaskType sceneCode=$childSceneCode")
+                    }
+                    if (result.deferredReason != null) {
+                        changed = true
+                    } else {
+                        Log.error(TAG, "绿色践行子任务备用请求失败[$childTaskTitle] code=${result.code} msg=${result.message} raw=${result.raw}")
+                    }
+                }
                 isForestTaskAlreadyHandled(finishTaskResponse) -> {
                     forestTaskTryCount.remove(bizKey)
                     Log.forest("绿色践行子任务已完结: $childTaskTitle")
@@ -4813,6 +4830,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return emptyForestTaskActionResponse("AntForestRpcCall.finishTask", item, "finishLegacyGameTask")
         }
         val finishTaskResponse = JSONObject(response)
+        if (extractForestTaskFailureCode(finishTaskResponse) == "400000040" && item.sceneCode.isNotBlank()) {
+            return AntFarmRpcCall.doSceneTask(item.type, item.sceneCode) { fallback ->
+                forestTaskActionFailureResult(fallback, "AntFarmRpcCall.doFarmTask", forestTaskActionDetail(item, "complete"))
+            }
+        }
         return if (ResChecker.checkRes(TAG, "完成游戏任务失败:", finishTaskResponse)) {
             val awardSuffix = if (awardCount > 0) "，奖励数量# $awardCount" else ""
             Log.forest("游戏任务完成 🎮️[${item.title}]$awardSuffix")
@@ -4842,6 +4864,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return emptyForestTaskActionResponse("AntForestRpcCall.finishTask", item, "finishTask")
         }
         val finishTaskResponse = JSONObject(response)
+        if (extractForestTaskFailureCode(finishTaskResponse) == "400000040" && item.sceneCode.isNotBlank()) {
+            return AntFarmRpcCall.doSceneTask(item.type, item.sceneCode) { fallback ->
+                forestTaskActionFailureResult(fallback, "AntFarmRpcCall.doFarmTask", forestTaskActionDetail(item, "complete"))
+            }
+        }
         return when {
             isForestTaskAlreadyHandled(finishTaskResponse) -> TaskFlowActionResult.failure(
                 failureType = TaskRpcFailureType.TERMINAL_DONE,
@@ -4991,6 +5018,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             return emptyForestTaskActionResponse("AntForestRpcCall.finishTask", item, "oneClickWateringFinishTask")
         }
         val finishTaskResponse = JSONObject(response)
+        if (extractForestTaskFailureCode(finishTaskResponse) == "400000040" && item.sceneCode.isNotBlank()) {
+            return AntFarmRpcCall.doSceneTask(item.type, item.sceneCode) { fallback ->
+                forestTaskActionFailureResult(fallback, "AntFarmRpcCall.doFarmTask", forestTaskActionDetail(item, "complete"))
+            }
+        }
         return when {
             isForestTaskAlreadyHandled(finishTaskResponse) -> TaskFlowActionResult.failure(
                 failureType = TaskRpcFailureType.TERMINAL_DONE,
@@ -5168,6 +5200,33 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             processTakeLookEndTaskList(AntForestRpcCall.BACK_FROM_ENERGY_RAIN_SOURCE, takeLookEndPayload)
         } catch (t: Throwable) {
             handleException("handleEnergyRainPostFlow", t)
+        }
+    }
+
+    internal fun expressTaskFlowAdapter(): TaskFlowAdapter {
+        var entered = false
+        return object : TaskFlowAdapter by ForestTaskFlowAdapter(
+            taskSources = emptyList(), targetTaskTypes = setOf("KUAIDI_VITALITY"),
+        ) {
+            override val flowName = "快递森林活力值"
+
+            override fun query(): JSONObject {
+                if (!entered) {
+                    val home = JSONObject(AntForestRpcCall.queryHomePage("kuaidivitality"))
+                    if (!ResChecker.checkRes(TAG, home)) return home
+                    entered = true
+                }
+                val tasks = JSONObject(AntForestRpcCall.queryTaskList(
+                    "home_task_list", "kuaidivitality", JSONObject().put("firstTaskType", "KUAIDI_VITALITY"),
+                ))
+                if (!ResChecker.checkRes(TAG, tasks)) return tasks
+                return JSONObject().put("success", true).put("responses", JSONArray().put(
+                    JSONObject().put("sourceName", "kuaidivitality").put("payload", tasks),
+                ))
+            }
+
+            override fun isQuerySuccess(response: JSONObject): Boolean =
+                response.optBoolean("success") && response.optJSONArray("responses") != null
         }
     }
 

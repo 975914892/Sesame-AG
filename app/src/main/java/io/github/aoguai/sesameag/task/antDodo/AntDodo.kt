@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antDodo
 
+import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
+
 import org.json.JSONException
 import org.json.JSONArray
 import org.json.JSONObject
@@ -546,11 +548,16 @@ class AntDodo : ModelTask() {
                     refreshAfterAction = true,
                 )
             }
-            return dodoActionFailureResult(
+            val failure = dodoActionFailureResult(
                 response = result,
                 rpc = "AntDodoRpcCall.finishTask",
                 detail = dodoActionDetail(item, "finishTask")
             )
+            return if (failure.code == "400000040" && item.sceneCode.isNotBlank()) {
+                AntFarmRpcCall.doSceneTask(item.type, item.sceneCode) { fallback ->
+                    dodoActionFailureResult(fallback, "AntFarmRpcCall.doFarmTask", dodoActionDetail(item, "finishTask"))
+                }
+            } else failure
         }
 
         override fun actionKey(item: TaskFlowItem, action: TaskFlowAction): String {

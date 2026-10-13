@@ -103,6 +103,12 @@ object AntOrchardRpcCall {
             "[{\"activityType\":[\"WISH\",\"BATTLE\",\"HELP_FARMER\",\"DEFOLIATION\",\"CAMP_TAKEOVER\",\"LIMITED_TIME_CHALLENGE\",\"LOTTERY_PLUS\"],\"appMode\":\"normal\",\"inHomepage\":true,\"requestType\":\"NORMAL\",\"sceneCode\":\"ORCHARD\",\"source\":\"$ENTRY_SOURCE\",\"treeLevel\":\"$treeLevel\",\"version\":\"$VERSION\"}]",
         )
 
+    fun choosePrize(sendOrderId: String): String = RequestManager.requestString(
+        "com.alipay.antfarmlite.choosePrize",
+        JSONArray().put(JSONObject().put("requestType", "NORMAL").put("sceneCode", "ORCHARD")
+            .put("sendOrderId", sendOrderId).put("source", "ANTFARM_ORCHARD")).toString(),
+    )
+
     fun triggerSubplotsActivity(
         activityId: String,
         activityType: String,

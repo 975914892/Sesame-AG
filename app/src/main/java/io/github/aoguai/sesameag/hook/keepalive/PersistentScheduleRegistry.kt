@@ -12,6 +12,8 @@ import io.github.aoguai.sesameag.util.TimeUtil
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.RandomAccessFile
+import java.nio.channels.FileLock
+import java.nio.channels.FileLockInterruptionException
 
 object PersistentScheduleRegistry {
     private const val TAG = "PersistentScheduleRegistry"
@@ -854,7 +856,21 @@ object PersistentScheduleRegistry {
             RandomAccessFile(lockFile, "rw").use { randomAccessFile ->
                 lockFile.setReadable(true, false)
                 lockFile.setWritable(true, false)
-                randomAccessFile.channel.lock().use {
+                // 注册表锁与独立的存储锁可能被同进程不同线程持有；避免阻塞文件锁按进程检测出伪死锁。
+                var fileLock: FileLock? = null
+                while (fileLock == null) {
+                    if (Thread.currentThread().isInterrupted) throw FileLockInterruptionException()
+                    fileLock = randomAccessFile.channel.tryLock()
+                    if (fileLock == null) {
+                        try {
+                            Thread.sleep(25L)
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            throw FileLockInterruptionException()
+                        }
+                    }
+                }
+                fileLock.use {
                     registryLockDepth.set(1)
                     try {
                         // 锁内一律舍弃本地快照，整表读改写以最新磁盘状态为起点。

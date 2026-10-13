@@ -2,6 +2,17 @@ package io.github.aoguai.sesameag.task.goldenBean
 
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
+import io.github.aoguai.sesameag.task.exchange.ExchangeCost
+import io.github.aoguai.sesameag.task.exchange.ExchangeDisplayMeta
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
+import io.github.aoguai.sesameag.task.exchange.ExchangeFetchSession
+import io.github.aoguai.sesameag.task.exchange.ExchangeItem
+import io.github.aoguai.sesameag.task.exchange.ExchangeLimit
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
+import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
+import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
+import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.task.common.GameCenterPlayRpcCall
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
@@ -569,40 +580,113 @@ internal object GoldenBeanTreasureSupport {
         }
     }
 
-    internal fun queryMallItems() {
-        val topResponse = parseResponse(GoldenBeanRpcCall.listTopItemsByScene())
-        if (topResponse == null || !isSuccess(topResponse)) {
-            Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆夺宝商城运营位查询失败 raw=${topResponse ?: "EMPTY"}")
-        } else {
-            logMallItems(
-                topResponse.optJSONObject("itemsSceneMap")?.optJSONArray("OPERATION_STRATEGY") ?: JSONArray(),
-                "运营位",
-            )
-        }
+    internal fun queryMallItems(forceRefresh: Boolean = false): ExchangeOptionsSnapshot =
+        ExchangeOptionsCache.getOrFetch(
+            UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL, forceRefresh,
+        ) { session -> collectMallItems(session) {} }
 
+    internal fun queryLiveMallItems(): ExchangeOptionsSnapshot = ExchangeOptionsCache.readAndReplaceFromLive(
+        UserMap.currentUid, ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL, JSONObject(),
+    ) { checkCurrent -> collectMallItems(null, checkCurrent) }
+
+    private fun collectMallItems(session: ExchangeFetchSession?, checkCurrent: () -> Unit): ExchangeOptionsSnapshot {
+        if (session != null) {
+            val topResponse = parseResponse(GoldenBeanRpcCall.listTopItemsByScene())
+            if (topResponse == null || !isSuccess(topResponse)) {
+                Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆夺宝商城运营位查询失败 raw=${topResponse ?: "EMPTY"}")
+            } else {
+                logMallItems(topResponse.optJSONObject("itemsSceneMap")?.optJSONArray("OPERATION_STRATEGY") ?: JSONArray(), "运营位")
+            }
+        }
+        val allItems = JSONArray()
+        val rows = linkedMapOf<String, io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow>()
+        val seenItems = mutableSetOf<String>()
         var startIndex = 0
         while (true) {
-            val itemResponse = parseResponse(GoldenBeanRpcCall.itemList(startIndex))
-            if (itemResponse == null || !isSuccess(itemResponse)) {
-                Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆夺宝商城列表查询失败 startIndex=$startIndex raw=${itemResponse ?: "EMPTY"}")
-                return
+            checkCurrent()
+            val fetch = { parseResponse(GoldenBeanRpcCall.itemList(startIndex)) ?: error("金豆商城商品列表返回空") }
+            val response = session?.read("items", JSONObject().put("startIndex", startIndex), "商品第${startIndex / 20 + 1}页", fetch) ?: fetch()
+            check(isSuccess(response)) { "金豆商城列表查询失败 startIndex=$startIndex raw=$response" }
+            val items = response.getJSONArray("itemInfoVOList")
+            val hasMore = response.getBoolean("hasMore")
+            val next = if (hasMore) response.getInt("nextStartIndex") else startIndex
+            check(!hasMore || items.length() > 0 && next > startIndex) { "金豆商城分页未推进 startIndex=$startIndex next=$next" }
+            var added = 0
+            for (i in 0 until items.length()) {
+                val spu = items.getJSONObject(i)
+                val spuId = spu.getString("spuId")
+                require(spuId.isNotBlank()) { "金豆商城商品缺少 spuId" }
+                val skus = spu.optJSONArray("skuModelList") ?: JSONArray()
+                if (skus.length() == 0 && seenItems.add(spuId)) added++
+                for (j in 0 until skus.length()) {
+                    val sku = skus.getJSONObject(j)
+                    require(sku.optString("skuId").isNotBlank()) { "金豆商城规格缺少 skuId:$sku" }
+                    val item = mallExchangeItem(spu, sku)
+                    if (seenItems.add(item.id)) added++
+                    rows[item.id] = item.toOptionRow()
+                }
+                allItems.put(spu)
             }
-
-            val items = itemResponse.optJSONArray("itemInfoVOList") ?: JSONArray()
+            check(items.length() == 0 || added > 0) { "金豆商城返回重复页 startIndex=$startIndex" }
             logMallItems(items, "商品")
+            session?.commit(JSONObject().put("startIndex", next).put("hasMore", hasMore), items.length(),
+                if (hasMore) "商品第${next / 20 + 1}页" else "保存商品规格列表")
+            if (!hasMore) return ExchangeOptionsSnapshot(rows.values.toList(), JSONObject().put("items", allItems))
+            startIndex = next
+            if (session != null) session.pageTurnDelay() else ExchangeFetchPacing.pageTurnDelay()
+        }
+    }
 
-            if (!itemResponse.optBoolean("hasMore", false)) {
-                return
+    internal fun mallExchangeItem(spu: JSONObject, sku: JSONObject): ExchangeItem {
+        val cost = sku.optJSONObject("price")?.optLong("cent", -1L) ?: -1L
+        val money = sku.optJSONObject("moneyPrice")
+        val cash = if (!sku.has("moneyPrice") || sku.isNull("moneyPrice")) 0L else money?.optLong("cent", -1L) ?: -1L
+        val externalOrder = spu.optString("outSpuType").isNotBlank() || spu.optString("outSpuId").isNotBlank() ||
+            sku.optString("outSpuOrderLink").isNotBlank() || sku.optString("outSkuId").isNotBlank()
+        val dayLeft = sku.optInt("userDayLeftAmount", -1)
+        val totalLeft = sku.optInt("userTotalLeftAmount", -1)
+        val stock = spu.optInt("remainStockCounts", -1)
+        val (safety, reason) = when {
+            cost < 0L -> ExchangeSafety.UNAVAILABLE to "未取得有效金豆罐价格"
+            cash < 0L -> ExchangeSafety.LOG_ONLY to "实付金额未明确"
+            cash > 0L || externalOrder -> ExchangeSafety.LOG_ONLY to "需要实付或外部下单"
+            sku.optString("rightsConfigId").isBlank() -> ExchangeSafety.LOG_ONLY to "未明确内部权益领取方式"
+            dayLeft == 0 || totalLeft == 0 || stock == 0 -> ExchangeSafety.UNAVAILABLE to "库存或兑换次数已用完"
+            else -> ExchangeSafety.AUTO to ""
+        }
+        val name = listOf(spu.optString("spuName"), sku.optString("skuName")).filter { it.isNotBlank() }.distinct().joinToString(" / ")
+        return ExchangeItem(
+            id = "${spu.optString("spuId")}:${sku.optString("skuId")}", name = name,
+            cost = ExchangeCost(
+                pointText = if (cost >= 0L) "${java.math.BigDecimal.valueOf(cost, 2).stripTrailingZeros().toPlainString()}金豆罐" else "金豆罐价格未知",
+                cashText = if (cash > 0L) "${java.math.BigDecimal.valueOf(cash, 2).toPlainString()}${money?.optString("currencyCode", "CNY")}" else "",
+            ),
+            limit = ExchangeLimit(statusText = sku.optString("skuRuleResult"),
+                stockText = listOfNotNull(stock.takeIf { it >= 0 }?.let { "库存$it" }, dayLeft.takeIf { it >= 0 }?.let { "今日余${it}次" }).joinToString("，")),
+            safety = safety, safetyReason = reason, displayMeta = ExchangeDisplayMeta(sourceModule = "金豆罐"),
+        )
+    }
+
+    internal fun queryMallOrders(checkCurrent: () -> Unit): List<JSONObject> {
+        val orders = linkedMapOf<String, JSONObject>()
+        var page = 1
+        while (true) {
+            checkCurrent()
+            val response = parseResponse(GoldenBeanRpcCall.queryExchangeOrders(page)) ?: error("金豆商城订单查询返回空")
+            checkCurrent()
+            check(isSuccess(response)) { "金豆商城订单查询失败 page=$page raw=$response" }
+            val list = response.getJSONArray("orderInfos")
+            var added = 0
+            for (i in 0 until list.length()) {
+                val order = list.getJSONObject(i)
+                val no = order.optString("orderNo")
+                require(no.isNotBlank()) { "金豆商城订单缺少 orderNo:$order" }
+                if (orders.put(no, order) == null) added++
             }
-            val nextStartIndex = itemResponse.optInt("nextStartIndex", startIndex)
-            if (nextStartIndex <= startIndex || items.length() == 0) {
-                Log.error(
-                    GOLDEN_BEAN_BLACKLIST_MODULE,
-                    "金豆夺宝商城分页未推进 startIndex=$startIndex nextStartIndex=$nextStartIndex",
-                )
-                return
-            }
-            startIndex = nextStartIndex
+            check(list.length() == 0 || added > 0) { "金豆商城订单分页未推进 page=$page" }
+            if (list.length() < 20) return orders.values.toList()
+            page++
+            ExchangeFetchPacing.pageTurnDelay()
         }
     }
 
@@ -915,16 +999,18 @@ internal object GoldenBeanTreasureSupport {
                 item.optString("spuId")
                     .ifBlank { item.optString("itemId") }
                     .ifBlank { item.optString("id") }
-            val firstSku = item.optJSONArray("skuModelList")?.optJSONObject(0)
-            val minPrice = item.optJSONObject("minPrice")
-            Log.goldenBean(
-                "金豆夺宝商城[${listType}只读] itemId=${itemId.ifBlank { "UNKNOWN" }} " +
-                    "itemStatus=${item.optString("itemStatus").ifBlank { "UNKNOWN" }} " +
-                    "skuId=${firstSku?.optString("skuId").orEmpty().ifBlank { "UNKNOWN" }} " +
-                    "skuStatus=${firstSku?.optString("skuRuleResult").orEmpty().ifBlank { "UNKNOWN" }} " +
-                    "stock=${item.optInt("remainStockCounts", -1)} " +
-                    "priceCent=${minPrice?.optInt("cent", -1)}",
-            )
+            val skus = item.optJSONArray("skuModelList") ?: JSONArray()
+            for (skuIndex in 0 until maxOf(skus.length(), 1)) {
+                val sku = skus.optJSONObject(skuIndex)
+                val price = sku?.optJSONObject("price") ?: item.optJSONObject("minPrice")
+                Log.goldenBean(
+                    "金豆夺宝商城[${listType}只读] itemId=${itemId.ifBlank { "UNKNOWN" }} " +
+                        "itemStatus=${item.optString("itemStatus").ifBlank { "UNKNOWN" }} " +
+                        "skuId=${sku?.optString("skuId").orEmpty().ifBlank { "UNKNOWN" }} " +
+                        "skuStatus=${sku?.optString("skuRuleResult").orEmpty().ifBlank { "UNKNOWN" }} " +
+                        "stock=${item.optInt("remainStockCounts", -1)} priceCent=${price?.optLong("cent", -1L)}",
+                )
+            }
         }
     }
 
