@@ -133,9 +133,13 @@ object GameCenterPlayRpcCall {
             objects.map { it.optString("gameTaskType") },
             urlParameters.valuesFor("gameTaskType"),
         )
+        val originalMap = urlParameters["originalMap"]?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
         val mappedTask = GameTask.fromAppId(gameAppId)
         val isGameTask = mappedTask != null ||
             gameTaskType.isNotBlank() ||
+            originalMap?.optString("scene") == "outer_multi_type_task" ||
             hasP2eFloatingBallProtocol(objects) ||
             urlParameters.valuesFor("gameAppId", "game_id").isNotEmpty() ||
             objects.any { objectValue ->
@@ -199,10 +203,16 @@ object GameCenterPlayRpcCall {
                 reason = "structured duration protocol",
             )
         }
-        if (directFinishSupported && descriptor.gameTaskType.isBlank()) {
+        val originalMap = descriptor.urlParameters["originalMap"]?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
+        if (descriptor.gameTaskType.equals("zhuanhua", ignoreCase = true) ||
+            descriptor.gameTaskType.equals("chongzhi", ignoreCase = true) ||
+            originalMap?.optString("scene") == "outer_multi_type_task"
+        ) {
             return TaskActionDecision(
-                action = TaskAction.DIRECT_FINISH,
-                reason = "module-provided direct completion contract",
+                action = TaskAction.DEFERRED,
+                reason = "structured game task requires its business event",
             )
         }
         if (descriptor.gameTaskType.equals("shichang", ignoreCase = true)) {
@@ -213,8 +223,12 @@ object GameCenterPlayRpcCall {
             )
         }
         return TaskActionDecision(
-            action = TaskAction.DEFERRED,
-            reason = "game task has no direct, click, duration or supported business completion contract",
+            action = TaskAction.DIRECT_FINISH.takeIf { directFinishSupported } ?: TaskAction.DEFERRED,
+            reason = if (directFinishSupported) {
+                "module-provided direct completion contract"
+            } else {
+                "game task has no direct, click, duration or supported business completion contract"
+            },
         )
     }
 
@@ -442,7 +456,9 @@ object GameCenterPlayRpcCall {
     private fun collectTaskUrlParameters(objects: List<JSONObject>): Map<String, String> {
         val parameters = linkedMapOf<String, String>()
         val queue = ArrayDeque<Pair<String, String?>>()
-        val nestedKeys = listOf("url", "sourceUrl", "schema", "query", "channelTaskPassThrough")
+        val nestedKeys = listOf(
+            "url", "sourceUrl", "schema", "query", "channelTaskPassThrough", "cdpQueryParams", "originalMap",
+        )
         objects.forEach { objectValue ->
             listOf("targetUrl", "actionUrl", "jumpUrl", "jumpLink", "pageUrl", "taskJumpUrl")
                 .map(objectValue::optString)
@@ -464,6 +480,8 @@ object GameCenterPlayRpcCall {
                 }
                 is JSONObject -> {
                     if (parentKey != null) parameters[parentKey] = json.toString()
+                    // 游戏业务 taskId 保留在 originalMap 中，不覆盖外层任务标识。
+                    if (parentKey == "originalMap") continue
                     json.keys().forEach { key ->
                         if (!json.isNull(key)) {
                             val parameter = json.get(key).toString()
@@ -475,7 +493,11 @@ object GameCenterPlayRpcCall {
                 }
             }
             val uri = runCatching {
-                Uri.parse(if (parentKey == "query" && value.contains('=')) "?$value" else value)
+                Uri.parse(
+                    if ((parentKey == "query" || parentKey == "cdpQueryParams") && value.contains('=')) {
+                        "?$value"
+                    } else value,
+                )
             }.getOrNull() ?: continue
             if (uri.isHierarchical && !uri.encodedQuery.isNullOrBlank()) {
                 uri.queryParameterNames.forEach { key ->

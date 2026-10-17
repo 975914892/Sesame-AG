@@ -30,6 +30,21 @@ private val sesameCreditDefaultBlacklist =
         "zm_WckGYybV_kUm3oyT1", // 砍伐20次的游戏事件，pushActivity返回ILLEGAL_ARGUMENT
         "AP16358996", // EVENT_TRIGGER：几何王国通过3关，直接send返回20020012
         "AP17359071", // EVENT_TRIGGER：灵画师消耗30包子，直接send返回20020012
+        "AP12359059", // 去玩疯狂水世界
+        "AP19359169", // 去玩三国冰河时代
+        "AP13358931", // 去玩寻道大千
+        "AP11371919", // 去玩这关我很行
+        "AP11358913", // 去玩保卫向日葵
+        "AP14359058", // 去玩青云诀之伏魔
+        "AP13358969", // 去玩烈焰觉醒
+        "AP12371914", // 去玩打个螺丝
+        "AP16358982", // 去玩时光杂货店
+        "AP15358968", // 去玩斗破苍穹
+        "AP10359017", // 去玩龙迹之城
+        "AP11359168", // 去玩向僵尸开炮
+        "zm_u5bepGDb_lD8AKQYM", // 去玩梦幻消除战
+        "zm_MGkWswjl_MtLkfw6H", // 去玩保卫向日葵
+        "zm_0r58uRFu_6FBDmbZC", // 去玩向往的生活
     )
 
 private val sesameAlchemyDefaultBlacklist =
@@ -392,6 +407,9 @@ private val myBankWelfareDefaultBlacklist =
         "AP18353629", // 办理全国大流量卡：需真实办理业务
         "AP12333795", // 完成1笔借呗支用：需真实借款支用行为
         "AP18374962", // 领取网商贷备用金：事件规则明确拒绝通用send（10000005）
+        "AP12350308", // 生存33天解锁3次地图迷雾
+        "AP19360653", // 支付宝ETC办理立减10元
+        "AP17360654", // 免费查询ETC办理资格
     )
 
 val DEFAULT_BLACKLIST: Map<String, Set<String>> =

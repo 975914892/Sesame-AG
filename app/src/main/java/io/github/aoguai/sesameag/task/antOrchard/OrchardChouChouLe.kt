@@ -193,6 +193,7 @@ private class OrchardDrawTaskFlowAdapter(
         when (item.status) {
             "FINISHED" -> TaskFlowPhase.REWARD_READY
             "TODO" -> when {
+                item.actionType == "VISIT_FLOAT_BALL" -> TaskFlowPhase.READY_TO_COMPLETE
                 item.limit != null && item.current != null && item.current < item.limit ->
                     TaskFlowPhase.BUSINESS_ACTION
 
