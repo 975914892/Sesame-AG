@@ -210,7 +210,8 @@ class AntSports : ModelTask() {
     private data class SportsTrainItemSelection(
         val bizId: String,
         val itemType: String,
-        val itemName: String
+        val itemName: String,
+        val taskId: String
     )
 
     private data class ClubMemberCandidate(
@@ -3206,11 +3207,8 @@ class AntSports : ModelTask() {
             return null
         }
 
-        var bizId = responseJson.optString("bizId", "")
-        if (bizId.isBlank() && responseJson.has("taskDetail")) {
-            bizId = responseJson.optJSONObject("taskDetail")?.optString("taskId", "").orEmpty()
-        }
-
+        val bizId = responseJson.optString("bizId", "")
+        val taskId = responseJson.optJSONObject("taskDetail")?.optString("taskId", "").orEmpty()
         val trainItemList = responseJson.optJSONArray("trainItemList")
         if (bizId.isBlank() || trainItemList == null || trainItemList.length() == 0) {
             Log.error(TAG, "训练好友[queryTrainItem缺少bizId或trainItemList] raw=$responseJson")
@@ -3232,7 +3230,8 @@ class AntSports : ModelTask() {
         return SportsTrainItemSelection(
             bizId = bizId,
             itemType = selected.optString("itemType", ""),
-            itemName = selected.optString("name", "")
+            itemName = selected.optString("name", ""),
+            taskId = taskId
         ).takeIf { it.itemType.isNotBlank() && it.itemName.isNotBlank() }
     }
 
@@ -6058,13 +6057,15 @@ class AntSports : ModelTask() {
             var trainedAny = false
             val skippedOriginBossIds = mutableSetOf<String>()
             var memberChangedRetryCount = 0
+            var refreshedClubHome: JSONObject? = null
             while (true) {
                 if (maxCount != null && hasReachedTrainFriendZeroCoinLimit()) {
                     Log.sports("训练好友🥋0金币次数已达上限，停止继续训练")
                     return
                 }
 
-                val clubHomeData = queryClubHomeForTraining() ?: return
+                val clubHomeData = refreshedClubHome ?: queryClubHomeForTraining() ?: return
+                refreshedClubHome = null
                 collectClubBubbleRewards(clubHomeData)
                 if (maxCount != null && hasReachedTrainFriendZeroCoinLimit()) {
                     Log.sports("训练好友🥋0金币次数已达上限，停止继续训练")
@@ -6125,7 +6126,56 @@ class AntSports : ModelTask() {
 
                 trainedAny = true
                 Log.sports("训练好友🥋[训练:${trainTarget.userName} ${trainItemSelection.itemName}]")
+                var associatedTaskFailed = false
+                if (trainItemSelection.taskId.isNotBlank()) {
+                    val taskResponse = JSONObject(AntSportsRpcCall.completeAdTask(
+                        taskId = trainItemSelection.taskId,
+                        bizNo = trainItemSelection.bizId,
+                        chInfo = "healthstep"
+                    ))
+                    if (isSportsRpcSuccess(taskResponse)) {
+                        val reward = unwrapSportsRpcPayload(taskResponse).optJSONObject("data")
+                        val assetId = reward?.optString("assetId").orEmpty()
+                        val amount = reward?.optString("assetCoinAmount").orEmpty()
+                        Log.sports("训练好友[关联任务已上报][taskId=${trainItemSelection.taskId}]" +
+                            "[奖励记录=${assetId.ifBlank { "未返回" }}][数量=${amount.ifBlank { "未返回" }}]，到账状态待回查")
+                    } else {
+                        val failureType = classifySportsTaskFailure(taskResponse)
+                        if (failureType == TaskRpcFailureType.TERMINAL_DONE) {
+                            Log.sports("训练好友[关联任务已处于终态][taskId=${trainItemSelection.taskId}]" +
+                                "[code=${extractSportsRpcErrorCode(taskResponse)}]")
+                        } else {
+                            associatedTaskFailed = true
+                            Log.error(TAG, "训练好友[关联任务失败，停止本轮训练]" +
+                                "[taskId=${trainItemSelection.taskId}][bizId=${trainItemSelection.bizId}]" +
+                                "[classification=$failureType][code=${extractSportsRpcErrorCode(taskResponse)}]" +
+                                "[msg=${extractSportsRpcErrorMessage(taskResponse)}] raw=$taskResponse")
+                        }
+                    }
+                }
                 GlobalThreadPools.sleepCompat(1000)
+                val refreshedHome = queryClubHomeForTraining() ?: return
+                refreshedClubHome = refreshedHome
+                val rooms = buildList {
+                    refreshedHome.optJSONObject("mainRoom")?.let { add(it) }
+                    val list = refreshedHome.optJSONArray("roomList") ?: JSONArray()
+                    for (index in 0 until list.length()) list.optJSONObject(index)?.let { add(it) }
+                }
+                val refreshedMember = rooms.firstNotNullOfOrNull { room ->
+                    val members = room.optJSONArray("memberList") ?: return@firstNotNullOfOrNull null
+                    (0 until members.length()).asSequence().mapNotNull { members.optJSONObject(it) }
+                        .firstOrNull { it.optString("memberId") == trainTarget.memberId &&
+                            it.optString("originBossId") == trainTarget.originBossId }
+                }
+                val trainInfo = refreshedMember?.optJSONObject("trainInfo")
+                if (trainInfo?.optBoolean("training", false) == true) {
+                    Log.sports("训练好友[训练状态已回查][friend=${trainTarget.userName}]" +
+                        "[production=${trainInfo.optString("production", "未返回")}]")
+                } else {
+                    skippedOriginBossIds.add(trainTarget.originBossId)
+                    Log.error(TAG, "训练好友[状态尚未确认，本轮不重复训练][friend=${trainTarget.userName}] raw=$trainInfo")
+                }
+                if (associatedTaskFailed) return
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "queryTrainItem err:", t)
@@ -6894,9 +6944,8 @@ class AntSports : ModelTask() {
                         Log.sports(
                             "健康岛任务中心存在待刷新确认任务：" +
                                 deferredTaskConfirmations.joinToString("；") +
-                                "，当前批次已完成其他可做动作，等待下个全局周期"
+                                "，保留这些任务的待确认状态，继续刷新其他可做任务"
                         )
-                        break
                     }
                     Log.sports("当前批次执行完毕，准备下一次刷新检查")
                     GlobalThreadPools.sleepCompat(TASK_LOOP_DELAY)
