@@ -45,6 +45,7 @@ private data class LoveChickenActivitySnapshot(
     val matching: Boolean,
     val settleAtMs: Long,
     val settleStartTime: LocalTime,
+    val settleEndTime: LocalTime,
     val directContributionEndMs: Long,
     val finalSettlementMs: Long,
 )
@@ -111,7 +112,7 @@ private fun parseLoveChickenActivity(response: JSONObject): LoveChickenActivityS
         rankRoundId = rank?.optString("rankRoundId").orEmpty(),
         participated = response.optBoolean("isParticipateCompetition"),
         matching = rank == null || rank.optString("status") == "MATCHING",
-        settleAtMs = settleAt, settleStartTime = settleStart,
+        settleAtMs = settleAt, settleStartTime = settleStart, settleEndTime = settleEnd,
         directContributionEndMs = minOf(endTime, end.toLocalDate().atTime(20, 0)
             .atZone(FARM_ZONE).toInstant().toEpochMilli()),
         finalSettlementMs = maxOf(endTime, finalSettlement.toInstant().toEpochMilli()),
@@ -133,7 +134,7 @@ private fun AntFarm.queryLoveChickenActivity(): JSONObject? {
     return response
 }
 
-/** 只保存尚未确认的动作和需延后的失败；已确认的奖励不另存一份事实。 */
+/** 保存待确认动作、延期失败和稳定目标所需的最近两次排名样本。 */
 private class LoveChickenExecution(private val snapshot: LoveChickenActivitySnapshot) {
     private val owner = AccountSessionCoordinator.currentUserId().orEmpty()
     private val epoch = AccountSessionCoordinator.currentSessionEpoch()
@@ -516,15 +517,52 @@ private fun AntFarm.selectLoveChickenDonation(
     val highestLevel = rewards.rewards.maxOf { it.threshold }
     val globalAward = rewards.globalAwards.minByOrNull { it.order }
     val contributionMargin = (loveChickenContributionMargin?.value ?: 10).coerceAtLeast(1)
-    val target = maxOf(highestLevel, globalAward?.let {
-        (it.contribution.toLong() + contributionMargin).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-    } ?: highestLevel)
+    var rankSamples = execution.data.optJSONObject("globalRankSamples")
+        ?.takeIf { stable && globalAward != null && it.optInt("order") == globalAward.order }
+    if (stable && globalAward != null && globalAward.rankTime in 1..now) {
+        val latest = rankSamples?.optJSONObject("latest")
+        if (latest == null || globalAward.rankTime > latest.optLong("rankTime")) {
+            rankSamples = JSONObject().put("order", globalAward.order)
+                .put("latest", JSONObject().put("rankTime", globalAward.rankTime)
+                    .put("contribution", globalAward.contribution))
+            if (latest != null) rankSamples.put("previous", latest)
+            execution.data.put("globalRankSamples", rankSamples)
+            execution.save()
+        }
+    }
+    val latestRank = rankSamples?.optJSONObject("latest")
+    val previousRank = rankSamples?.optJSONObject("previous")
+    val observedThreshold = latestRank?.optInt("contribution") ?: globalAward?.contribution ?: 0
+    val rankTime = latestRank?.optLong("rankTime") ?: globalAward?.rankTime ?: 0L
+    val previousTime = previousRank?.optLong("rankTime") ?: 0L
+    val growthPerMs = if (stable && previousTime > 0L && rankTime > previousTime) {
+        (observedThreshold.toLong() - previousRank!!.getInt("contribution")).coerceAtLeast(0).toDouble() /
+            (rankTime - previousTime)
+    } else 0.0
+    val currentIncomeAt = minOf(now + LOVE_CHICKEN_POLL_MS, snapshot.endTimeMs)
+    var settlementEnd = Instant.ofEpochMilli(snapshot.settleAtMs).atZone(FARM_ZONE).toLocalDate()
+        .atTime(snapshot.settleEndTime).atZone(FARM_ZONE)
+    if (settlementEnd.toInstant().toEpochMilli() <= snapshot.settleAtMs) settlementEnd = settlementEnd.plusDays(1)
+    if (settlementEnd.toInstant().toEpochMilli() <= now) settlementEnd = settlementEnd.plusWeeks(1)
+    val nextIncomeAt = minOf(settlementEnd.toInstant().toEpochMilli(), snapshot.finalSettlementMs)
+        .coerceAtLeast(currentIncomeAt)
+    val currentGrowth = ceil(growthPerMs * (currentIncomeAt - rankTime).coerceAtLeast(0)).toLong()
+        .coerceAtMost(Int.MAX_VALUE.toLong())
+    val futureGrowth = ceil(growthPerMs * (nextIncomeAt - rankTime).coerceAtLeast(0)).toLong()
+        .coerceAtMost(Int.MAX_VALUE.toLong())
+    val currentTarget = maxOf(highestLevel, if (globalAward == null) highestLevel else
+        (observedThreshold.toLong() + contributionMargin + currentGrowth).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+    val target = maxOf(currentTarget, if (globalAward == null) highestLevel else
+        (observedThreshold.toLong() + contributionMargin + futureGrowth).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+    val immediateGap = (currentTarget - rewards.contribution).coerceAtLeast(0)
     val gap = (target - rewards.contribution).coerceAtLeast(0)
     val targetDescription = if (globalAward == null) "全球末位待查询，成就目标$highestLevel"
-        else "爱心值目标$target，末位${globalAward.contribution}+余量$contributionMargin，排名时间${globalAward.rankTime}"
+        else "当前目标$currentTarget，结算目标$target，末位$observedThreshold+余量$contributionMargin，" +
+            "排名时间$rankTime，时效增量$currentGrowth/$futureGrowth" +
+            if (previousTime <= 0L) "，排名样本不足，未估算增长" else "，下次结算到账${TimeUtil.getCommonDate(nextIncomeAt)}"
     fun none(reason: String, met: Boolean = false) = LoveChickenDonationPlan(0, selfTotal, rank?.self?.rewardContributionNum, "$reason；$targetDescription", met)
     if (now >= snapshot.endTimeMs) return none("活动结束")
-    if (remainingQuota <= 0) return none("今日捐蛋额度用尽")
+    if (remainingQuota <= 0) return none("今日捐蛋额度用尽，当前仍差$immediateGap，结算目标仍差$gap")
     if (stable && gap == 0) return none(if (globalAward == null) "成就达成，等待全球排名" else "稳定目标已达成，继续定期回查")
     var rounds = 0
     var settlement = ZonedDateTime.now(FARM_ZONE).with(TemporalAdjusters.nextOrSame(DayOfWeek.SUNDAY))
@@ -533,7 +571,7 @@ private fun AntFarm.selectLoveChickenDonation(
         if (settlement.toInstant().toEpochMilli() > now) rounds++
         settlement = settlement.plusWeeks(1)
     }
-    val weeklyNeed = if (rounds > 0) ceil(gap.toDouble() / rounds).toInt() else gap
+    val weeklyNeed = gap
     val activeTasks = page.tasks.filter { it.optString("taskStatus") == "TODO" &&
         it.optLong("taskEntityExpireTime", Long.MAX_VALUE) > now }
     val personal = if (now < snapshot.directContributionEndMs && activeTasks.any {
@@ -582,22 +620,31 @@ private fun AntFarm.selectLoveChickenDonation(
         val position = opponents.count { it.donationNum >= selfTotal.toLong() + eggs } + 1
         return (rank.members + rank.self).firstOrNull { it.rankOrder == position && it.rewardContributionNum != null }?.rewardContributionNum
     }
-    fun gain(eggs: Int): Int = minOf(eggs, personal) + (if (eggs > 0) firstReward else 0) +
-        (if (teamNeed > 0 && eggs >= teamNeed) teamReward else 0) + (rankReward(eggs) ?: 0)
+    fun immediateGain(eggs: Int): Int = minOf(eggs, personal) + (if (eggs > 0) firstReward else 0) +
+        (if (teamNeed > 0 && eggs >= teamNeed) teamReward else 0)
+    fun gain(eggs: Int): Int = immediateGain(eggs) + (rankReward(eggs) ?: 0)
     for (base in candidates.toList()) {
-        val required = (weeklyNeed - gain(base)).coerceAtLeast(0)
+        val required = maxOf(immediateGap - immediateGain(base), weeklyNeed - gain(base), 0)
         if (base < personal) candidates += base + minOf(required, personal - base)
     }
-    // 非蹲点只允许确定的日常收益所需蛋量，不能借未知档位扩大耗蛋。
+    // 未到账周奖只覆盖结算目标，不能抵消当前缺口；非蹲点仍只使用确定的日常收益。
     val available = candidates.filter { it == 0 || rankAllowed || it <= maxOf(personal, if (firstTask != null) 1 else 0, teamNeed) }
-    val sufficient = available.filter { gain(it) >= weeklyNeed }
+    val sufficient = available.filter { immediateGain(it) >= immediateGap && gain(it) >= weeklyNeed }
     val chosen = if (sufficient.isNotEmpty()) sufficient.minWithOrNull(compareBy<Int> { it }.thenByDescending { gain(it) })!!
-        else available.minWithOrNull(compareByDescending<Int> { gain(it) }.thenBy { it }) ?: 0
-    if (currentRankReward != null && currentRankReward >= weeklyNeed && firstTask == null) return none("预计周奖励${currentRankReward}已覆盖本周目标$weeklyNeed", rankAllowed)
+        else available.minWithOrNull(compareBy<Int> { (immediateGap - immediateGain(it)).coerceAtLeast(0) }
+            .thenBy { (weeklyNeed - gain(it)).coerceAtLeast(0) }.thenBy { it }) ?: 0
+    if (immediateGap == 0 && currentRankReward != null && currentRankReward >= weeklyNeed && firstTask == null)
+        return none("当前目标已达成，预计周奖励${currentRankReward}覆盖结算差额$weeklyNeed，等待到账回查", rankAllowed)
     val amount = if (firstTask != null && chosen == 0) 1 else chosen
-    return LoveChickenDonationPlan(minOf(amount, remainingQuota), (selfTotal.toLong() + amount).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
-        gain(amount), "稳定目标$weeklyNeed，$targetDescription，已到账${rewards.contribution}，剩余${rounds}次周结算，当前预计周奖励${currentRankReward ?: "未知"}",
-        rankTargetMet = rankAllowed && chosen == 0)
+    val planned = minOf(amount, remainingQuota)
+    val remainingImmediate = (immediateGap - immediateGain(planned)).coerceAtLeast(0)
+    val remainingFuture = (weeklyNeed - gain(planned)).coerceAtLeast(0)
+    return LoveChickenDonationPlan(planned, (selfTotal.toLong() + amount).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+        gain(planned), "当前缺口$immediateGap，结算差额$weeklyNeed，$targetDescription，已到账${rewards.contribution}，" +
+            "剩余${rounds}次周结算，预计周奖励${currentRankReward ?: "未知"}，" +
+            "本次后当前缺口$remainingImmediate、结算差额$remainingFuture" +
+            if (planned < amount) "，受今日剩余额度${remainingQuota}限制，尚未达到稳定目标" else "",
+        rankTargetMet = rankAllowed && chosen == 0 && sufficient.isNotEmpty())
 }
 
 private fun AntFarm.scheduleLoveChickenTask(snapshot: LoveChickenActivitySnapshot?, execution: LoveChickenExecution? = null, retryAt: Long? = null) {
