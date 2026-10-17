@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.util
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -26,6 +27,11 @@ object CoroutineUtils {
             runBlocking {
                 delay(millis)
             }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // 降级到传统的 Thread.sleep()
             Log.printStackTrace("协程延迟异常,已尝试降级到 Thread.sleep()", e)
@@ -33,7 +39,7 @@ object CoroutineUtils {
                 Thread.sleep(millis)
             } catch (ie: InterruptedException) {
                 Thread.currentThread().interrupt()
-                Log.record("CoroutineUtils", "延迟被中断: ${ie.message}")
+                throw ie
             }
         }
     }

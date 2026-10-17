@@ -47,6 +47,7 @@ import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.util.friend.FriendCapabilityRecorder
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
@@ -637,6 +638,7 @@ class AntStall : ModelTask() {
                 tc.countDebug("贴罚单")
             }
         } catch (t: Throwable) {
+            if (t is InterruptedException || t is CancellationException) throw t
             Log.printStackTrace(TAG, "home err:", t)
         } finally {
             Log.stall("执行结束-${getName()}")

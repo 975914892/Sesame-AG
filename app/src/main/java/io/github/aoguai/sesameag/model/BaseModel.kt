@@ -9,7 +9,6 @@ import io.github.aoguai.sesameag.model.modelFieldExt.SelectAndCountModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.StringModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.TimePointListModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.TimeWindowListModelField
-import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antStall.AntStall
 import io.github.aoguai.sesameag.task.greenFinance.GreenFinance
 import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
@@ -139,13 +138,12 @@ class BaseModel : Model() {
          */
         val taskMaxConcurrency: IntegerModelField =
             IntegerModelField("taskMaxConcurrency", "任务并发数", 2, 1, 3).withDesc(
-                "控制每个批次最多同时运行的任务协程数；默认 2，调高会增加请求频率和风控概率。",
+                "控制全局最多同时运行的模块数；空闲槽位可提前执行独立普通模块；默认 2，调高会增加请求频率和风控概率。",
             )
 
-        // 仅末批这些模块可交换位置；依赖原因及固定模块见 TaskRunner.buildExecutionBatches。
+        // 这些独立模块允许同批换序和跨批补位；约束模块见 TaskRunner.buildExecutionBatches。
         internal val taskOrderModelClasses: Set<Class<out Model>> = setOf(
             AntStall::class.java,
-            AntDodo::class.java,
             GreenFinance::class.java,
             MyBankWelfare::class.java,
         )

@@ -11,6 +11,7 @@ import io.github.aoguai.sesameag.hook.CustomRpcScheduler
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.CustomSettings
 import io.github.aoguai.sesameag.model.Model
+import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.task.antForestPatrol.AntForestPatrol
@@ -37,6 +38,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -238,19 +240,46 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         updateRunningTaskOrder(taskBatches.flatten().map { it.getName() })
         Log.record(TAG, "🔄 [第 $round/$totalRounds 轮] 开始，共 ${tasksToRun.size} 个任务，分 ${taskBatches.size} 个批次")
 
-        // 2. 按依赖顺序逐批执行；仅同批中明确独立的任务允许受全局信号量控制并行。
-        //    不能把后续批次提前入队，否则前置模块的状态刷新尚未落地就会放大 RPC 并发。
-        for ((batchIndex, batchTasks) in taskBatches.withIndex()) {
+        // 保留依赖批次屏障；只有明确独立的普通任务可以跨批补位。
+        val pendingTasks = taskBatches.flatten().toMutableSet()
+        val runningTasks = mutableMapOf<ModelTask, Job>()
+        var batchIndex = 0
+        while (batchIndex < taskBatches.size) {
+            runningTasks.entries.removeAll { it.value.isCompleted }
+            while (batchIndex < taskBatches.size &&
+                taskBatches[batchIndex].none { it in pendingTasks || it in runningTasks }
+            ) {
+                batchIndex++
+            }
+            if (batchIndex == taskBatches.size) break
             if (ApplicationHookConstants.isOffline()) {
                 Log.record(TAG, "⏸ [第 $round/$totalRounds 轮] 检测到离线模式，停止后续批次")
                 break
             }
-            scheduleTaskBatch(round, totalRounds, batchIndex + 1, taskBatches.size, batchTasks).joinAll()
-            if (batchTasks.any(::isLongRunningTask)) {
-                // 只等待本轮主流程；未来到期的 ChildModelTask 仍由模块作用域独立管理。
-                awaitLongRunningJobs()
+
+            // 当前批次优先，按剩余容量补入后续独立任务，避免等待者占用调度名额。
+            for (readyBatchIndex in batchIndex until taskBatches.size) {
+                val availableSlots = maxConcurrency - runningTasks.size
+                if (availableSlots <= 0) break
+                val readyTasks = taskBatches[readyBatchIndex].filter { task ->
+                    task in pendingTasks && (readyBatchIndex == batchIndex ||
+                        (task.javaClass in BaseModel.taskOrderModelClasses && !isLongRunningTask(task)))
+                }.take(availableSlots)
+                if (readyTasks.isEmpty()) continue
+
+                pendingTasks.removeAll(readyTasks)
+                val jobs = scheduleTaskBatch(round, totalRounds, readyBatchIndex + 1, taskBatches.size, readyTasks)
+                readyTasks.zip(jobs).forEach { (task, job) -> runningTasks[task] = job }
+            }
+
+            // 任一任务结束就重新计算就绪任务，让依赖链恢复及空闲槽位补位都能及时发生。
+            if (runningTasks.isNotEmpty()) {
+                select<Unit> {
+                    runningTasks.values.forEach { job -> job.onJoin {} }
+                }
             }
         }
+        runningTasks.values.joinAll()
 
         val roundTime = System.currentTimeMillis() - roundStartTime
         Log.record(TAG, "✅ [第 $round/$totalRounds 轮] 结束，耗时: ${roundTime}ms")
@@ -300,6 +329,10 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                     return@async
                 }
                 executeSingleTask(task, round)
+                if (isLongRunningTask(task)) {
+                    // 长任务启动返回后仍占用调度名额，主流程结束才允许依赖批次推进。
+                    awaitLongRunningJobs()
+                }
             }
         }
     }
@@ -319,7 +352,7 @@ class CoroutineTaskRunner(allModels: List<Model>) {
         }
 
         // 批次限定依赖顺序，不因随机/手动排序跨批，也不清除每日标识或补跑模块。
-        // 运动、森林、庄园保留长任务超时策略，但本轮主流程结束后才允许后续批次执行。
+        // 运动、森林、庄园保留长任务超时策略，本轮主流程结束后才允许后续依赖批次执行。
         val batches = buildList<List<ModelTask>> {
             // 1) 固定：运动优先更新步数，并处理森林可用道具兑换；不能随机到消费者之后。
             takeBatch { it is AntSports }
@@ -362,19 +395,23 @@ class CoroutineTaskRunner(allModels: List<Model>) {
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 9) 固定：信用在会员之后、金豆之前，保留联动施肥及芝麻炼金的余额产出顺序。
+            // 9) 固定：物种缺货补兑来自森林和会员，须在两者本轮主流程结束后执行。
+            takeBatch { it is AntDodo }
+                .takeIf { it.isNotEmpty() }
+                ?.let(::add)
+
+            // 10) 固定：信用在会员之后、金豆之前，保留联动施肥及芝麻炼金的余额产出顺序。
             takeBatch { it is AntSesameCredit }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 10) 固定：金豆使用农场肥料和信用炼金已确认的余额，不能移到这两个来源之前。
+            // 11) 固定：金豆使用农场肥料和信用炼金已确认的余额，不能移到这两个来源之前。
             takeBatch { it is GoldenBeanTreasure }
                 .takeIf { it.isNotEmpty() }
                 ?.let(::add)
 
-            // 11) 末批仅新村、物种、绿色经营、网商福利金允许随机/手动交换位置：
+            // 12) 末批仅新村、绿色经营、网商福利金允许随机/手动交换位置及跨批补位：
             // 新村金币/肥料、经营金币、网商福利金分别独立；
-            // 物种使用自身卡片/次数，缺货补兑来自前置森林/会员，不依赖末批其他候选。
             // 合种、古树、保护地共用森林能量，不纳入候选，保持原槽位和相对入队顺序；
             // 同批仍受原并发控制，这不代表三者严格串行，也不改变它们已有的消费额度。
             // 未明确列入 taskOrderModelClasses 的其他模块同样不移动，避免将新增模块默认视为独立。
