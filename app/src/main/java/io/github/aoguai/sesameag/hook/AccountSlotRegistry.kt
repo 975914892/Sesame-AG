@@ -8,6 +8,8 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.UserDataStoreManager
 import java.io.File
 import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.channels.FileLockInterruptionException
 import java.nio.file.Files as NioFiles
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
@@ -489,9 +491,21 @@ object AccountSlotRegistry {
                 require(configDir.isDirectory || configDir.mkdirs()) { "config_dir_unavailable" }
                 val lockFile = File(configDir, LOCK_FILE_NAME)
                 FileChannel.open(lockFile.toPath(), CREATE, WRITE).use { channel ->
-                    // Wait for the module UI process to finish its short atomic update instead of
-                    // treating transient lock contention as an account-slot revocation.
-                    channel.lock().use {
+                    // 等待短暂更新而不撤销账号资格；非阻塞申请避免内核按进程检测出伪死锁。
+                    var fileLock: FileLock? = null
+                    while (fileLock == null) {
+                        if (Thread.currentThread().isInterrupted) throw FileLockInterruptionException()
+                        fileLock = channel.tryLock()
+                        if (fileLock == null) {
+                            try {
+                                Thread.sleep(25L)
+                            } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                throw FileLockInterruptionException()
+                            }
+                        }
+                    }
+                    fileLock.use {
                         val loaded = requireNotNull(
                             readLockedRecord(configDir, recoverExpiredPending),
                         ) { "registry_read_failed" }

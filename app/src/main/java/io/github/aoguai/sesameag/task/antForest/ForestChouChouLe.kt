@@ -196,7 +196,7 @@ class ForestChouChouLe {
             if (Status.hasFlagToday(s.flag)) {
                 when (inspectSceneState(s).check) {
                     CompletionFlagCheck.NO_ACTIONABLE -> {
-                        Log.forest("⏭️ ${s.name} 今天已完成, 跳过")
+                        Log.forest("⏭️ ${s.name} 当前无可执行任务且无抽奖次数，跳过")
                         return@runCatching
                     }
 
@@ -329,9 +329,16 @@ class ForestChouChouLe {
             val rightsTimes = taskRights.optInt("rightsTimes", 0)
             val rightsTimesLimit = taskRights.optInt("rightsTimesLimit", 0)
             stateParts += "$taskType:$taskStatus:$rightsTimes:$rightsTimesLimit"
-            if (!isBlockedTask(taskType) &&
-                (taskStatus in setOf("FINISHED", "COMPLETE", "WAIT_RECEIVE", "TO_RECEIVE") || isAutomatableDrawTask(baseInfo))
-            ) {
+            val blacklistMatch = TaskBlacklist.findMatch(FOREST_BLACKLIST_MODULE, taskType)
+            if (blacklistMatch != null) {
+                Log.forest(
+                    "${s.name} 任务因黑名单跳过[sceneCode=${s.code} taskType=$taskType " +
+                        "status=$taskStatus progress=$rightsTimes/$rightsTimesLimit " +
+                        "blacklistSource=${blacklistMatch.first} blacklistEntry=${blacklistMatch.second}]",
+                )
+                continue
+            }
+            if (taskStatus in setOf("FINISHED", "COMPLETE", "WAIT_RECEIVE", "TO_RECEIVE") || isAutomatableDrawTask(baseInfo)) {
                 val bizInfo = baseInfo.optString("bizInfo").toJson() ?: JSONObject()
                 val taskName = extractTaskName(bizInfo, taskType)
                 Log.forest("${s.name} 发现待处理任务: $taskName [$taskStatus]")
@@ -946,12 +953,6 @@ class ForestChouChouLe {
             action: TaskFlowAction?,
         ): String = "sceneCode=${item.sceneCode} taskType=${item.type} taskName=${item.title} action=${action?.logName.orEmpty()}"
     }
-
-    /**
-     * 判断任务是否在屏蔽列表中
-     */
-    private fun isBlockedTask(taskType: String): Boolean =
-        taskType.isNotBlank() && TaskBlacklist.isTaskInBlacklist(FOREST_BLACKLIST_MODULE, taskType)
 
     private fun syncDrawAssetAfterTaskAward(s: Scene) {
         runCatching {

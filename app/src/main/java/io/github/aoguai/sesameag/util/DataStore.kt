@@ -15,6 +15,8 @@ import kotlinx.coroutines.isActive
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.nio.channels.FileLock
+import java.nio.channels.FileLockInterruptionException
 import java.nio.file.ClosedWatchServiceException
 import java.nio.file.Path
 import java.nio.file.StandardWatchEventKinds
@@ -168,7 +170,21 @@ object DataStore {
         val lockFile = File(storageFile.parentFile, ".data-store.lock")
         RandomAccessFile(lockFile, "rw").use { file ->
             setWorldReadableWritable(lockFile)
-            file.channel.lock().use { block() }
+            // 与注册表一致使用非阻塞申请，避免多线程跨进程锁被内核按进程判为死锁。
+            var fileLock: FileLock? = null
+            while (fileLock == null) {
+                if (Thread.currentThread().isInterrupted) throw FileLockInterruptionException()
+                fileLock = file.channel.tryLock()
+                if (fileLock == null) {
+                    try {
+                        Thread.sleep(25L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw FileLockInterruptionException()
+                    }
+                }
+            }
+            fileLock.use { block() }
         }
     }
 
@@ -319,6 +335,27 @@ object DataStore {
             }
         }
         Log.i(TAG, "DataStore watcher started: ${storageFile.absolutePath}")
+    }
+
+    /** 在同一次存储锁内读取最新值并更新；值未变化时不写盘。 */
+    fun <T : Any> update(
+        key: String,
+        typeRef: TypeReference<T>,
+        transform: (T?) -> T?,
+    ): T? = withStorageLock {
+        forceLoadFromDisk()
+        val current: T? = data[key]?.let { mapper.convertValue(it, typeRef) }
+        val value = transform(current)
+        if (value != current) {
+            val updated = HashMap(data)
+            if (value == null) {
+                updated.remove(key)
+            } else {
+                updated[key] = value
+            }
+            saveToDisk(updated)
+        }
+        value
     }
 
     fun put(key: String, value: Any) = withStorageLock {
