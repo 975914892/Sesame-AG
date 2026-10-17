@@ -253,6 +253,7 @@ class AntMember : ModelTask() {
         PROCESSED,
         NO_TASK,
         RETRY_LATER,
+        STOPPED_TODAY,
         UNKNOWN
     }
 
@@ -1954,6 +1955,10 @@ class AntMember : ModelTask() {
                     Log.error(TAG, "会员浮球状态未确认，继续处理独立会员任务")
                 }
 
+                MemberFloatingBallTaskProcessState.STOPPED_TODAY -> {
+                    Log.member("会员任务[浮球]#今日已停止请求，继续处理独立会员任务")
+                }
+
                 MemberFloatingBallTaskProcessState.NO_TASK -> {
                     Unit
                 }
@@ -1961,7 +1966,8 @@ class AntMember : ModelTask() {
 
             val taskListState = memberFloatingBallMutex.withLock { processCurrentMemberTaskListCompat() }
             if (floatingBallState == MemberFloatingBallTaskProcessState.RETRY_LATER ||
-                floatingBallState == MemberFloatingBallTaskProcessState.UNKNOWN
+                floatingBallState == MemberFloatingBallTaskProcessState.UNKNOWN ||
+                floatingBallState == MemberFloatingBallTaskProcessState.STOPPED_TODAY
             ) return@run
             when (taskListState) {
                 CurrentMemberTaskListProcessState.COMPLETED -> {
@@ -2719,6 +2725,9 @@ class AntMember : ModelTask() {
     }
 
     private suspend fun processMemberFloatingBallTaskCompat(): MemberFloatingBallTaskProcessState = CoroutineUtils.run {
+        if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)) {
+            return@run MemberFloatingBallTaskProcessState.STOPPED_TODAY
+        }
         try {
             val floatingBallResponse = AntMemberRpcCall.querySignFloatingBall()
             val floatingBallObject = JSONObject(floatingBallResponse)
@@ -2744,6 +2753,14 @@ class AntMember : ModelTask() {
                 Log.member("会员任务[浮球]#当前浮球任务已完成，停止本轮继续刷新")
                 return@run MemberFloatingBallTaskProcessState.NO_TASK
             }
+            // video 入口也返回 MULTIPLE_TIMER_TASK，但应先处理广告任务，不能直接领取计时奖励。
+            if (floatingBallObject.optString("playType").equals("video", ignoreCase = true)) {
+                return@run if (tryProcessMemberFloatingBallAdTask(taskRef)) {
+                    MemberFloatingBallTaskProcessState.RETRY_LATER
+                } else {
+                    MemberFloatingBallTaskProcessState.UNKNOWN
+                }
+            }
             if (!taskRef.taskType.equals("MULTIPLE_TIMER_TASK", true)) {
                 Log.member("会员任务[浮球]#未适配任务类型${taskRef.taskType}，停止本轮继续刷新")
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
@@ -2760,6 +2777,11 @@ class AntMember : ModelTask() {
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
             if (!ResChecker.checkRes(TAG, "会员浮球完成失败[triggerSignFloatingBall]:", triggered)) {
+                Log.error(
+                    TAG,
+                    "会员浮球完成失败上下文: bizNo=${taskRef.bizNo}, taskType=${taskRef.taskType}, " +
+                        "领取前快照=$floatingBallObject",
+                )
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
             val completedTask = triggered.optJSONObject("currentTaskInfo")
@@ -2781,6 +2803,9 @@ class AntMember : ModelTask() {
                 }
             if (nextTask != null) scheduleMemberFloatingBallTask(nextTask)
             if (!tryProcessMemberFloatingBallAdTask(taskRef)) {
+                if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)) {
+                    return@run MemberFloatingBallTaskProcessState.UNKNOWN
+                }
                 Log.member("会员任务[浮球]#后续广告任务待确认，后续调度继续查询")
                 return@run MemberFloatingBallTaskProcessState.RETRY_LATER
             }
@@ -2792,6 +2817,10 @@ class AntMember : ModelTask() {
             TaskExecutionReport.current()?.recordException()
             Log.printStackTrace(TAG, "processMemberFloatingBallTaskCompat err:", t)
             return@run MemberFloatingBallTaskProcessState.UNKNOWN
+        }
+    }.also { state ->
+        if (state == MemberFloatingBallTaskProcessState.UNKNOWN) {
+            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
         }
     }
 
@@ -2915,6 +2944,7 @@ class AntMember : ModelTask() {
             } else {
                 when (processMemberFloatingBallTaskCompat()) {
                     MemberFloatingBallTaskProcessState.UNKNOWN -> TaskExecutionOutcome.FAILED
+                    MemberFloatingBallTaskProcessState.STOPPED_TODAY -> TaskExecutionOutcome.SKIPPED
                     MemberFloatingBallTaskProcessState.RETRY_LATER -> TaskExecutionOutcome.DEFERRED
                     MemberFloatingBallTaskProcessState.PROCESSED,
                     MemberFloatingBallTaskProcessState.NO_TASK -> TaskExecutionOutcome.SUCCESS
@@ -2980,6 +3010,7 @@ class AntMember : ModelTask() {
                     "$TAG.tryProcessMemberFloatingBallAdTask",
                     "会员浮球广告任务查询失败: " + adTaskObject.optString("resultDesc", adTaskResponse)
                 )
+                setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
                 return@run false
             }
             val adTaskInfoObjects = listOfNotNull(
@@ -2993,25 +3024,30 @@ class AntMember : ModelTask() {
                 .map { it.optString("taskStatus") }
                 .firstOrNull { isMemberTaskProcessInProgressStatus(it) }
             if (inProgressStatus != null) {
-                Log.member("会员任务[浮球]#广告任务状态${inProgressStatus}，保留后续调度确认")
+                Log.member("会员任务[浮球]#广告任务状态${inProgressStatus}，尚未确认完成")
                 return@run false
             }
             val floatingBallAdTask = buildCurrentMemberTaskFromFloatingBallAdResponse(adTaskObject)
             if (floatingBallAdTask == null) {
-                Log.member("会员任务[浮球]#广告查询成功，当前未返回可执行的广告对象，保留后续刷新")
+                Log.member("会员任务[浮球]#广告查询成功，当前未返回可执行的广告对象")
                 return@run false
             }
-            return@run finishMemberAdTask(
+            val result = finishMemberAdTask(
                 floatingBallAdTask.taskConfigId,
                 floatingBallAdTask.title,
                 floatingBallAdTask.awardPoint,
                 floatingBallAdTask.adBizId
-            ).success
+            )
+            if (!result.success) {
+                setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
+            }
+            return@run result.success
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             TaskExecutionReport.current()?.recordException()
             Log.printStackTrace(TAG, "tryProcessMemberFloatingBallAdTask err:", t)
+            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
             return@run false
         }
     }
@@ -4278,10 +4314,7 @@ class AntMember : ModelTask() {
     private fun isInsuredTaskRewardConfirmed(task: JSONObject): Boolean {
         val status = task.optString("taskProcessStatus").trim().uppercase(Locale.ROOT)
         return status in setOf(
-            "TO_RECEIVE",
-            "WAIT_RECEIVE",
-            "FINISHED",
-            "COMPLETE",
+            "SEND_SUCCESS",
             "RECEIVE_SUCCESS",
             "HAS_RECEIVED",
             "RECEIVED",
@@ -4298,7 +4331,7 @@ class AntMember : ModelTask() {
         for (i in 0 until sendOrderList.length()) {
             val sendOrder = sendOrderList.optJSONObject(i) ?: continue
             val sendStatus = sendOrder.optString("sendStatus")
-            if (sendStatus.isBlank() || sendStatus == "SUCCESS") {
+            if (sendStatus == "SUCCESS") {
                 return true
             }
         }
@@ -4443,6 +4476,8 @@ class AntMember : ModelTask() {
         responseObject: JSONObject
     ): TaskRpcFailureType {
         return when {
+            code == "AE15140290002002" -> TaskRpcFailureType.BUSINESS_LIMIT
+
             containsAny(
                 message,
                 "已领取",

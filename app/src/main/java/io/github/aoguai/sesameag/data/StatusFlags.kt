@@ -129,6 +129,8 @@ object StatusFlags {
     /** 今日是否已处理「会员签到」 */
     const val FLAG_ANTMEMBER_MEMBER_SIGN_DONE: String = "AntMember::memberSignDone"
 
+    const val FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY = "AntMember::memberFloatingBallFailedToday"
+
     /** 今日会员任务已处理到无需继续刷新 */
     const val FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY: String = "AntMember::memberTaskEmptyToday"
 

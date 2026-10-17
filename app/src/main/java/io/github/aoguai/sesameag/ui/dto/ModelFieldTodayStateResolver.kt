@@ -124,6 +124,10 @@ object ModelFieldTodayStateResolver {
             "AntMember.memberSignPageTask",
             "AntMember.memberSignInAdTask" -> {
                 when {
+                    Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY) -> {
+                        ModelFieldTodayState(reason = "今日浮球已停止请求，其他会员任务按状态执行")
+                    }
+
                     Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY) -> {
                         inactive("今日会员任务已处理")
                     }
