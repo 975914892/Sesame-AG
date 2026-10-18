@@ -45,6 +45,7 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.ResChecker
+import io.github.aoguai.sesameag.util.UserDataStoreManager
 import io.github.aoguai.sesameag.util.friend.FriendCapabilityRecorder
 
 class AntDodo : ModelTask() {
@@ -65,6 +66,7 @@ class AntDodo : ModelTask() {
     private var usePropCollectHistoryAnimal7Days: BooleanModelField? = null
     private var usePropCollectToFriendTimes7Days: BooleanModelField? = null
     private var autoGenerateBook: BooleanModelField? = null
+    private var scratchCard: BooleanModelField? = null
     private val loggedTaskProgressHints = LinkedHashSet<String>()
     private var taskListRefreshNeeded = false
 
@@ -126,6 +128,11 @@ class AntDodo : ModelTask() {
             ).also { usePropCollectToFriendTimes7Days = it }
         )
         modelFields.addField(
+            BooleanModelField("scratchCard", "自动刮卡", false).withDesc(
+                "刮开可刮卡片领取奖励，先刮卡再赠送、交换或合成勋章。"
+            ).also { scratchCard = it }
+        )
+        modelFields.addField(
             BooleanModelField("autoGenerateBook", "图鉴勋章 | 自动合成", false).withDesc(
                 "图鉴显示“已集齐”时自动合成对应勋章。"
             ).also { autoGenerateBook = it }
@@ -155,6 +162,19 @@ class AntDodo : ModelTask() {
             taskListRefreshNeeded = false
             receiveTaskAward(executionState)
             collect()
+            if (scratchCard?.value == true) {
+                try {
+                    val home = JSONObject(AntDodoRpcCall.homePage())
+                    if (ResChecker.checkRes(TAG, home)) {
+                        val collections = home.optJSONObject("data")?.optJSONArray("curCollection")
+                        for (i in 0 until (collections?.length() ?: 0)) {
+                            collections?.optJSONObject(i)?.let { scratchAnimalCards(it) }
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.printStackTrace(TAG, "神奇物种待刮卡查询失败：", t)
+                }
+            }
             if (collectToFriend?.value == true) {
                 if (hasPendingCollectToFriendSchedule()) {
                     Log.dodo("神奇物种帮抽卡已有有效持久调度，跳过常规重复查询")
@@ -228,6 +248,79 @@ class AntDodo : ModelTask() {
         if (data?.optBoolean("collect") == true) {
             Status.setFlagToday(StatusFlags.FLAG_ANTDODO_DAILY_COLLECT_DONE)
             Log.dodo("神奇物种卡片今日收集完成！")
+        }
+    }
+
+    private fun scratchAnimalCards(collection: JSONObject): Boolean {
+        if (scratchCard?.value != true) return true
+        return try {
+            val cards = collection.optJSONObject("collectDetail")?.optJSONArray("cardList") ?: JSONArray()
+            val animal = collection.optJSONObject("animal") ?: return cards.length() == 0
+            val animalId = animal.getString("animalId")
+            val bookId = animal.getString("bookId")
+            if (animalId.isBlank() || bookId.isBlank()) {
+                Log.error(TAG, "神奇物种刮卡缺少动物或图鉴标识")
+                return false
+            }
+            // 刮卡待确认属于账号私有消费状态，跨轮次保留，不随配置导出或日标重置。
+            val store = UserDataStoreManager.getCurrentInstance() ?: return false
+            val pendingKey = "antDodoScratchPending"
+            val rewards = store.getOrCreate<MutableMap<String, Int>>(pendingKey)
+            val prefix = "$animalId:"
+            val currentCards = (0 until cards.length()).mapNotNull { cards.optJSONObject(it) }
+            val pending = currentCards.filter { it.optBoolean("scratchable") && !it.optBoolean("scratched") }
+            if (pending.isEmpty() && rewards.keys.none { it.startsWith(prefix) }) return true
+            for (card in pending) {
+                if (Thread.currentThread().isInterrupted) return false
+                val instanceId = card.optString("cardInstanceId")
+                if (instanceId.isBlank()) {
+                    Log.error(TAG, "神奇物种刮卡缺少卡片实例：$animalId")
+                    return false
+                }
+                val key = prefix + instanceId
+                if (rewards.containsKey(key)) continue
+                rewards[key] = -1
+                store.put(pendingKey, rewards, requirePersistence = true)
+                val result = JSONObject(AntDodoRpcCall.scratchCard(animalId, bookId, instanceId))
+                if (!ResChecker.checkRes(TAG, "神奇物种刮卡失败：", result)) {
+                    if (result.opt("success") == false) {
+                        rewards.remove(key)
+                        store.put(pendingKey, rewards)
+                    }
+                    return false
+                }
+                rewards[key] = (result.optJSONObject("data")?.opt("energyGram") as? Number)?.toInt() ?: -1
+                store.put(pendingKey, rewards)
+                GlobalThreadPools.sleepCompat(500L)
+            }
+            val refreshed = JSONObject(AntDodoRpcCall.homePage())
+            if (!ResChecker.checkRes(TAG, "神奇物种刮卡状态查询失败：", refreshed)) return false
+            val animals = refreshed.getJSONObject("data").getJSONArray("curCollection")
+            val detail = (0 until animals.length()).mapNotNull { animals.optJSONObject(it) }
+                .firstOrNull { it.optJSONObject("animal")?.optString("animalId") == animalId }
+                ?.optJSONObject("collectDetail")
+            val refreshedCards = detail?.optJSONArray("cardList")
+            val scratchedIds = (0 until (refreshedCards?.length() ?: 0))
+                .mapNotNull { refreshedCards?.optJSONObject(it) }
+                .filter { it.optBoolean("scratched") }
+                .map { it.optString("cardInstanceId") }.toSet()
+            val confirmed = scratchedIds.map { prefix + it }.filter { rewards.containsKey(it) }
+            if (confirmed.isNotEmpty()) {
+                val energy = confirmed.map { rewards.getValue(it) }
+                val rewardText = if (energy.all { it >= 0 }) "，获得${energy.sum()}g能量" else ""
+                Log.dodo("神奇物种🦕[${animal.optString("name")}]已刮${confirmed.size}张$rewardText")
+                confirmed.forEach { rewards.remove(it) }
+                store.put(pendingKey, rewards)
+            }
+            if (detail == null || rewards.keys.any { it.startsWith(prefix) }) {
+                Log.error(TAG, "神奇物种刮卡状态尚未确认，保留卡片：$animalId")
+                return false
+            }
+            collection.put("collectDetail", detail)
+            true
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "神奇物种刮卡失败：", t)
+            false
         }
     }
 
@@ -316,6 +409,7 @@ class AntDodo : ModelTask() {
                             val ecosystem = animal.getString("ecosystem")
                             val name = animal.getString("name")
                             Log.dodo("神奇物种🦕[$ecosystem]#$name")
+                            scratchAnimalCards(data)
                         } else {
                             Log.runtime(TAG, jo.getString("resultDesc"))
                         }
@@ -844,6 +938,7 @@ class AntDodo : ModelTask() {
                         } else {
                             Log.dodo("使用道具🎭[$propName]")
                         }
+                        useResult?.let { scratchAnimalCards(it) }
                         logPropRefreshState(propType, propName, consumeTarget, animal)
                         GlobalThreadPools.sleepCompat(300)
                         continue@th
@@ -1195,7 +1290,7 @@ class AntDodo : ModelTask() {
         if (availableFriends.isEmpty()) {
             return null
         }
-        for (safeUserId in configuredUsers) {
+        for (safeUserId in configuredUsers.shuffled()) {
             if (FriendGuard.shouldSkipFriend(safeUserId, TAG, "神奇物种送卡")) {
                 continue
             }
@@ -1270,6 +1365,7 @@ class AntDodo : ModelTask() {
                     if (count <= 1) {
                         continue
                     }
+                    if (!scratchAnimalCards(animalForUser)) continue
                     val animal = animalForUser.getJSONObject("animal")
                     for (j in 1 until count) {
                         sendCard(animal, targetUser)
@@ -1349,7 +1445,7 @@ class AntDodo : ModelTask() {
                 }
                 val initialCount = count
                 val friendList = jo.getJSONObject("data").getJSONArray("friends")
-                for (i in 0 until friendList.length()) {
+                for (i in (0 until friendList.length()).shuffled()) {
                     if (count <= 0) break
                     val friend = friendList.getJSONObject(i)
                     if (friend.getBoolean("dailyCollect")) {
@@ -1635,6 +1731,7 @@ class AntDodo : ModelTask() {
         }
         val exchangeResult = JSONObject(exchangeResponse)
         if (ResChecker.checkRes(TAG, exchangeResult)) {
+            exchangeResult.optJSONObject("data")?.let { scratchAnimalCards(it) }
             val targetAnimal = exchangeResult.optJSONObject("data")?.optJSONObject("animal") ?: animal
             Log.dodo(
                 "神奇物种🦕帮好友换卡[${UserMap.getMaskName(targetUserId) ?: targetUserId}]#${candidate.displayName}→${
@@ -1652,7 +1749,12 @@ class AntDodo : ModelTask() {
     private fun queryExchangeCardCandidate(targetAnimalId: String): ExchangeCardCandidateQueryResult {
         return try {
             var pageStart: Any = 0
-            do {
+            var maxCount = 1
+            var candidate: ExchangeCardCandidate? = null
+            var candidateCollection: JSONObject? = null
+            val visitedPages = hashSetOf<String>()
+            while (!Thread.currentThread().isInterrupted) {
+                check(visitedPages.add(pageStart.toString())) { "换卡库存分页游标重复：$pageStart" }
                 val response = AntDodoRpcCall.queryMyCollection(targetAnimalId, 18, pageStart)
                 if (response.isNullOrEmpty()) {
                     Log.runtime(TAG, "queryMyCollection返回空")
@@ -1663,37 +1765,33 @@ class AntDodo : ModelTask() {
                     Log.runtime(TAG, "queryMyCollection失败：${jo.optString("resultDesc")}")
                     return ExchangeCardCandidateQueryResult(null, false)
                 }
-                val data = jo.optJSONObject("data") ?: return ExchangeCardCandidateQueryResult(null, true)
-                val animalCollectionInfoList = data.optJSONArray("animalCollectionInfoList")
-                for (i in 0 until (animalCollectionInfoList?.length() ?: 0)) {
-                    val animalCollectionInfo = animalCollectionInfoList!!.optJSONObject(i) ?: continue
-                    val animal = animalCollectionInfo.optJSONObject("animal") ?: continue
+                val data = jo.getJSONObject("data")
+                val animalCollectionInfoList = data.getJSONArray("animalCollectionInfoList")
+                for (i in 0 until animalCollectionInfoList.length()) {
+                    val collection = animalCollectionInfoList.getJSONObject(i)
+                    val animal = collection.getJSONObject("animal")
                     val animalId = animal.optString("animalId")
-                    val count = animalCollectionInfo.optJSONObject("collectDetail")?.optInt("count", 0) ?: 0
-                    if (animalId.isBlank() || animalId == targetAnimalId || count <= 1) {
-                        continue
-                    }
-                    return ExchangeCardCandidateQueryResult(
-                        ExchangeCardCandidate(
-                            animalId = animalId,
-                            displayName = formatAnimalDisplayName(
-                                animal.optString("ecosystem"),
-                                animal.optString("name")
-                            )
-                        ),
-                        true
+                    val count = collection.optJSONObject("collectDetail")?.optInt("count", 0) ?: 0
+                    if (animalId.isBlank() || animalId == targetAnimalId || count <= maxCount) continue
+                    maxCount = count
+                    candidateCollection = collection
+                    candidate = ExchangeCardCandidate(
+                        animalId = animalId,
+                        displayName = formatAnimalDisplayName(animal.optString("ecosystem"), animal.optString("name"))
                     )
                 }
-                if (!data.optBoolean("hasMore")) {
-                    break
+                if (!data.getBoolean("hasMore")) {
+                    if (candidateCollection != null && !scratchAnimalCards(candidateCollection)) {
+                        return ExchangeCardCandidateQueryResult(null, false)
+                    }
+                    return ExchangeCardCandidateQueryResult(candidate, true)
                 }
+                check(animalCollectionInfoList.length() > 0) { "换卡库存非末页为空" }
                 val nextPageStart = data.opt("nextPageStart")
-                if (nextPageStart == null || nextPageStart == JSONObject.NULL) {
-                    break
-                }
+                check(nextPageStart != null && nextPageStart != JSONObject.NULL) { "换卡库存缺少下一页游标" }
                 pageStart = nextPageStart
-            } while (!Thread.currentThread().isInterrupted)
-            ExchangeCardCandidateQueryResult(null, true)
+            }
+            ExchangeCardCandidateQueryResult(null, false)
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "queryExchangeCardCandidate err:", t)
             ExchangeCardCandidateQueryResult(null, false)
@@ -1943,6 +2041,14 @@ class AntDodo : ModelTask() {
     }
 
     private fun generateBookMedal(bookId: String, ecosystem: String): Boolean {
+        if (scratchCard?.value == true) {
+            val book = JSONObject(AntDodoRpcCall.queryBookInfo(bookId))
+            if (!ResChecker.checkRes(TAG, "合成前卡片查询失败：", book)) return false
+            val collections = book.getJSONObject("data").getJSONArray("animalForUserList")
+            for (i in 0 until collections.length()) {
+                if (!scratchAnimalCards(collections.getJSONObject(i))) return false
+            }
+        }
         val medalResponse = AntDodoRpcCall.generateBookMedal(bookId)
         if (medalResponse.isNullOrEmpty()) {
             Log.runtime(TAG, "generateBookMedal返回空，bookId=$bookId")
