@@ -517,6 +517,35 @@ internal object GoldenBeanTreasureSupport {
         )
     }
 
+    internal fun handleFortuneDraw(indexResponse: JSONObject) {
+        if (Status.hasFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_FORTUNE_DRAWN)) return
+        val info = indexResponse.optJSONObject("fortuneDrawInfo") ?: return
+        if (info.optBoolean("todayDrawn")) {
+            Status.setFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_FORTUNE_DRAWN)
+            return
+        }
+        val result = parseResponse(GoldenBeanRpcCall.fortuneDraw())
+        val succeeded = result != null && isSuccess(result)
+        val reward = result?.opt("beanDelta") as? Number
+        val fortuneType = result?.optJSONObject("fortuneType")
+        var confirmed = succeeded && reward != null && fortuneType != null
+        if (!confirmed) {
+            val refreshed = parseResponse(GoldenBeanRpcCall.index())
+            confirmed = refreshed != null && isSuccess(refreshed) &&
+                refreshed.optJSONObject("fortuneDrawInfo")?.optBoolean("todayDrawn") == true
+        }
+        if (!confirmed) {
+            Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆求签未确认完成 raw=${result ?: "EMPTY"}")
+            return
+        }
+        Status.setFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_FORTUNE_DRAWN)
+        if (succeeded && reward != null) {
+            Log.goldenBean("金豆夺宝🔮[${fortuneType?.optString("typeName").orEmpty()}]获得${reward.toInt()}金豆")
+        } else {
+            Log.goldenBean("金豆夺宝🔮服务端已确认今日求签完成")
+        }
+    }
+
     internal fun handleDailySign(
         indexResponse: JSONObject,
         entry: GoldenBeanEntry = GoldenBeanRpcCall.MASTER_ENTRY,

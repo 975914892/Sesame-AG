@@ -1786,6 +1786,7 @@ class AntSports : ModelTask() {
         override val moduleName: String = SPORTS_TASK_BLACKLIST_MODULE
         override val flowName: String = "运动任务面板"
         private val unsupportedLoggedKeys = mutableSetOf<String>()
+        private val receivedItems = linkedMapOf<String, TaskFlowItem>()
 
         override fun query(): JSONObject {
             return JSONObject(AntSportsRpcCall.queryCoinTaskPanel())
@@ -1794,6 +1795,9 @@ class AntSports : ModelTask() {
         override fun isQuerySuccess(response: JSONObject): Boolean {
             return ResChecker.checkRes(TAG, response)
         }
+
+        override fun isQueryComplete(response: JSONObject): Boolean =
+            response.optJSONObject("data")?.optJSONArray("taskList") != null
 
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
             val taskList = response.optJSONObject("data")?.optJSONArray("taskList") ?: return emptyList()
@@ -1823,6 +1827,17 @@ class AntSports : ModelTask() {
                         limit = limitConfigNum
                     )
                 )
+            }
+            // 只有具体资产的到账结果才能补足领奖后被面板移除或尚未刷新的任务。
+            for (index in items.indices) {
+                val item = items[index]
+                val received = receivedItems[item.id] ?: continue
+                if (item.status == "WAIT_RECEIVE" && item.progress == received.progress &&
+                    item.raw?.optString("assetId") == received.raw?.optString("assetId")
+                ) items[index] = received
+            }
+            receivedItems.values.filterTo(items) { received ->
+                items.none { it.id == received.id && it.type == received.type && it.sceneCode == received.sceneCode }
             }
             return items
         }
@@ -1862,7 +1877,17 @@ class AntSports : ModelTask() {
 
         override fun receive(item: TaskFlowItem): TaskFlowActionResult {
             val taskDetail = item.raw ?: return missingRawResult(item, "receive")
-            return receiveTaskReward(taskDetail, item.title)
+            val result = receiveTaskReward(taskDetail, item.title)
+            val changeAmount = result.raw.takeIf { it.isNotBlank() }?.let(::JSONObject)
+                ?.optJSONObject("data")?.optString("changeAmount")?.toBigDecimalOrNull()
+            val prizeAmount = taskDetail.optString("prizeAmount").toBigDecimalOrNull()
+            if (result.failureType == TaskRpcFailureType.TERMINAL_DONE ||
+                (result.success && prizeAmount != null && prizeAmount.signum() > 0 &&
+                    changeAmount != null && changeAmount >= prizeAmount)
+            ) {
+                receivedItems[item.id] = item.copy(status = "HAS_RECEIVED")
+            }
+            return result
         }
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
@@ -2376,7 +2401,7 @@ class AntSports : ModelTask() {
                 TaskFlowActionResult.success(
                     refreshAfterAction = true,
                     progressChanged = false,
-                )
+                ).copy(raw = resultData.toString())
             } else {
                 val errorMsg = extractSportsRpcErrorMessage(resultData)
                 val errorCode = extractSportsRpcErrorCode(resultData)
@@ -6214,7 +6239,7 @@ class AntSports : ModelTask() {
                 }
 
                 val memberPriceJson = queryMemberPriceRankingForBattle(coinBalance) ?: return
-                val candidates = collectClubMemberCandidates(memberPriceJson)
+                val candidates = collectClubMemberCandidates(memberPriceJson).shuffled()
                 if (candidates.isEmpty()) {
                     Log.sports("抢好友大战🧑‍🤝‍🧑暂无可抢好友")
                     return
@@ -7780,10 +7805,11 @@ class AntSports : ModelTask() {
                 override fun isQueryComplete(response: JSONObject): Boolean = response.optJSONObject("data")?.optJSONArray("offlineAwards") != null
                 override fun extractItems(response: JSONObject): List<TaskFlowItem> {
                     val awards = response.optJSONObject("data")?.optJSONArray("offlineAwards") ?: return emptyList()
-                    if (awards.length() == 0) return emptyList()
-                    return listOf(TaskFlowItem("offlineAwards", "离线奖励", "READY", progress = awards.length().toString()))
+                    return listOf(TaskFlowItem("offlineAwards", "离线奖励",
+                        if (awards.length() == 0) "RECEIVED" else "READY", progress = awards.length().toString()))
                 }
-                override fun mapPhase(item: TaskFlowItem) = TaskFlowPhase.REWARD_READY
+                override fun mapPhase(item: TaskFlowItem) =
+                    if (item.status == "RECEIVED") TaskFlowPhase.TERMINAL else TaskFlowPhase.REWARD_READY
                 override fun receive(item: TaskFlowItem): TaskFlowActionResult {
                     val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.offlineAward())
                     if (!ResChecker.checkRes(TAG, "离线奖励领取失败:", response)) return TaskFlowActionResult.failure(
@@ -7817,19 +7843,25 @@ class AntSports : ModelTask() {
                     val bubbles = response.optJSONObject("data")?.optJSONArray("bubbleTaskVOS") ?: return emptyList()
                     val matched = (0 until bubbles.length()).mapNotNull { bubbles.optJSONObject(it) }
                         .filter { it.optString("taskId") == "STRATEGY_BALL" }
-                    if (isNeverlandTaskSubmittedToday("STRATEGY_BALL") &&
-                        (matched.isEmpty() || matched.all { isNeverlandBubbleTerminal(it.optString("bubbleTaskStatus")) })
+                    if (isNeverlandTaskSubmittedToday("STRATEGY_BALL") && matched.isNotEmpty() &&
+                        matched.all { isNeverlandBubbleTerminal(it.optString("bubbleTaskStatus")) }
                     ) {
                         markNeverlandTaskDoneToday("STRATEGY_BALL")
                         clearNeverlandTaskPendingConfirmation("STRATEGY_BALL")
                     }
-                    if (isNeverlandTaskDoneToday("STRATEGY_BALL")) return emptyList()
-                    return matched.filter { it.optString("bubbleTaskStatus") == "INIT" }.map {
-                        TaskFlowItem("STRATEGY_BALL", it.optString("title", "策略气泡"), "INIT", raw = it,
+                    if (isNeverlandTaskDoneToday("STRATEGY_BALL")) {
+                        return listOf(TaskFlowItem("STRATEGY_BALL", "策略气泡", "RECEIVED"))
+                    }
+                    return matched.map {
+                        TaskFlowItem("STRATEGY_BALL", it.optString("title", "策略气泡"), it.optString("bubbleTaskStatus"), raw = it,
                             progress = it.optString("medEnergyBallInfoRecordId"))
                     }
                 }
-                override fun mapPhase(item: TaskFlowItem) = TaskFlowPhase.READY_TO_COMPLETE
+                override fun mapPhase(item: TaskFlowItem) = when {
+                    item.status == "RECEIVED" || isNeverlandBubbleTerminal(item.status) -> TaskFlowPhase.TERMINAL
+                    item.status == "INIT" -> TaskFlowPhase.READY_TO_COMPLETE
+                    else -> TaskFlowPhase.UNKNOWN
+                }
                 override fun complete(item: TaskFlowItem): TaskFlowActionResult {
                     val response = JSONObject(AntSportsRpcCall.NeverlandRpcCall.receiveSpecialPrize("STRATEGY_BALL_ACTIVITY"))
                     if (!ResChecker.checkRes(TAG, "策略气泡奖励领取失败:", response)) return TaskFlowActionResult.failure(

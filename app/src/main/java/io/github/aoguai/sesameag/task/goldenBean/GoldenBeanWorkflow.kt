@@ -19,6 +19,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
+import io.github.aoguai.sesameag.task.common.TaskFlowExecutionState
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
@@ -41,6 +42,14 @@ internal const val GOLDEN_BEAN_CONVERGENCE_LIMIT = 64
  */
 internal suspend fun GoldenBeanTreasure.runGoldenBeanTreasure() {
     if (Status.hasFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_TASKS_DONE)) {
+        if (!Status.hasFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_FORTUNE_DRAWN)) {
+            val indexResponse = GoldenBeanTreasureSupport.parseResponse(GoldenBeanRpcCall.index())
+            if (indexResponse != null && GoldenBeanTreasureSupport.isSuccess(indexResponse)) {
+                GoldenBeanTreasureSupport.handleFortuneDraw(indexResponse)
+            } else {
+                Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆求签入口查询失败 raw=${indexResponse ?: "EMPTY"}")
+            }
+        }
         Log.goldenBean("金豆夺宝[今日已处理，跳过]")
         return
     }
@@ -53,6 +62,9 @@ internal suspend fun GoldenBeanTreasure.runGoldenBeanTreasure() {
                 "金豆夺宝入口首页查询失败 entry=${entry.bizType}/${entry.source} raw=${indexResponse ?: "EMPTY"}",
             )
             return@mapNotNull null
+        }
+        if (entry == GoldenBeanRpcCall.MASTER_ENTRY) {
+            GoldenBeanTreasureSupport.handleFortuneDraw(indexResponse)
         }
         val signSyncResponse = GoldenBeanTreasureSupport.handleDailySign(indexResponse, entry)
         val marketingSource =
@@ -266,10 +278,13 @@ private data class GoldenBeanEntryRun(
     val entry: GoldenBeanEntry,
     val adapter: GoldenBeanTaskFlowAdapter,
 ) {
+    private val executionState = TaskFlowExecutionState()
+
     fun runTaskFlow(executeInterval: Int) =
         TaskFlowEngine(
             adapter,
             roundSleepMs = executeInterval.toLong().coerceAtLeast(500L),
+            executionState = executionState,
         ).run()
 }
 

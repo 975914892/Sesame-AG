@@ -39,8 +39,8 @@ class GoldenBeanTreasure : ModelTask() {
                 .also { executeInterval = it },
         )
         modelFields.addField(
-            BooleanModelField("goldenBeanTreasure", "签到、任务、矿工与乐园奖励", false)
-                .withDesc("自动处理金豆夺宝签到、任务、金猫矿工和金豆乐园抽奖。")
+            BooleanModelField("goldenBeanTreasure", "签到、求签、任务、矿工与乐园奖励", false)
+                .withDesc("自动处理金豆夺宝签到、每日求签、任务、金猫矿工和金豆乐园抽奖。")
                 .also { goldenBeanTreasure = it },
         )
         modelFields.addField(
