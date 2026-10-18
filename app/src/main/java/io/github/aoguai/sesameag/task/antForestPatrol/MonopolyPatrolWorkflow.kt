@@ -10,6 +10,7 @@ import io.github.aoguai.sesameag.task.common.TaskFlowExecutionState
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
+import io.github.aoguai.sesameag.task.reserve.Reserve
 import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.Log
@@ -23,7 +24,7 @@ import java.util.TimeZone
 internal object MonopolyPatrolWorkflow {
     private const val TAG = "AntForestPatrol"
 
-    fun run(tasksEnabled: Boolean) {
+    fun run(tasksEnabled: Boolean, onMapCompleted: (() -> Unit)? = null) {
         var state = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyEntryInfo())
         if (!ResChecker.checkRes(TAG, "查询新巡护入口失败:", state)) return
         val region = state.optJSONObject("regionInfo")
@@ -56,6 +57,7 @@ internal object MonopolyPatrolWorkflow {
         if (!ResChecker.checkRes(TAG, "刷新新巡护状态失败:", state)) return
         pendingEvent = pendingEvent ?: state.optJSONObject("eventInfo")
         val confirmedEvents = mutableSetOf<String>()
+        val completedMaps = mutableSetOf<String>()
         var tasksMayHaveChanged = false
         while (!ApplicationHookConstants.isOffline() && !Thread.currentThread().isInterrupted) {
             val event = pendingEvent
@@ -84,6 +86,28 @@ internal object MonopolyPatrolWorkflow {
                 pendingEvent = state.optJSONObject("eventInfo")
                 tasksMayHaveChanged = true
                 continue
+            }
+            val mapInfo = state.optJSONObject("mapInfo")
+            val mapCode = mapInfo?.optString("mapCode").orEmpty()
+            val creatures = mapInfo?.optJSONArray("creatureList")
+            if (onMapCompleted != null && mapCode.isNotBlank() && mapCode !in completedMaps &&
+                creatures != null && creatures.length() > 0 && (0 until creatures.length()).all { index ->
+                    val animal = creatures.optJSONObject(index)
+                    animal != null && animal.optInt("maxLevel", -1) > 0 &&
+                        animal.optInt("level", -1) >= animal.optInt("maxLevel")
+                }) {
+                completedMaps.add(mapCode)
+                onMapCompleted()
+                if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) return
+                state = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyEntryInfo())
+                if (!ResChecker.checkRes(TAG, "切图后刷新巡护入口失败:", state)) return
+                pendingEvent = state.optJSONObject("eventInfo")
+                if (state.optJSONObject("mapInfo")?.optString("mapCode") != mapCode) {
+                    guideRoll = state.optJSONObject("userInfo")?.optBoolean("firstEnterMonopoly", false) == true
+                    if (tasksEnabled) runTasks(state.optJSONObject("regionInfo")?.optString("regionCode").orEmpty(), taskState)
+                    tasksMayHaveChanged = true
+                    continue
+                }
             }
             val diceCount = state.optInt("totalDiceCount", -1)
             if (diceCount < 0) {
@@ -139,66 +163,170 @@ internal object MonopolyPatrolWorkflow {
         }
     }
 
-    fun exchangeCertificate() {
-        val entry = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyEntryInfo())
-        if (!ResChecker.checkRes(TAG, "查询巡护证书入口失败:", entry)) return
-        val redirect = entry.optJSONObject("displayInfo")?.optJSONObject("mapDisplay")
-            ?.optJSONObject("protectionGuideDisplay")?.optString("redirectUrl").orEmpty()
-        if (redirect.isBlank()) {
-            Log.forestPatrol("当前地图没有证书项目")
+    fun updateMaps(
+        exchangeEnabled: Boolean,
+        earlyExchange: Boolean,
+        switchEnabled: Boolean,
+        energyReserve: Int,
+        showRanking: Boolean,
+    ) {
+        var page = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyMapPage())
+        if (!ResChecker.checkRes(TAG, "查询巡护地图失败:", page)) return
+        val regionCode = page.getString("currentRegionCode")
+        val mapCode = page.getString("currentMapCode")
+        if (regionCode.isBlank() || mapCode.isBlank() || energyReserve < 0) {
+            Log.error(TAG, "巡护区域、地图或保留能量无效:$page")
             return
         }
-        val uri = Uri.parse(redirect)
-        val projectId = uri.getQueryParameter("projectId") ?: uri.getQueryParameter("url")?.let {
-            Uri.parse(it).getQueryParameter("projectId")
-        }
-        if (projectId.isNullOrBlank()) {
-            Log.error(TAG, "当前地图证书链接缺少 projectId:$redirect")
-            return
-        }
-        val before = parsePatrolResponse(AntForestPatrolRpcCall.queryCertificate(projectId))
-        if (!ResChecker.checkRes(TAG, "查询巡护证书资格失败:", before)) return
-        val project = before.optJSONObject("exchangeableTree") ?: run {
-            Log.error(TAG, "证书查询缺少 exchangeableTree:$before")
-            return
-        }
-        if (before.optString("applyAction") != "AVAILABLE" || project.optInt("certCount", 0) > 0) {
-            Log.forestPatrol("当前证书不可兑换或已领取[${before.optString("applyAction")}]")
-            return
-        }
-        val cost = project.optLong("energy", -1L)
-        val balance = before.optLong("currentEnergy", -1L)
-        if (cost < 0 || balance < 0) {
-            Log.error(TAG, "证书查询缺少实时成本或余额:$before")
-            return
-        }
-        if (balance < cost || project.optBoolean("overLimit") || !project.optBoolean("hasBudget", true)) {
-            Log.forestPatrol("当前证书资源或额度不足，成本${cost}g，余额${balance}g")
-            return
-        }
-        if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) return
-        try {
-            val exchanged = parsePatrolResponse(AntForestPatrolRpcCall.exchangeCertificate(project.getLong("projectId")))
-            if (ResChecker.checkRes(TAG, "兑换巡护证书失败:", exchanged)) {
-                Log.forestPatrol("保护证书兑换请求成功[${project.optString("projectName")}]，成本${cost}g")
+        var maps = page.getJSONArray("currentRegionMapList")
+        if (showRanking) {
+            val regions = page.getJSONArray("regionList")
+            for (index in 0 until regions.length()) {
+                val region = regions.getJSONObject(index)
+                Log.forestPatrol("区域[${region.optString("regionName", region.optString("regionCode"))}]状态[${region.optString("regionAvailability")}]，进入${region.optInt("enteredMapCount")}/${region.optInt("totalMapCount")}张地图")
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.printStackTrace(TAG, "巡护证书兑换结果不确定，先回查", e)
-        }
-        if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) return
-        val after = parsePatrolResponse(AntForestPatrolRpcCall.queryCertificate(projectId))
-        if (ResChecker.checkRes(TAG, "回查巡护证书失败:", after)) {
-            if ((after.optJSONObject("exchangeableTree")?.optInt("certCount", 0) ?: 0) > project.optInt("certCount", 0)) {
-                Log.forestPatrol("已确认获得当前地图保护证书")
-            } else {
-                Log.forestPatrol("证书回查状态[${after.optString("applyAction")}]，本轮不再兑换")
+            for (index in 0 until maps.length()) {
+                val map = maps.getJSONObject(index)
+                val animals = map.optJSONArray("creatureList")
+                val maxed = if (animals == null) 0 else (0 until animals.length()).count { animalIndex ->
+                    val animal = animals.optJSONObject(animalIndex)
+                    animal != null && animal.optInt("maxLevel", -1) > 0 && animal.optInt("level", -1) >= animal.optInt("maxLevel")
+                }
+                val name = map.optJSONObject("displayInfo")?.optJSONObject("mapDisplay")?.optString("mapNameText")
+                    ?.takeIf { it.isNotBlank() } ?: map.optString("mapCode")
+                Log.forestPatrol("地图[$name]${if (map.optBoolean("currentMap")) "（当前）" else ""}，状态[${map.optString("mapAvailability")}]，动物${map.opt("ownedCreatureCount")}/${map.opt("totalCreatureCount")}，满星$maxed，证书[${map.optString("certificateStatus")}]")
+            }
+            for (rankType in listOf("TOTAL", "DAY")) {
+                try {
+                    val ranking = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyRanking(rankType))
+                    if (!ResChecker.checkRes(TAG, "查询巡护排行失败[$rankType]:", ranking)) continue
+                    if (ranking.optBoolean("degraded")) {
+                        Log.forestPatrol("巡护排行[$rankType]暂不可用")
+                        continue
+                    }
+                    val myself = ranking.optJSONObject("myself")
+                    if (myself == null) {
+                        Log.error(TAG, "巡护排行缺少本人数据[$rankType]:$ranking")
+                        continue
+                    }
+                    val values = listOf("rank" to "名次", "stepCount" to "步数", "mapCount" to "证书", "medalCount" to "勋章")
+                        .mapNotNull { (key, label) -> if (myself.has(key)) "$label${myself.getLong(key)}" else null }
+                    Log.forestPatrol("${if (rankType == "TOTAL") "累计" else "今日"}巡护排行：${values.joinToString("，")}")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: InterruptedException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.printStackTrace(TAG, "巡护排行查询异常[$rankType]", e)
+                }
             }
         }
+        if (exchangeEnabled) {
+            val mapCodes = (0 until maps.length()).map { maps.getJSONObject(it).getString("mapCode") }.distinct()
+            for (candidateCode in mapCodes) {
+                if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) return
+                val currentMaps = (0 until maps.length()).map { maps.getJSONObject(it) }
+                val candidate = currentMaps.firstOrNull { it.optString("mapCode") == candidateCode } ?: continue
+                when (val status = candidate.optString("certificateStatus")) {
+                    "OBTAINED" -> continue
+                    "PENDING" -> Unit
+                    else -> {
+                        Log.error(TAG, "巡护证书状态未知[$candidateCode] status=$status")
+                        continue
+                    }
+                }
+                if (!earlyExchange && candidate.optString("mapAvailability") != "AVAILABLE") continue
+                val bindings = currentMaps.associate { map ->
+                    val display = map.optJSONObject("displayInfo")?.optJSONObject("mapDisplay")
+                    val redirect = display?.optJSONObject("protectionGuideDisplay")?.optString("redirectUrl")
+                        ?.takeIf { it.isNotBlank() } ?: display?.optString("lockedRedirectUrl").orEmpty()
+                    val uri = redirect.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+                    val id = if (uri?.isHierarchical == true) {
+                        uri.getQueryParameter("projectId") ?: uri.getQueryParameter("url")?.let {
+                            val nested = Uri.parse(it)
+                            if (nested.isHierarchical) nested.getQueryParameter("projectId") else null
+                        }
+                    } else null
+                    map.getString("mapCode") to id?.toLongOrNull()?.takeIf { it > 0L }
+                }
+                val projectId = bindings[candidateCode]
+                if (projectId == null) {
+                    Log.forestPatrol("地图[$candidateCode]未下发明确的证书项目，保留后续查询")
+                    continue
+                }
+                if (candidateCode != mapCode && bindings.any { (code, id) -> code != candidateCode && id == projectId }) {
+                    val currentMap = currentMaps.firstOrNull { it.optString("mapCode") == mapCode }
+                    val targetGuideUrl = candidate.optJSONObject("displayInfo")?.optJSONObject("mapDisplay")
+                        ?.optJSONObject("protectionGuideDisplay")?.optString("redirectUrl").orEmpty()
+                    val currentGuideUrl = currentMap?.optJSONObject("displayInfo")?.optJSONObject("mapDisplay")
+                        ?.optJSONObject("protectionGuideDisplay")?.optString("redirectUrl").orEmpty()
+                    if (candidate.optString("mapAvailability") == "LOCKED" && targetGuideUrl.isBlank() &&
+                        currentGuideUrl.isNotBlank() && currentMap?.optString("certificateStatus") == "OBTAINED" &&
+                        bindings[mapCode] == projectId
+                    ) {
+                        Log.forestPatrol("地图[$candidateCode]尚未解锁，锁定引导指向当前地图已获证书项目[$projectId]，等待解锁条件满足，不执行兑换")
+                    } else {
+                        Log.error(TAG, "地图[$candidateCode]证书链接与其他地图共用项目[$projectId]，未确认归属，不执行兑换")
+                    }
+                    continue
+                }
+                val before = parsePatrolResponse(AntForestPatrolRpcCall.queryCertificate(projectId.toString()))
+                if (!ResChecker.checkRes(TAG, "查询巡护证书资格失败:", before)) continue
+                val project = before.optJSONObject("exchangeableTree")
+                if (project == null || project.optLong("projectId", -1L) != projectId) {
+                    Log.error(TAG, "巡护证书项目身份不符[$candidateCode] projectId=$projectId raw=$before")
+                    continue
+                }
+                if (Reserve.exchangeTree(projectId.toString(), project.optString("projectName", candidateCode),
+                        count = 1, targetCount = 1, energyReserve = energyReserve, initialDetail = before)) {
+                    page = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyMapPage())
+                    if (!ResChecker.checkRes(TAG, "回查巡护证书地图失败:", page)) return
+                    maps = page.getJSONArray("currentRegionMapList")
+                    val confirmed = (0 until maps.length()).map { maps.getJSONObject(it) }
+                        .firstOrNull { it.optString("mapCode") == candidateCode }
+                    if (confirmed?.optString("certificateStatus") == "OBTAINED") {
+                        Log.forestPatrol("已确认获得地图[$candidateCode]保护证书")
+                    } else {
+                        Log.error(TAG, "地图[$candidateCode]证书回查尚未确认，不重复消耗")
+                    }
+                }
+            }
+        }
+        if (!switchEnabled || ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) return
+        val current = (0 until maps.length()).map { maps.getJSONObject(it) }.firstOrNull { it.optString("mapCode") == mapCode }
+        if (current == null) {
+            Log.error(TAG, "巡护地图目录缺少当前地图[$mapCode]")
+            return
+        }
+        val total = current.optInt("totalCreatureCount", -1)
+        val animals = current.optJSONArray("creatureList")
+        if (total <= 0 || current.optInt("ownedCreatureCount", -1) < total || animals == null || animals.length() != total ||
+            !(0 until animals.length()).all { index ->
+                val animal = animals.optJSONObject(index)
+                animal != null && animal.optInt("maxLevel", -1) > 0 && animal.optInt("level", -1) >= animal.optInt("maxLevel")
+            }) return
+        val currentLevel = current.optInt("level", -1)
+        if (currentLevel <= 0) {
+            Log.error(TAG, "当前巡护地图缺少等级[$mapCode]")
+            return
+        }
+        val target = (0 until maps.length()).map { maps.getJSONObject(it) }
+            .filter { it.optString("mapAvailability") == "AVAILABLE" && it.optString("mapCode").isNotBlank() && it.optInt("level", -1) > currentLevel }
+            .maxByOrNull { it.getInt("level") }
+        if (target == null) {
+            Log.forestPatrol("当前地图动物已全部满星，服务端未下发更新的已开放地图，保持当前地图")
+            return
+        }
+        val targetCode = target.getString("mapCode")
+        val switched = parsePatrolResponse(AntForestPatrolRpcCall.switchMonopolyMap(targetCode, regionCode))
+        if (!ResChecker.checkRes(TAG, "切换巡护地图失败:", switched)) return
         val refreshed = parsePatrolResponse(AntForestPatrolRpcCall.queryMonopolyEntryInfo())
-        if (ResChecker.checkRes(TAG, "回查巡护地图失败:", refreshed)) {
-            Log.forestPatrol("当前巡护地图[${refreshed.optJSONObject("userInfo")?.optString("currentMapCode")}]")
+        if (!ResChecker.checkRes(TAG, "回查巡护切图失败:", refreshed)) return
+        val user = refreshed.optJSONObject("userInfo")
+        if (user?.optString("currentMapCode") == targetCode && user.optString("currentRegionCode") == regionCode) {
+            Log.forestPatrol("巡护地图已切换[$mapCode → $targetCode]")
+        } else {
+            Log.error(TAG, "巡护切图结果未确认，目标[$targetCode] raw=$refreshed")
         }
     }
 

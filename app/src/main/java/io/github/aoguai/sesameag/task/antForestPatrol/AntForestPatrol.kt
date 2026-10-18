@@ -6,6 +6,7 @@ import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.ChoiceModelField
+import io.github.aoguai.sesameag.model.modelFieldExt.IntegerModelField
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antForest.AntForestRpcCall
@@ -34,6 +35,9 @@ class AntForestPatrol : ModelTask() {
     private lateinit var dispatchAnimal: BooleanModelField
     private lateinit var dispatchPriority: ChoiceModelField
     private lateinit var exchangeCertificate: BooleanModelField
+    private lateinit var earlyExchangeCertificate: BooleanModelField
+    private lateinit var autoSwitchMap: BooleanModelField
+    private lateinit var certificateEnergyReserve: IntegerModelField
 
     override fun getName(): String = "保护地巡护"
     override fun getGroup(): ModelGroup = ModelGroup.FOREST_PATROL
@@ -60,20 +64,48 @@ class AntForestPatrol : ModelTask() {
         addField(ChoiceModelField("dispatchPriority", "动物伙伴 | 派遣优先级", 0, arrayOf("新版优先", "旧版优先"))
             .also { dispatchPriority = it })
         addField(BooleanModelField("exchangeCertificate", "新版巡护 | 自动兑换保护证书", false)
-            .withDesc("按当前地图下发项目、实时资格和成本消耗森林能量，兑换后回查；默认不消费。")
+            .withDesc("按地图下发项目、实时资格和成本消耗森林能量，每张地图领取一份证书。")
             .also { exchangeCertificate = it })
+        addField(BooleanModelField("earlyExchangeCertificate", "新版巡护 | 提前兑换保护证书", false)
+            .withDesc("自动兑换开启时，允许兑换尚未巡护但已下发明确项目的地图证书。")
+            .also { earlyExchangeCertificate = it })
+        addField(IntegerModelField("certificateEnergyReserve", "新版巡护 | 兑换后至少保留能量(g)", 0, 0, Int.MAX_VALUE)
+            .also { certificateEnergyReserve = it })
+        addField(BooleanModelField("autoSwitchMap", "新版巡护 | 满星后切换最新开放地图", false)
+            .also { autoSwitchMap = it })
     }
 
     override suspend fun runSuspend() {
         val uid = UserMap.currentUid?.takeIf { it.isNotBlank() } ?: return
         Log.forestPatrol("执行开始-${getName()}")
+        val onMapCompleted: (() -> Unit)? = if (exchangeCertificate.value == true || autoSwitchMap.value == true) {
+            {
+                MonopolyPatrolWorkflow.updateMaps(
+                    exchangeEnabled = exchangeCertificate.value == true,
+                    earlyExchange = earlyExchangeCertificate.value == true,
+                    switchEnabled = autoSwitchMap.value == true,
+                    energyReserve = certificateEnergyReserve.value ?: 0,
+                    showRanking = false,
+                )
+            }
+        } else null
         val stages: List<Pair<String, () -> Unit>> = listOf(
             "旧版动物能量" to { if (collectAnimalEnergy.value == true) collectLegacyEnergy(uid) },
             "新版动物能量" to { if (collectAnimalEnergy.value == true) collectMonopolyEnergy(uid) },
             "旧版巡护" to { if (legacyPatrol.value == true) LegacyPatrolWorkflow.queryUserPatrol() },
             "动物碎片合成" to { if (combineAnimalPiece.value == true) LegacyPatrolWorkflow.queryAnimalAndPiece() },
-            "新版巡护" to { if (monopolyPatrol.value == true) MonopolyPatrolWorkflow.run(monopolyTasks.value == true) },
-            "保护证书" to { if (exchangeCertificate.value == true) MonopolyPatrolWorkflow.exchangeCertificate() },
+            "巡护地图" to {
+                if (monopolyPatrol.value == true || exchangeCertificate.value == true || autoSwitchMap.value == true) {
+                    MonopolyPatrolWorkflow.updateMaps(
+                        exchangeEnabled = exchangeCertificate.value == true,
+                        earlyExchange = earlyExchangeCertificate.value == true,
+                        switchEnabled = autoSwitchMap.value == true,
+                        energyReserve = certificateEnergyReserve.value ?: 0,
+                        showRanking = true,
+                    )
+                }
+            },
+            "新版巡护" to { if (monopolyPatrol.value == true) MonopolyPatrolWorkflow.run(monopolyTasks.value == true, onMapCompleted) },
             "动物派遣" to { if (dispatchAnimal.value == true) dispatchAnimal(uid) },
         )
         try {
