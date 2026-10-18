@@ -1092,6 +1092,15 @@ class AntMember : ModelTask() {
                 addMemberExchangeCandidates(response.optJSONArray("briefConfigInfos"), candidates, pageNum, 18, uniqueId)
                 addMemberExchangeEntityCandidates(response.optJSONArray("entityInfoList"), candidates, pageNum, 18, uniqueId)
             }
+            val navi = payload.optJSONArray("navi") ?: JSONArray()
+            for (i in 0 until navi.length()) {
+                val page = navi.getJSONObject(i)
+                addMemberExchangeEntityCandidates(
+                    page.getJSONObject("response").optJSONArray("entityInfoList"), candidates,
+                    page.getInt("pageNum"), 18, page.getString("uniqueId"),
+                    JSONObject().put("source", "mytab").put("innerSource", "").put("unid", "").put("dhNewItem", "true"),
+                )
+            }
             return candidates
         }
         val snapshot = ExchangeOptionsCache.getOrFetch(userId, ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT, forceRefresh) { session ->
@@ -1161,12 +1170,42 @@ class AntMember : ModelTask() {
                 check(!hasNextPage || (briefConfigInfos?.length() ?: 0) + (entityInfoList?.length() ?: 0) > 0) {
                     "会员积分专区分页未返回商品: currentPage=$currentPage nextPageNum=$next"
                 }
-                session.commit(JSONObject().put("stage", "delivery").put("pageNum", next).put("done", !hasNextPage),
+                session.commit(JSONObject().put("stage", if (hasNextPage) "delivery" else "navi").put("pageNum", next),
                     (briefConfigInfos?.length() ?: 0) + (entityInfoList?.length() ?: 0),
-                    if (hasNextPage) "积分专区第 $next 页" else "积分专区结束，保存完整列表")
+                    if (hasNextPage) "积分专区第 $next 页" else "积分专区结束，准备权益导航")
                 if (hasNextPage) currentPage = next
             } while (hasNextPage)
-            val payload = JSONObject().put("shandie", shandie).put("delivery", delivery)
+            val navi = JSONArray()
+            for (naviCode in listOf("", "14", "1", "11", "12")) {
+                val naviSession = session.read("naviSession", JSONObject().put("naviCode", naviCode), "权益导航分页参数") {
+                    JSONObject().put("uniqueId", "${System.currentTimeMillis()}${naviCode}0and99999999INTELLIGENT_SORT${userId.orEmpty()}")
+                }
+                var naviUniqueId = naviSession.getString("uniqueId")
+                currentPage = 1
+                do {
+                    if (sleepMillis > 0L) session.pageTurnDelay(baseMillis = sleepMillis)
+                    val response = session.read("navi", JSONObject().put("naviCode", naviCode).put("pageNum", currentPage)
+                        .put("pageSize", 18).put("uniqueId", naviUniqueId), "权益导航[$naviCode]第 $currentPage 页") {
+                        JSONObject(AntMemberRpcCall.queryIndexNaviBenefitFlowV2(naviCode, currentPage, 18, naviUniqueId))
+                    }
+                    if (!ResChecker.checkRes(TAG, "会员权益导航查询失败:", response)) {
+                        onFailure?.invoke(memberDomainTaskFailureResult(null, response, response.toString(), "queryIndexNaviBenefitFlowV2", "权益导航查询失败"))
+                        error("会员权益导航查询失败")
+                    }
+                    val entities = response.optJSONArray("entityInfoList") ?: error("会员权益导航缺少 entityInfoList")
+                    naviUniqueId = response.optString("uniqueId").ifBlank { naviUniqueId }
+                    navi.put(JSONObject().put("response", response).put("pageNum", currentPage).put("uniqueId", naviUniqueId))
+                    val next = response.optInt("nextPageNum", 0)
+                    check(next <= 0 || next > currentPage) { "会员权益导航分页未前进: currentPage=$currentPage nextPageNum=$next" }
+                    hasNextPage = next > currentPage
+                    check(!hasNextPage || entities.length() > 0) { "会员权益导航分页未返回商品: currentPage=$currentPage nextPageNum=$next" }
+                    session.commit(JSONObject().put("stage", "navi").put("naviCode", naviCode).put("pageNum", next),
+                        entities.length(), if (hasNextPage) "权益导航[$naviCode]第 $next 页" else "当前权益导航结束")
+                    if (hasNextPage) currentPage = next
+                } while (hasNextPage)
+            }
+            session.commit(JSONObject().put("stage", "navi").put("done", true), nextLabel = "权益目录结束，保存完整列表")
+            val payload = JSONObject().put("shandie", shandie).put("delivery", delivery).put("navi", navi)
             ExchangeOptionsSnapshot(parse(payload).values.map { it.item.toOptionRow() }, payload)
         }
         return parse(snapshot.payload)
@@ -1200,7 +1239,8 @@ class AntMember : ModelTask() {
         candidateMap: LinkedHashMap<String, MemberExchangeCandidate>,
         pageNum: Int,
         pageSize: Int,
-        uniqueId: String
+        uniqueId: String,
+        sourcePassMap: JSONObject? = null,
     ) {
         if (entities == null || entities.length() == 0) {
             return
@@ -1208,11 +1248,13 @@ class AntMember : ModelTask() {
         for (i in 0 until entities.length()) {
             val benefit = entities.optJSONObject(i)?.optJSONObject("benefitInfo") ?: continue
             val globalIndex = (pageNum - 1) * pageSize + i + 1
-            val sourcePassMap = buildMemberDeliveryZoneSourcePassMap(uniqueId, globalIndex)
+            val itemSourcePassMap = sourcePassMap?.let {
+                JSONObject(it.toString()).put("uniqueId", uniqueId).put("feedsIndex", globalIndex.toString())
+            } ?: buildMemberDeliveryZoneSourcePassMap(uniqueId, globalIndex)
             val candidate = buildMemberExchangeCandidate(
                 benefit,
                 requestSourceInfo = "SID:$uniqueId|$globalIndex",
-                sourcePassMap = sourcePassMap
+                sourcePassMap = itemSourcePassMap
             ) ?: continue
             candidateMap.putIfAbsent(candidate.item.id, candidate)
         }
@@ -1419,25 +1461,10 @@ class AntMember : ModelTask() {
     }
 
     internal fun memberPointExchangeBenefit() {
-        if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)) {
-            return
-        }
-        val selectedIds: Set<String> = memberPointExchangeBenefitList?.value
-            ?.filterNotNull()
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.toSet()
-            ?: emptySet()
-        if (selectedIds.isNotEmpty() && selectedIds.all { !canMemberPointExchangeBenefitToday(it) }) {
-            Log.member("会员积分🎐兑换列表今日已全部处理，跳过执行")
-            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
-            return
-        }
-        if (selectedIds.isEmpty()) {
-            Log.member("会员积分🎐未勾选目标，跳过列表拉取")
-            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
-            return
-        }
+        val selectedIds = ExchangeReplenisher.remainingSelectedIds(
+            memberPointExchangeBenefitList?.value, ::canMemberPointExchangeBenefitToday
+        )
+        if (selectedIds.isEmpty()) return
         try {
             val userId = UserMap.currentUid
             val memberInfo = JSONObject(AntMemberRpcCall.queryMemberInfo())
@@ -1465,14 +1492,11 @@ class AntMember : ModelTask() {
                     return@forEach
                 }
                 when (candidate.item.safety) {
-                    ExchangeSafety.UNAVAILABLE -> {
-                        Log.member("会员积分🎐跳过[${candidate.item.displayName()}]#${candidate.item.safetyReason}")
-                    }
                     ExchangeSafety.LOG_ONLY -> {
                         Log.member("会员积分🎐已勾选[${candidate.item.displayName()}]#仅提醒，不自动兑换")
-                        memberPointExchangeBenefitToday(candidate.item.id)
                     }
-                    ExchangeSafety.AUTO -> {
+                    ExchangeSafety.AUTO, ExchangeSafety.UNAVAILABLE -> {
+                        // 缓存中的临时不可兑状态不能替代本次详情复核。
                         if (exchangeMemberPointBenefit(candidate)) {
                             memberPointExchangeBenefitToday(candidate.item.id)
                         }
@@ -1488,8 +1512,6 @@ class AntMember : ModelTask() {
             remainingSelectedIds
                 ?.filter { canMemberPointExchangeBenefitToday(it) }
                 ?.forEach { Log.member("会员积分🎐已勾选[$it]#本次列表未返回，保留配置不删除") }
-            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
-
         } catch (t: Throwable) {
             Log.member("memberPointExchangeBenefit 运行异常: ${t.message}")
             Log.printStackTrace(TAG, t)
@@ -8677,12 +8699,9 @@ class AntMember : ModelTask() {
         if (memberPointExchangeBenefit?.value != true) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
-        val selectedIds = memberPointExchangeBenefitList?.value
-            ?.filterNotNull()
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.toSet()
-            ?: emptySet()
+        val selectedIds = ExchangeReplenisher.remainingSelectedIds(
+            memberPointExchangeBenefitList?.value, ::canMemberPointExchangeBenefitToday
+        )
         if (selectedIds.isEmpty()) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
@@ -8714,7 +8733,7 @@ class AntMember : ModelTask() {
                 }
                 matchedSelected = true
                 if (!canMemberPointExchangeBenefitToday(candidate.item.id)) continue
-                if (candidate.item.safety != ExchangeSafety.AUTO) continue
+                if (candidate.item.safety == ExchangeSafety.LOG_ONLY) continue
                 if (exchangeMemberPointBenefit(candidate, report)) {
                     memberPointExchangeBenefitToday(candidate.item.id)
                     exchangedCount += 1
@@ -8783,11 +8802,12 @@ class AntMember : ModelTask() {
             }
             when {
                 exchangedCount > 0 -> ExchangeReplenishResult.EXCHANGED
-                matchedSelected && attempted -> ExchangeReplenishResult.BUSINESS_LIMIT
+                matchedSelected && attempted -> ExchangeReplenishResult.RETRY_LATER
                 matchedSelected -> ExchangeReplenishResult.NOT_AVAILABLE
                 else -> ExchangeReplenishResult.NOT_SELECTED
             }
         }.onFailure {
+            if (it is CancellationException) throw it
             Log.printStackTrace(TAG, "replenishBeanExchangeByNeed err:", it)
         }.getOrDefault(ExchangeReplenishResult.RETRY_LATER)
     }
@@ -8811,7 +8831,7 @@ class AntMember : ModelTask() {
                 .onFailure { Log.printStackTrace(TAG, "exchangeBeanCandidate.postQuery err:", it) }
             return true
         }
-        Log.member("安心豆🫘兑换失败[${candidate.item.name}]#$exchangeResult")
+        Log.error(TAG, "安心豆🫘兑换失败[${candidate.item.name}]#$exchangeResult")
         return false
     }
 
@@ -8913,7 +8933,11 @@ class AntMember : ModelTask() {
         raw.optInt("lackPointNum", 0)
             .takeIf { it > 0 }
             ?.let { statusParts.add("安心豆不足$it") }
-        val balanceNotEnough = beanBalance != null && assetAmount > beanBalance
+        val balanceNotEnough = if (beanBalance != null && assetAmount > 0) {
+            assetAmount > beanBalance
+        } else {
+            raw.optInt("lackPointNum", 0) > 0
+        }
         if (balanceNotEnough) {
             statusParts.add("安心豆不足")
         }
@@ -8922,7 +8946,6 @@ class AntMember : ModelTask() {
             status.equals("WAIT_EFFECTIVE", true) ||
             status.equals("INVALID", true) ||
             status.equals("USED", true) ||
-            raw.optInt("lackPointNum", 0) > 0 ||
             balanceNotEnough
         val unsafeByType = showType.equals("GOODS", true) ||
             showType.equals("CASH", true) ||
@@ -8943,7 +8966,7 @@ class AntMember : ModelTask() {
         val safetyReason = when {
             unavailable -> when {
                 fromHistory -> "已兑换记录"
-                balanceNotEnough || raw.optInt("lackPointNum", 0) > 0 -> "安心豆不足"
+                balanceNotEnough -> "安心豆不足"
                 else -> statusParts.firstOrNull().orEmpty().ifEmpty { "服务端状态不可兑换" }
             }
             unsafeByType -> "商品/现金/券类权益需手动处理"

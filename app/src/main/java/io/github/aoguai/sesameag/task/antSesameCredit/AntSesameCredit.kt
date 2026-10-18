@@ -51,6 +51,7 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeOptionRow
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchPacing
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsCache
 import io.github.aoguai.sesameag.task.exchange.ExchangeOptionsSnapshot
+import io.github.aoguai.sesameag.task.exchange.ExchangeReplenisher
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.exchange.ExchangeSafetyRules
 import io.github.aoguai.sesameag.util.CoroutineUtils
@@ -2124,33 +2125,37 @@ class AntSesameCredit : ModelTask() {
                 return@run
             }
             try {
-                val items = queryExplicitUnclaimedSesameFeedbackItems("芝麻信用💳") ?: return@run
-                if (items.isEmpty()) {
-                    Log.sesame("芝麻信用💳[当前无待收取芝麻粒]")
-                    // 即使无待收取芝麻粒，积分宝箱也可能处于 WAIT_CLAIM；仅在回查确认后写无待处理状态。
-                    if (handlePointTreasureBox("芝麻信用💳")) {
-                        flagState = Status.TodayFlagState.NO_MORE_ACTION_TODAY
-                    } else {
-                        Log.sesame("芝麻信用💳[积分宝箱状态未确认] 保留后续重试机会")
+                var items = queryExplicitUnclaimedSesameFeedbackItems("芝麻信用💳") ?: return@run
+                val attemptedIds = mutableSetOf<String>()
+                var preferOneClick = withOneClick
+                var treasureBoxConfirmed = true
+                while (!ApplicationHookConstants.isOffline() && !Thread.currentThread().isInterrupted) {
+                    val actionable = items.filter {
+                        it.creditFeedbackId.isNotBlank() && it.creditFeedbackId !in attemptedIds
                     }
-                    return@run
-                }
-                collectSesameFeedbackItems(items, withOneClick, "芝麻信用💳")
-                if (ApplicationHookConstants.isOffline()) {
-                    return@run
-                }
-                // 收取芝麻粒后积分宝箱常 autoTriggerAfterCollect；开启后必须重新查询状态。
-                val treasureBoxConfirmed = handlePointTreasureBox("芝麻信用💳")
-                if (ApplicationHookConstants.isOffline()) {
-                    return@run
-                }
-                val remainingItems = queryExplicitUnclaimedSesameFeedbackItems("芝麻信用💳[复核]") ?: return@run
-                if (remainingItems.isEmpty() && treasureBoxConfirmed) {
-                    flagState = Status.TodayFlagState.DONE
-                } else if (remainingItems.isNotEmpty()) {
-                    Log.sesame("芝麻信用💳[仍有${remainingItems.size}项未收取] 保留后续重试机会")
-                } else {
-                    Log.sesame("芝麻信用💳[积分宝箱状态未确认] 保留后续重试机会")
+                    if (items.isNotEmpty() && actionable.isEmpty()) {
+                        Log.sesame("芝麻信用💳[仍有${items.size}项未收取，暂无新进度] 保留待确认，不重复提交")
+                        return@run
+                    }
+                    if (actionable.isNotEmpty()) {
+                        attemptedIds.addAll(actionable.map { it.creditFeedbackId })
+                        collectSesameFeedbackItems(actionable, preferOneClick, "芝麻信用💳")
+                        preferOneClick = false
+                    }
+                    if (ApplicationHookConstants.isOffline()) return@run
+                    // 宝箱可生成新反馈；未确认的开启请求本次不重复提交，但仍收取新出现的反馈。
+                    if (treasureBoxConfirmed) treasureBoxConfirmed = handlePointTreasureBox("芝麻信用💳")
+                    if (ApplicationHookConstants.isOffline()) return@run
+                    items = queryExplicitUnclaimedSesameFeedbackItems("芝麻信用💳[复核]") ?: return@run
+                    if (items.isEmpty()) {
+                        if (treasureBoxConfirmed) {
+                            flagState = if (attemptedIds.isEmpty()) Status.TodayFlagState.NO_MORE_ACTION_TODAY
+                                else Status.TodayFlagState.DONE
+                        } else {
+                            Log.sesame("芝麻信用💳[积分宝箱状态未确认] 保留后续重试机会")
+                        }
+                        return@run
+                    }
                 }
             } catch (t: Throwable) {
                 Log.printStackTrace("$TAG.collectSesame", t)
@@ -6667,42 +6672,23 @@ class AntSesameCredit : ModelTask() {
 
     internal suspend fun doSesameGrainExchange(): Unit =
         CoroutineUtils.run {
-            // 每日只运行一次，避免重复请求
-            if (hasFlagToday(StatusFlags.FLAG_SESAME_GRAIN_EXCHANGE_DONE)) {
-                return@run
-            }
-
             try {
-                val targetIds: Set<String> =
-                    sesameGrainExchangeList
-                        ?.value
-                        ?.filterNotNull()
-                        ?.map { it.trim() }
-                        ?.filter { it.isNotEmpty() }
-                        ?.toSet()
-                        ?: emptySet()
-                if (targetIds.isEmpty()) {
-                    Log.sesame("芝麻粒兑换🛒未勾选目标，跳过列表拉取")
-                    return@run
+                // 保持原每日自动兑换额度，只记录已确认商品，不让其他商品失败导致重复兑换。
+                val targetIds = ExchangeReplenisher.remainingSelectedIds(sesameGrainExchangeList?.value) {
+                    !hasFlagToday(StatusFlags.FLAG_SESAME_GRAIN_EXCHANGE_DONE + "::" + it)
                 }
+                if (targetIds.isEmpty()) return@run
                 val candidates = querySesameGrainExchangeCandidates()
                 val remainingTargetIds = targetIds.toMutableSet()
-                var allSelectedTargetsHandled = true
                 for (candidate in candidates) {
                     if (!targetIds.contains(candidate.item.id)) continue
                     remainingTargetIds.remove(candidate.item.id)
                     when (candidate.item.safety) {
-                        ExchangeSafety.UNAVAILABLE -> {
-                            Log.sesame("芝麻粒兑换🛒跳过[${candidate.item.displayName()}]#${candidate.item.safetyReason}")
-                        }
                         ExchangeSafety.LOG_ONLY -> {
                             Log.sesame("芝麻粒兑换🛒已勾选[${candidate.item.displayName()}]#仅提醒，不自动兑换")
                         }
-                        ExchangeSafety.AUTO -> {
-                            Log.sesame("芝麻粒兑换🛒准备兑换[${candidate.item.name}]#消耗${candidate.pointNeeded}粒")
-                            if (!exchangeSesameGift(candidate.templateId, candidate.item.name, candidate.pointNeeded)) {
-                                allSelectedTargetsHandled = false
-                            }
+                        ExchangeSafety.AUTO, ExchangeSafety.UNAVAILABLE -> {
+                            exchangeSesameGift(candidate.templateId, candidate.item.name)
                         }
                     }
                 }
@@ -6711,13 +6697,8 @@ class AntSesameCredit : ModelTask() {
                 unresolvedTargetIds
                     .forEach { Log.sesame("芝麻粒兑换🛒已勾选[$it]#本次列表未返回，保留配置不删除") }
                 Log.sesame("芝麻粒兑换列表刷新完成#${candidates.size}")
-                if (allSelectedTargetsHandled && unresolvedTargetIds.isEmpty()) {
-                    setFlagToday(StatusFlags.FLAG_SESAME_GRAIN_EXCHANGE_DONE)
-                } else {
-                    Log.sesame("芝麻粒兑换🛒本轮未确认全部完成，保留今日后续重试机会")
-                }
             } catch (t: Throwable) {
-                // 这里
+                if (t is CancellationException) throw t
                 Log.printStackTrace(TAG, "doSesameGrainExchange 运行异常:", t)
             }
         }
@@ -6852,7 +6833,6 @@ class AntSesameCredit : ModelTask() {
     private fun exchangeSesameGift(
         templateId: String,
         name: String,
-        point: String,
     ): Boolean {
         try {
             val detailResp = JSONObject(AntSesameCreditRpcCall.queryAwardDetail(templateId))
@@ -6861,14 +6841,16 @@ class AntSesameCredit : ModelTask() {
             ) {
                 return false
             }
-            val detailCandidate =
-                detailResp
-                    .optJSONObject("data")
-                    ?.optJSONObject("awardTemplateVO")
-                    ?.let { buildSesameExchangeCandidate(it) }
+            val template = detailResp.optJSONObject("data")?.optJSONObject("awardTemplateVO")
+            val detailCandidate = template?.let { buildSesameExchangeCandidate(it) }
             if (detailCandidate == null) {
-                Log.sesame("芝麻粒兑换🛒跳过[$name]#详情缺少 awardTemplateVO")
+                Log.error(TAG, "芝麻粒兑换🛒详情缺少有效 awardTemplateVO[$name] raw=$detailResp")
                 return false
+            }
+            if (template?.optBoolean("hasTaken", false) == true || template?.optBoolean("hasFinished", false) == true) {
+                setFlagToday(StatusFlags.FLAG_SESAME_GRAIN_EXCHANGE_DONE + "::" + templateId)
+                Log.sesame("芝麻粒兑换🛒[$name]已确认领取或完成")
+                return true
             }
             if (detailCandidate.item.safety != ExchangeSafety.AUTO) {
                 Log.sesame("芝麻粒兑换🛒详情复核跳过[${detailCandidate.item.displayName()}]#${detailCandidate.item.safetyReason}")
@@ -6897,13 +6879,15 @@ class AntSesameCredit : ModelTask() {
                     return false
                 }
 
-                Log.sesame("芝麻粒兑换🛒[兑换已确认] ${detailCandidate.item.name} #消耗${point}粒")
+                setFlagToday(StatusFlags.FLAG_SESAME_GRAIN_EXCHANGE_DONE + "::" + templateId)
+                Log.sesame("芝麻粒兑换🛒[兑换已确认] ${detailCandidate.item.name} #消耗${detailCandidate.pointNeeded}粒")
                 return true
             } else {
                 val errorMsg = jo.optString("resultView", resString)
                 Log.error(TAG, "兑换失败[$name]: $errorMsg")
             }
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             Log.printStackTrace(TAG, "exchangeSesameGift 错误:", t)
         }
         return false

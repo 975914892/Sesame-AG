@@ -1400,6 +1400,33 @@ object AntMemberRpcCall {
     }
 
     @JvmStatic
+    fun queryIndexNaviBenefitFlowV2(naviCode: String, pageNum: Int, pageSize: Int, uniqueId: String): String {
+        val args = JSONObject().apply {
+            put("benefitFlowSource", "REC")
+            put("cityCode", "")
+            put("exposeChannel", "antmember")
+            put("lowerPoint", 0)
+            put("upperPoint", 99999999)
+            put("withPointRange", false)
+            put("lowerPrice", 0)
+            put("upperPrice", 9999999)
+            put("withPriceRange", false)
+            put("naviCode", naviCode)
+            put("pageNum", pageNum)
+            put("pageSize", pageSize)
+            put("sortStrategy", "INTELLIGENT_SORT")
+            put("requestSourceInfo", "-|feeds")
+            put("sourcePassMap", JSONObject().put("source", "mytab").put("innerSource", "").put("unid", "").put("dhNewItem", "true"))
+            put("stickyIdList", JSONArray())
+            put("uniqueId", uniqueId)
+        }
+        return RequestManager.requestString(
+            "com.alipay.alipaymember.biz.rpc.config.h5.queryIndexNaviBenefitFlowV2",
+            JSONArray().put(args).toString(),
+        )
+    }
+
+    @JvmStatic
     fun querySingleBenefitDetail(
         benefitId: String,
         cityCode: String,
