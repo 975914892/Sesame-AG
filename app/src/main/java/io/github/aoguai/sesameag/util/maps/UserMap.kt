@@ -7,7 +7,6 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 用于管理和操作用户数据的映射关系。
@@ -16,14 +15,16 @@ import java.util.concurrent.ConcurrentHashMap
 object UserMap {
     private val TAG = UserMap::class.java.simpleName
 
-    // 存储用户信息的线程安全映射
-    // ConcurrentHashMap 不允许 key 或 value 为 null
-    private val userMap = ConcurrentHashMap<String, UserEntity>()
+    @Volatile
+    private var userSnapshot: Pair<String?, Map<String, UserEntity>> = null to emptyMap()
+    private val userMap: Map<String, UserEntity>
+        get() = getUserMap()
 
     /**
      * 当前用户ID
      * 使用 @JvmStatic 和 @JvmField 保持 Java 互操作性
      */
+    @Volatile
     var currentUid: String? = null
         private set // 外部只能通过 setCurrentUserId 修改
 
@@ -31,8 +32,15 @@ object UserMap {
      * 获取只读的用户信息映射
      */
     @JvmStatic
-    fun getUserMap(): Map<String, UserEntity> {
-        return Collections.unmodifiableMap(userMap)
+    fun getUserMap(userId: String? = currentUid): Map<String, UserEntity> {
+        val snapshot = userSnapshot
+        return if (snapshot.first == userId) snapshot.second else emptyMap()
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun replace(userId: String, users: Map<String, UserEntity>) {
+        userSnapshot = userId to Collections.unmodifiableMap(LinkedHashMap(users))
     }
 
     /**
@@ -92,7 +100,7 @@ object UserMap {
         if (userEntity == null) return
         val uid = userEntity.userId
         if (!uid.isNullOrEmpty()) {
-            userMap[uid] = userEntity
+            currentUid?.let { replace(it, userMap + (uid to userEntity)) }
         }
     }
 
@@ -103,7 +111,7 @@ object UserMap {
     @Synchronized
     fun remove(userId: String?) {
         if (userId != null) {
-            userMap.remove(userId)
+            currentUid?.let { replace(it, userMap - userId) }
         }
     }
 
@@ -111,38 +119,22 @@ object UserMap {
      * 加载用户数据
      */
     @JvmStatic
-    @Synchronized
-    fun load(userId: String?) {
-        userMap.clear()
-        if (userId.isNullOrEmpty()) {
-            Log.error(TAG, "Skip loading user map for empty userId")
-            return
-        }
-        try {
-            val friendIdMapFile = Files.getFriendIdMapFile(userId)
-            if (friendIdMapFile == null) {
-                Log.error(TAG, "Friend ID map file is null for userId: $userId")
-                return
-            }
-            val body = Files.readFromFile(friendIdMapFile)
-            if (body.isNotEmpty()) {
-                // Kotlin 中使用 TypeReference 的方式
-                val dtoMap: Map<String, UserEntity.UserDto>? = JsonUtil.parseObject(
-                    body,
-                    object : TypeReference<Map<String, UserEntity.UserDto>>() {}
-                )
-
-                dtoMap?.values?.forEach { dto ->
-                    // 再次确保 Key 和 Value 不为 null
-                    val uid = dto.userId
-                    val entity = dto.toEntity()
-                    if (!uid.isNullOrEmpty()) {
-                        userMap[uid] = entity
-                    }
+    fun load(userId: String?): Map<String, UserEntity> {
+        require(!userId.isNullOrBlank()) { "加载好友失败：账号为空" }
+        return Files.withAccountLock(userId) {
+            val file = requireNotNull(Files.getFriendIdMapFile(userId))
+            val body = file.readText(Charsets.UTF_8)
+            val users = linkedMapOf<String, UserEntity>()
+            if (body.isNotBlank()) {
+                val dtos = JsonUtil.parseObject(body, object : TypeReference<Map<String, UserEntity.UserDto>>() {})
+                requireNotNull(dtos) { "好友缓存格式无效" }.values.forEach { dto ->
+                    val id = dto.userId
+                    require(!id.isNullOrBlank()) { "好友缓存包含空账号" }
+                    users[id] = dto.toEntity()
                 }
             }
-        } catch (e: Exception) {
-            Log.printStackTrace(e)
+            replace(userId, users)
+            getUserMap(userId)
         }
     }
 
@@ -152,43 +144,38 @@ object UserMap {
     @JvmStatic
     @Synchronized
     fun unload() {
-        userMap.clear()
+        userSnapshot = null to emptyMap()
     }
 
     /**
      * 保存用户数据到文件
      */
     @JvmStatic
-    @Synchronized
-    fun save(userId: String?): Boolean {
-        if (userId.isNullOrEmpty()) return false
-        return Files.write2File(JsonUtil.formatJson(userMap), Files.getFriendIdMapFile(userId)!!)
+    fun save(userId: String?, users: Map<String, UserEntity> = getUserMap(userId)): Boolean {
+        if (userId.isNullOrBlank()) return false
+        return Files.withAccountLock(userId) {
+            Files.writeAtomically(JsonUtil.formatJson(users), requireNotNull(Files.getFriendIdMapFile(userId)))
+        }
     }
 
     /**
      * 加载当前用户的数据
      */
     @JvmStatic
-    @Synchronized
     fun loadSelf(userId: String?) {
-        userMap.clear()
         if (userId.isNullOrEmpty()) return
-
-        val entity = readStoredSnapshot(userId)
-        if (entity != null) {
-            userMap[userId] = entity
+        Files.withAccountLock(userId) {
+            val entity = readStoredSnapshot(userId)
+            replace(userId, entity?.let { mapOf(userId to it) }.orEmpty())
         }
     }
 
     @JvmStatic
-    @Synchronized
     fun readSelf(userId: String?): UserEntity? {
         if (userId.isNullOrEmpty()) return null
-        val cached = userMap[userId]
-        if (cached != null) {
-            return cached
+        return Files.withAccountLock(userId) {
+            getUserMap(userId)[userId] ?: readStoredSnapshot(userId)
         }
-        return readStoredSnapshot(userId)
     }
 
     private fun readSelfFromFile(userId: String): UserEntity? {
@@ -269,7 +256,6 @@ object UserMap {
     }
 
     @JvmStatic
-    @Synchronized
     fun saveMinimalSelf(userId: String) {
         val safeUserId = userId.trim()
         if (safeUserId.isEmpty()) return
@@ -285,24 +271,21 @@ object UserMap {
      * 保存当前用户数据到文件
      */
     @JvmStatic
-    @Synchronized
     fun saveSelf(userEntity: UserEntity?): Boolean {
         val entity = userEntity ?: return false
         val safeUserId = entity.userId?.trim().orEmpty()
         if (safeUserId.isEmpty()) return false
-        val existing = mergeUserEntity(
-            safeUserId,
-            userMap[safeUserId],
-            readStoredSnapshot(safeUserId)
-        )
-        val mergedEntity = mergeUserEntity(safeUserId, entity, existing)
-        updateActiveUser(mergedEntity)
-        val body = JsonUtil.formatJson(mergedEntity)
-        val saved = Files.write2File(body, Files.getSelfIdFile(safeUserId)!!)
-        if (!saved) {
-            Log.record(TAG, "self_snapshot_write_failed")
+        return Files.withAccountLock(safeUserId) {
+            val existing = mergeUserEntity(safeUserId, getUserMap(safeUserId)[safeUserId], readStoredSnapshot(safeUserId))
+            val mergedEntity = mergeUserEntity(safeUserId, entity, existing)
+            val saved = Files.writeAtomically(JsonUtil.formatJson(mergedEntity), requireNotNull(Files.getSelfIdFile(safeUserId)))
+            if (saved && currentUid == safeUserId) {
+                updateActiveUser(mergedEntity)
+            } else if (!saved) {
+                Log.record(TAG, "self_snapshot_write_failed")
+            }
+            saved
         }
-        return saved
     }
 
     @JvmStatic
@@ -311,13 +294,13 @@ object UserMap {
         val entity = userEntity ?: return
         val safeUserId = entity.userId?.trim().orEmpty()
         if (safeUserId.isEmpty()) return
-        userMap[safeUserId] = entity
+        if (currentUid != safeUserId) return
+        replace(safeUserId, userMap + (safeUserId to entity))
         DataStore.put("activedUser", entity)
         Log.record(TAG, "update now active user: $entity")
     }
 
     @JvmStatic
-    @Synchronized
     fun ensureActiveUserSnapshot(userId: String, fallback: UserEntity? = null): UserEntity {
         val safeUserId = userId.trim()
         require(safeUserId.isNotEmpty()) { "userId must not be blank" }

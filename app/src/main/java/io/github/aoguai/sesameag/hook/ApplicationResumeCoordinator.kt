@@ -2,7 +2,7 @@ package io.github.aoguai.sesameag.hook
 
 import io.github.aoguai.sesameag.hook.keepalive.PersistentReconcileMode
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
-import io.github.aoguai.sesameag.task.ModelTask.Companion.stopAllTask
+import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Log.record
 import io.github.aoguai.sesameag.util.Notify
@@ -101,6 +101,7 @@ internal object ApplicationResumeCoordinator {
     fun tryRecoverOffline(resumeSource: String): Boolean {
         // 用户回到目标应用的时机同时探测通知权限补授权，自愈常驻通知
         Notify.ensureStarted()
+        if (!ApplicationHook.reconcileHostSession(resumeSource)) return false
         if (!ApplicationHookConstants.isOffline()) return false
 
         val reason = ApplicationHookConstants.offlineReason
@@ -129,53 +130,62 @@ internal object ApplicationResumeCoordinator {
         }
         if (!shouldRecover) return false
 
-        record(TAG, "检测到 ${reason ?: "unknown"} 离线状态，尝试在 $resumeSource 退出离线并恢复任务执行")
-        ApplicationHookConstants.setOffline(false)
-        UnifiedScheduler.cancelNamedTask("重新登录")
-        ApplicationHook.lastExecTime = 0
+        val session = AccountSessionCoordinator.currentSession() ?: return false
+        val recover = recover@{
+            val loader = ApplicationHook.classLoader ?: return@recover
+            if (!ApplicationHookConstants.isOffline() ||
+                HookUtil.getUserId(loader) != session.userId ||
+                !AccountSessionCoordinator.isCurrentSession(session.userId, session.sessionEpoch)
+            ) return@recover
+            record(TAG, "检测到 ${reason ?: "unknown"} 离线状态，尝试在 $resumeSource 退出离线并恢复任务执行")
+            ApplicationHookConstants.setOffline(false)
+            UnifiedScheduler.cancelNamedTask("重新登录")
+            ApplicationHook.lastExecTime = 0
 
-        val statusMsg = when (reason) {
-            "auth_like" -> "✅ 验证已解除，恢复执行"
-            "system_busy" -> "✅ 已解除系统繁忙/验证态，恢复执行"
-            "login_timeout" -> "✅ 登录已恢复，继续执行"
-            else -> "✅ 离线已解除，恢复执行"
-        }
-        updateRunningStatus(statusMsg)
+            val statusMsg = when (reason) {
+                "auth_like" -> "✅ 验证已解除，恢复执行"
+                "system_busy" -> "✅ 已解除系统繁忙/验证态，恢复执行"
+                "login_timeout" -> "✅ 登录已恢复，继续执行"
+                else -> "✅ 离线已解除，恢复执行"
+            }
+            updateRunningStatus(statusMsg)
 
-        val triggerReason =
-            if (reason == "auth_like") "auth_like_recovered"
-            else "offline_recovered:${reason ?: "unknown"}"
-        val dedupeKey =
-            if (reason == "auth_like") "auth_like_recovered"
-            else "offline_recovered"
+            val triggerReason =
+                if (reason == "auth_like") "auth_like_recovered"
+                else "offline_recovered:${reason ?: "unknown"}"
+            val dedupeKey =
+                if (reason == "auth_like") "auth_like_recovered"
+                else "offline_recovered"
 
-        val runningMainTask = ApplicationHook.mainTask
-        if (runningMainTask?.isRunning == true) {
-            record(TAG, "🔄 离线恢复：取消当前主任务以便立即恢复执行")
-            runningMainTask.stopTask()
-        }
-        stopAllTask()
-        ApplicationHookConstants.clearPendingTriggers("offline_recover")
+            ApplicationHookConstants.clearPendingTriggers("offline_recover")
 
-        ApplicationHook.appContext?.let { context ->
-            UnifiedScheduler.reconcilePersistentSchedules(
-                context,
-                mode = PersistentReconcileMode.FIRE_ALARM_DUE
+            ApplicationHook.appContext?.let { context ->
+                UnifiedScheduler.reconcilePersistentSchedules(
+                    context,
+                    mode = PersistentReconcileMode.FIRE_ALARM_DUE
+                )
+            }
+
+            ApplicationHookCore.requestExecution(
+                ApplicationHookConstants.TriggerInfo(
+                    type = ApplicationHookConstants.TriggerType.ON_RESUME,
+                    priority = ApplicationHookConstants.TriggerPriority.HIGH,
+                    reason = triggerReason,
+                    dedupeKey = dedupeKey,
+                    ownerUserId = AccountSessionCoordinator.currentUserId(),
+                    sessionEpoch = AccountSessionCoordinator.currentSessionEpoch()
+                )
             )
+            // Login 入口已恢复时，后续 Launcher.onResume 不应再按人工返回补跑。
+            clearBackgroundFlag()
         }
-
-        ApplicationHookCore.requestExecution(
-            ApplicationHookConstants.TriggerInfo(
-                type = ApplicationHookConstants.TriggerType.ON_RESUME,
-                priority = ApplicationHookConstants.TriggerPriority.HIGH,
-                reason = triggerReason,
-                dedupeKey = dedupeKey,
-                ownerUserId = AccountSessionCoordinator.currentUserId(),
-                sessionEpoch = AccountSessionCoordinator.currentSessionEpoch()
-            )
-        )
-        // Login 入口已恢复时，后续 Launcher.onResume 不应再按人工返回补跑。
-        clearBackgroundFlag()
+        if (ModelTask.stopAllTaskAndNotify(ApplicationHook.mainTask) {
+                ApplicationHookConstants.submitEntry("offline_tasks_stopped", recover)
+            }) {
+            recover()
+        } else {
+            updateRunningStatus("等待旧任务退出后恢复")
+        }
         return true
     }
 

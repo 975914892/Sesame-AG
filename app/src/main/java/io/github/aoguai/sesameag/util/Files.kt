@@ -10,7 +10,12 @@ import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.UserEntity
 import java.io.File
 import java.io.FileWriter
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.io.IOException
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import java.text.SimpleDateFormat
 import java.util.Date
 import org.json.JSONArray
@@ -18,6 +23,107 @@ import org.json.JSONObject
 
 object Files {
     private val TAG = Files::class.java.simpleName
+    private val accountStorageLock = ReentrantLock()
+    private val lockedAccounts = ThreadLocal.withInitial { mutableSetOf<String>() }
+
+    /** 同一进程可重入，跨进程覆盖账号数据的整个读改写过程。 */
+    fun <T> withAccountLock(userId: String, action: () -> T): T = accountStorageLock.withLock {
+        require(userId.isNotBlank()) { "账号为空" }
+        io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
+        val held = lockedAccounts.get()
+        if (userId in held) return@withLock action()
+        RandomAccessFile(File(getUserConfigDir(userId), ".account.lock"), "rw").use { file ->
+            file.channel.lock().use {
+                held.add(userId)
+                try {
+                    recoverAccountTransaction(userId)
+                    action()
+                } finally {
+                    held.remove(userId)
+                }
+            }
+        }
+    }
+
+    /** 备份先落盘；未提交的多文件变更在下次账号读取前恢复。 */
+    fun <T> withAccountTransaction(userId: String, files: Collection<File>, action: () -> T): T =
+        withAccountLock(userId) {
+            val directory = getUserConfigDir(userId).canonicalFile
+            val journal = File(directory, ".account-transaction.json")
+            val committed = File(directory, ".account-transaction.committed")
+            check(!journal.exists() && !committed.exists()) { "账号存在未恢复的事务" }
+            val backup = JSONObject()
+            files.distinctBy { it.canonicalPath }.forEach { file ->
+                require(file.canonicalFile.parentFile == directory && !file.name.startsWith(".")) { "事务文件不属于目标账号" }
+                backup.put(file.name, if (file.exists()) file.readText(Charsets.UTF_8) else JSONObject.NULL)
+            }
+            check(writeAtomically(backup.toString(), journal)) { "保存账号事务备份失败" }
+            val result = try {
+                action().also {
+                    io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
+                    check(writeAtomically("committed", committed)) { "提交账号事务失败" }
+                }
+            } catch (failure: Throwable) {
+                try {
+                    recoverAccountTransaction(userId)
+                } catch (rollback: Throwable) {
+                    throw IOException("操作失败且恢复不完整：${rollback.message}", failure).also {
+                        it.addSuppressed(rollback)
+                    }
+                }
+                throw failure
+            }
+            runCatching { recoverAccountTransaction(userId) }.onFailure {
+                Log.printStackTrace(TAG, "事务已提交，清理记录将在下次账号读取时重试", it)
+            }
+            result
+        }
+
+    private fun recoverAccountTransaction(userId: String) {
+        val directory = getUserConfigDir(userId)
+        val journal = File(directory, ".account-transaction.json")
+        val committed = File(directory, ".account-transaction.committed")
+        if (journal.exists() && !committed.exists()) {
+            val backup = JSONObject(journal.readText(Charsets.UTF_8))
+            val names = backup.keys()
+            val failed = mutableListOf<String>()
+            while (names.hasNext()) {
+                val name = names.next()
+                val file = File(directory, name)
+                require(file.canonicalFile.parentFile == directory.canonicalFile && !name.startsWith(".")) { "事务备份路径无效" }
+                val restored = if (backup.isNull(name)) !file.exists() || file.delete()
+                    else writeAtomically(backup.getString(name), file)
+                if (!restored) failed.add(name)
+            }
+            check(failed.isEmpty()) { "无法恢复文件：${failed.joinToString()}" }
+            Log.record(TAG, "已恢复未完成的账号文件事务")
+        }
+        check(!journal.exists() || journal.delete()) { "无法清理账号事务备份" }
+        check(!committed.exists() || committed.delete()) { "无法清理账号事务提交记录" }
+    }
+
+    fun writeAtomically(text: String, file: File): Boolean {
+        var temporary: File? = null
+        return try {
+            val parent = requireNotNull(file.parentFile)
+            check(parent.isDirectory || parent.mkdirs()) { "无法创建目录: $parent" }
+            temporary = File.createTempFile(".${file.name}.", ".tmp", parent)
+            FileOutputStream(temporary).use { output ->
+                output.write(text.toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+            java.nio.file.Files.move(
+                temporary.toPath(), file.toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING
+            )
+            true
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, "原子保存失败: ${file.name}", e)
+            false
+        } finally {
+            runCatching { temporary?.delete() }
+        }
+    }
 
     data class ClearAllResult(
         val failedPaths: List<String>

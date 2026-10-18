@@ -18,161 +18,103 @@ object FriendRepository {
     const val SCHEMA_VERSION = 1
     const val MUTUAL_FRIEND_STATUS = 1
 
-    @Volatile
-    private var loadedUserId: String? = null
-
-    @Volatile
-    private var loadedConfig: FriendCenterConfig = FriendCenterConfig()
-
-    @Volatile
-    private var loadedLastModified: Long = 0L
-
-    @Volatile
-    private var loadedFileLength: Long = 0L
-
     @JvmStatic
-    @Synchronized
     fun load(userId: String? = UserMap.currentUid): FriendCenterConfig {
-        val safeUserId = userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) {
-            return FriendCenterConfig()
-        }
-
-        val file = Files.getFriendCenterFile(safeUserId)
-        val config = try {
-            val body = Files.readFromFile(file)
-            if (body.isBlank()) {
-                FriendCenterConfig(userId = safeUserId)
+        val owner = userId?.trim().orEmpty()
+        if (owner.isEmpty()) return FriendCenterConfig()
+        return Files.withAccountLock(owner) {
+            val file = Files.getFriendCenterFile(owner)
+            val body = file.readText(Charsets.UTF_8)
+            val config = if (body.isBlank()) {
+                FriendCenterConfig(userId = owner)
             } else {
-                JsonUtil.parseObject(body, object : TypeReference<FriendCenterConfig>() {})
+                requireNotNull(JsonUtil.parseObject(body, object : TypeReference<FriendCenterConfig>() {})) {
+                    "好友中心格式无效"
+                }
             }
-        } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "加载好友中心失败，使用空配置", t)
-            FriendCenterConfig(userId = safeUserId)
+            require(config.userId.isBlank() || config.userId == owner) { "好友中心账号不匹配" }
+            normalizeConfig(config, owner)
+            config
         }
-
-        normalizeConfig(config, safeUserId)
-        loadedUserId = safeUserId
-        loadedConfig = config
-        loadedLastModified = file.lastModified()
-        loadedFileLength = file.length()
-        if (
-            config.profiles.isEmpty() &&
-            UserMap.currentUid == safeUserId &&
-            UserMap.getUserMap().isNotEmpty()
-        ) {
-            return mergeFromUserMap(safeUserId)
-        }
-        if (file.length() <= 0L) {
-            save(safeUserId, config)
-        }
-        return config
     }
 
     @JvmStatic
-    @Synchronized
-    fun save(userId: String? = loadedUserId, config: FriendCenterConfig = loadedConfig): Boolean {
-        val safeUserId = userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) return false
-        var targetConfig = config
-        if (config === loadedConfig && loadedUserId != safeUserId) {
-            targetConfig = load(safeUserId)
-        }
-        normalizeConfig(targetConfig, safeUserId)
+    fun save(userId: String?, config: FriendCenterConfig): Boolean {
+        val owner = userId?.trim().orEmpty()
+        if (owner.isEmpty()) return false
         return try {
-            val file = Files.getFriendCenterFile(safeUserId)
-            val success = Files.write2File(JsonUtil.formatJson(targetConfig), file)
-            if (success) {
-                loadedUserId = safeUserId
-                loadedConfig = targetConfig
-                loadedLastModified = file.lastModified()
-                loadedFileLength = file.length()
-            } else {
-                invalidateLoaded(safeUserId)
+            Files.withAccountLock(owner) {
+                require(config.userId.isBlank() || config.userId == owner) { "好友中心账号不匹配" }
+                val target = copyConfig(config)
+                normalizeConfig(target, owner)
+                val file = Files.getFriendCenterFile(owner)
+                Files.writeAtomically(JsonUtil.formatJson(target), file)
             }
-            success
-        } catch (t: Throwable) {
-            invalidateLoaded(safeUserId)
-            Log.printStackTrace(TAG, "保存好友中心失败", t)
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, "保存好友中心失败", e)
             false
         }
     }
 
-    @JvmStatic
-    @Synchronized
-    fun current(userId: String? = UserMap.currentUid): FriendCenterConfig {
-        val safeUserId = userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) {
-            return FriendCenterConfig()
+    /** 修改必须在账号锁内重新读取，不能把 UI 的旧整份档案覆盖到磁盘。 */
+    fun update(userId: String, change: (FriendCenterConfig) -> Unit): Boolean = try {
+        Files.withAccountLock(userId) {
+            val config = load(userId)
+            change(config)
+            save(userId, config)
         }
-        return if (safeUserId.isNotEmpty() && loadedUserId == safeUserId && !isLoadedFileStale(safeUserId)) {
-            loadedConfig
-        } else {
-            load(safeUserId)
-        }
+    } catch (e: Exception) {
+        Log.printStackTrace(TAG, "更新好友中心失败，保留原配置", e)
+        false
     }
 
     @JvmStatic
-    @Synchronized
-    /**
-     * 合并 UserMap 到好友中心。
-     *
-     * @param allowPruneMissing 是否把“当前快照中缺失的历史好友”标记为 REMOVED。
-     * 仅在快照来源可信（如 Hook 实时好友缓存）时开启，避免本地缓存不完整时误判失效。
-     */
+    fun current(userId: String? = UserMap.currentUid): FriendCenterConfig = load(userId)
+
+    @JvmStatic
     fun mergeFromUserMap(
         userId: String? = UserMap.currentUid,
         previousUsers: Map<String, UserEntity> = emptyMap(),
-        allowPruneMissing: Boolean = false
+        allowPruneMissing: Boolean = false,
+        currentUsers: Map<String, UserEntity> = UserMap.getUserMap(userId),
+        refreshRelations: Boolean = false
     ): FriendCenterConfig {
-        val safeUserId = userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) {
-            return FriendCenterConfig()
-        }
-        val currentUsers = UserMap.getUserMap()
-        val config = current(safeUserId)
-        if (currentUsers.isEmpty()) {
-            return config
-        }
-
-        val nowIds = currentUsers.keys.toSet()
-        val previousIds = previousUsers.keys.toSet()
-        val removedIds = linkedSetOf<String>()
-        (previousIds + config.profiles.keys).forEach { candidateId ->
-            if (candidateId.isBlank() || candidateId == safeUserId || nowIds.contains(candidateId)) {
-                return@forEach
+        val owner = userId?.trim().orEmpty()
+        if (owner.isEmpty()) return FriendCenterConfig()
+        val snapshot = currentUsers.toMap()
+        return Files.withAccountLock(owner) {
+            val config = load(owner)
+            if (snapshot.isEmpty()) return@withAccountLock config
+            if (allowPruneMissing) {
+                (previousUsers.keys + config.profiles.keys).forEach { id ->
+                    if (id.isNotBlank() && id != owner && id !in snapshot) {
+                        config.profiles[id]?.takeIf {
+                            it.relation != FriendRelation.UNKNOWN && it.relation != FriendRelation.SELF
+                        }?.apply {
+                            removed = true
+                            relation = FriendRelation.REMOVED
+                        }
+                    }
+                }
             }
-            val profile = config.profiles[candidateId]
-            val shouldMarkRemoved = previousIds.contains(candidateId) || (
-                allowPruneMissing &&
-                    profile != null &&
-                    profile.relation != FriendRelation.UNKNOWN &&
-                    profile.relation != FriendRelation.SELF
-                )
-            if (shouldMarkRemoved) {
-                removedIds.add(candidateId)
+            var changedRelations = 0
+            snapshot.forEach { (id, entity) ->
+                if (id.isBlank()) return@forEach
+                val existing = config.profiles[id]
+                val profile = existing ?: FriendProfile(userId = id)
+                // 本地缓存仅补档案，不能覆盖已确认的关系；实时观察也不能用未知状态清除失效。
+                if (existing == null || (refreshRelations && (id == owner || entity.friendStatus != null))) {
+                    val before = profile.relation
+                    applyUserEntity(profile, entity, owner)
+                    if (before != profile.relation) changedRelations++
+                }
+                config.profiles[id] = profile
             }
+            pruneGroups(config)
+            check(save(owner, config)) { "friendCenter.json 保存失败" }
+            Log.runtime(TAG, "好友中心刷新完成: input=${snapshot.size}, relationChanges=$changedRelations, profiles=${config.profiles.size}, groups=${config.groups.size}, saved=true")
+            config
         }
-
-        for ((friendUserId, entity) in currentUsers) {
-            val normalizedId = friendUserId.trim()
-            if (normalizedId.isEmpty()) continue
-            val profile = config.profiles[normalizedId] ?: FriendProfile(userId = normalizedId)
-            applyUserEntity(profile, entity, safeUserId)
-            config.profiles[normalizedId] = profile
-        }
-
-        removedIds.forEach { removedId ->
-            val profile = config.profiles[removedId] ?: FriendProfile(userId = removedId)
-            profile.removed = true
-            profile.relation = FriendRelation.REMOVED
-            config.profiles[removedId] = profile
-        }
-
-        pruneGroups(config)
-        save(safeUserId, config)
-        Log.runtime(TAG, "好友中心刷新完成: profiles=${config.profiles.size}, groups=${config.groups.size}")
-        return config
     }
 
     @JvmStatic
@@ -211,96 +153,63 @@ object FriendRepository {
     }
 
     @JvmStatic
-    @Synchronized
     fun markRemoved(ownerUserId: String?, friendUserId: String?): Boolean {
-        val safeOwner = ownerUserId?.trim().orEmpty()
-        val safeFriend = friendUserId?.trim().orEmpty()
-        if (safeOwner.isEmpty() || safeFriend.isEmpty() || safeOwner == safeFriend) return false
-        val config = current(safeOwner)
-        val profile = config.profiles[safeFriend] ?: FriendProfile(userId = safeFriend)
-        profile.removed = true
-        profile.relation = FriendRelation.REMOVED
-        config.profiles[safeFriend] = profile
-        return save(safeOwner, config)
+        val owner = ownerUserId?.trim().orEmpty()
+        val friend = friendUserId?.trim().orEmpty()
+        if (owner.isEmpty() || friend.isEmpty() || owner == friend) return false
+        return update(owner) { config ->
+            val profile = config.profiles.getOrPut(friend) { FriendProfile(userId = friend) }
+            profile.removed = true
+            profile.relation = FriendRelation.REMOVED
+        }
     }
 
     @JvmStatic
-    @Synchronized
-    fun upsertGroup(userId: String?, group: FriendGroup): FriendGroup {
+    fun upsertGroup(userId: String?, group: FriendGroup): FriendGroup? {
+        val owner = userId?.trim().orEmpty()
+        if (owner.isEmpty()) return null
         val now = System.currentTimeMillis()
-        val normalizedGroup = group.copy(
+        val normalized = group.copy(
             id = group.id.trim().ifBlank { UUID.randomUUID().toString() },
             name = group.name.trim().ifBlank { "未命名分组" },
-            memberIds = linkedSetOf<String>().apply {
-                group.memberIds.mapNotNullTo(this) { it.trim().takeIf(String::isNotEmpty) }
-            },
+            memberIds = LinkedHashSet(group.memberIds.map { it.trim() }.filter { it.isNotEmpty() }),
             createdAt = if (group.createdAt > 0L) group.createdAt else now,
             updatedAt = now
         )
-        val safeUserId = userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) {
-            Log.runtime(TAG, "upsertGroup 跳过：userId为空")
-            return normalizedGroup
-        }
-        val config = current(safeUserId)
-        val index = config.groups.indexOfFirst { it.id == normalizedGroup.id }
-        if (index >= 0) {
-            config.groups[index] = normalizedGroup
-        } else {
-            config.groups.add(normalizedGroup)
-        }
-        pruneGroups(config)
-        save(safeUserId, config)
-        return normalizedGroup
+        return if (update(owner) { config ->
+            val index = config.groups.indexOfFirst { it.id == normalized.id }
+            if (index >= 0) config.groups[index] = normalized else config.groups.add(normalized)
+        }) normalized else null
     }
 
     @JvmStatic
-    @Synchronized
     fun deleteGroup(userId: String?, groupId: String): Boolean {
-        val safeUserId = userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) {
-            Log.runtime(TAG, "deleteGroup 跳过：userId为空")
-            return false
-        }
-        val safeGroupId = groupId.trim()
-        if (safeGroupId.isEmpty()) {
-            return false
-        }
-        val config = current(safeUserId)
-        val removed = config.groups.removeAll { it.id == safeGroupId }
-        return removed && save(safeUserId, config)
+        val owner = userId?.trim().orEmpty()
+        if (owner.isEmpty() || groupId.isBlank()) return false
+        return update(owner) { config -> config.groups.removeAll { it.id == groupId.trim() } }
     }
 
     @JvmStatic
-    @Synchronized
     fun recordCapability(
         ownerUserId: String?,
         friendUserId: String?,
         moduleKey: String,
         capability: FriendModuleCapability
     ): Boolean {
-        val safeOwner = ownerUserId?.trim().orEmpty()
-        val safeFriend = friendUserId?.trim().orEmpty()
-        val safeModule = moduleKey.trim()
-        if (safeOwner.isEmpty() || safeFriend.isEmpty() || safeModule.isEmpty()) return false
-
-        val config = current(safeOwner)
-        val profile = config.profiles[safeFriend] ?: FriendProfile(userId = safeFriend)
-        if (!profile.removed && profile.relation != FriendRelation.REMOVED) {
-            UserMap.get(safeFriend)?.let { applyUserEntity(profile, it, safeOwner) }
+        val owner = ownerUserId?.trim().orEmpty()
+        val friend = friendUserId?.trim().orEmpty()
+        val module = moduleKey.trim()
+        if (owner.isEmpty() || friend.isEmpty() || module.isEmpty()) return false
+        return update(owner) { config ->
+            val profile = config.profiles.getOrPut(friend) { FriendProfile(userId = friend) }
+            if (!profile.removed && profile.relation != FriendRelation.REMOVED) {
+                UserMap.getUserMap(owner)[friend]?.let { applyUserEntity(profile, it, owner) }
+            }
+            val previous = profile.capabilities[module]
+            if (previous == null || previous.state != capability.state || previous.source != capability.source || previous.reason != capability.reason) {
+                profile.capabilities[module] = capability
+            }
         }
-        val existingCapability = profile.capabilities[safeModule]
-        if (
-            existingCapability != null &&
-            existingCapability.state == capability.state &&
-            existingCapability.source == capability.source &&
-            existingCapability.reason == capability.reason
-        ) {
-            return true
-        }
-        profile.capabilities[safeModule] = capability
-        config.profiles[safeFriend] = profile
-        return save(safeOwner, config)
     }
 
     private fun normalizeConfig(config: FriendCenterConfig, userId: String) {
@@ -328,22 +237,12 @@ object FriendRepository {
         pruneGroups(config)
     }
 
-    private fun isLoadedFileStale(userId: String): Boolean {
-        return runCatching {
-            val file = Files.getFriendCenterFile(userId)
-            val modifiedAt = file.lastModified()
-            val length = file.length()
-            modifiedAt != loadedLastModified || length != loadedFileLength
-        }.getOrDefault(false)
-    }
-
-    private fun invalidateLoaded(userId: String) {
-        if (loadedUserId != userId) return
-        loadedUserId = null
-        loadedConfig = FriendCenterConfig()
-        loadedLastModified = 0L
-        loadedFileLength = 0L
-    }
+    private fun copyConfig(config: FriendCenterConfig): FriendCenterConfig = config.copy(
+        profiles = LinkedHashMap(config.profiles.mapValues { (_, profile) ->
+            profile.copy(capabilities = LinkedHashMap(profile.capabilities.mapValues { it.value.copy() }))
+        }),
+        groups = config.groups.map { it.copy(memberIds = LinkedHashSet(it.memberIds)) }.toMutableList()
+    )
 
     private fun applyUserEntity(profile: FriendProfile, entity: UserEntity, currentUserId: String) {
         val userId = entity.userId?.trim().orEmpty()

@@ -103,6 +103,7 @@ class RuntimeInfo private constructor() {
      * @param value 存储的值
      */
     private fun put(key: String, value: Any?) {
+        io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
         try {
             joCurrent.put(key, value)
             joAll.put(userId, joCurrent)
@@ -130,6 +131,7 @@ class RuntimeInfo private constructor() {
          */
         @JvmStatic
         fun getInstance(): RuntimeInfo {
+            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
             val currentInstance = instance
             val currentUserId = UserMap.currentUid ?: ""
             

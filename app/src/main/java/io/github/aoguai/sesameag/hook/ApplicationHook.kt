@@ -393,6 +393,7 @@ class ApplicationHook {
                 ApplicationHookConstants.submitEntry("launcher_onResume") {
                     val targetUid =
                         HookUtil.getUserId(classLoader!!) ?: run {
+                            onHostAccountUnavailable("launcher_onResume")
                             show("用户未登录")
                             return@submitEntry
                         }
@@ -640,6 +641,8 @@ class ApplicationHook {
 
         @Volatile
         private var pendingInitReason: String? = null
+        @Volatile
+        private var sessionShutdownPending = false
 
         @Volatile
         private var rootCheckInProgress = false
@@ -809,7 +812,8 @@ class ApplicationHook {
             return true
         }
 
-        internal fun restartWorkflow(reason: String): Boolean = initHandler(reason)
+        internal fun restartWorkflow(reason: String, onComplete: ((Boolean) -> Unit)? = null): Boolean =
+            initHandler(reason, onComplete = onComplete)
 
         internal fun ensureLegalAcceptedForWorkflow(): Boolean = ensureLegalAcceptanceForWorkflow()
 
@@ -832,43 +836,40 @@ class ApplicationHook {
                     message = "刷新好友失败：Hook classLoader 不可用",
                 )
 
-            UserMap.setCurrentUserId(safeUserId)
-            runCatching { UserMap.load(safeUserId) }.onFailure {
-                Log.printStackTrace(TAG, "刷新好友前加载本地好友快照失败", it)
+            val session = AccountSessionCoordinator.currentSession()
+                ?: return HookUtil.FriendRefreshResult(false, safeUserId, "当前账号会话未就绪")
+            val identity = AccountSessionIdentity(safeUserId, session.sessionEpoch)
+            return try {
+                AccountSessionCoordinator.withCurrentSession(identity) {
+                    check(currentUid == safeUserId && HookUtil.getUserId(loader) == safeUserId) { "目标账号未登录" }
+                    UserMap.load(safeUserId)
+                    load(safeUserId, false)
+                }
+                if (!force && Status.hasFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)) {
+                    val config = FriendRepository.current(safeUserId)
+                    return HookUtil.FriendRefreshResult(
+                        true, safeUserId, "好友中心今日已刷新，跳过自动同步[$source]",
+                        config.profiles.size, config.groups.size
+                    )
+                }
+                val result = HookUtil.hookUser(loader, identity)
+                if (result.success && result.userId == safeUserId) {
+                    AccountSessionCoordinator.withCurrentSession(identity) {
+                        check(currentUid == safeUserId && HookUtil.getUserId(loader) == safeUserId) { "刷新后账号已变化" }
+                        Status.setFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY, expectedUserId = safeUserId)
+                    }
+                }
+                record(TAG, "好友中心刷新[$source]: ${result.message}")
+                result
+            } catch (e: Exception) {
+                Log.printStackTrace(TAG, "好友刷新失败", e)
+                HookUtil.FriendRefreshResult(false, safeUserId, "好友刷新未完成：${e.message}")
             }
-            runCatching { load(safeUserId, false) }.onFailure {
-                Log.printStackTrace(TAG, "刷新好友前加载每日状态失败", it)
-            }
-
-            if (!force && Status.hasFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)) {
-                val config = FriendRepository.current(safeUserId)
-                AccountSessionCoordinator.ensureActiveUserSnapshot(safeUserId, loader)
-                val message = "好友中心今日已刷新，跳过自动同步[$source]"
-                record(TAG, message)
-                return HookUtil.FriendRefreshResult(
-                    success = true,
-                    userId = safeUserId,
-                    message = message,
-                    profiles = config.profiles.size,
-                    groups = config.groups.size,
-                )
-            }
-
-            val result = HookUtil.hookUser(loader)
-            AccountSessionCoordinator.ensureActiveUserSnapshot(safeUserId, loader)
-            if (result.success) {
-                Status.setFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)
-                record(TAG, "好友中心刷新完成[$source]: ${result.message}")
-            } else {
-                record(TAG, "好友中心刷新未完成[$source]: ${result.message}")
-            }
-            return result
         }
 
         /**
          * 冷启动首次好友实时同步的后移延时(毫秒)。
-         * 用于规避目标应用社交库(AliAccountDaoOp)在冷启动期未加载完时 getAllFriends() 返回“非空但不完整”
-         * 快照被误判为可信全量。可按实测调大；现有“重新登录”延时为 20s 作参考。
+         * 等待社交库初始化以减少空结果；延时不代表缓存完整，缺失项不会据此判定失效。
          */
         private const val FRIEND_CENTER_FIRST_SYNC_DEFER_MS: Long = 30_000L
         private val MIN_SUPPORTED_RPC_VERSION = AlipayVersion("10.3.96.8100")
@@ -904,6 +905,7 @@ class ApplicationHook {
         ) {
             val safeUserId = userId.trim()
             if (safeUserId.isEmpty()) return
+            val expectedEpoch = AccountSessionCoordinator.currentSessionEpoch()
             UnifiedScheduler.scheduleLongDelay(
                 FRIEND_CENTER_FIRST_SYNC_DEFER_MS,
                 "好友中心首次同步",
@@ -914,7 +916,8 @@ class ApplicationHook {
                     // 后移期间账号可能切换 → 执行前重新校验当前账号，避免给旧账号误同步。
                     val activeUserId = AccountSessionCoordinator.currentUserId() ?: currentUid
                     val liveUserId = runCatching { classLoader?.let { HookUtil.getUserId(it) } }.getOrNull()
-                    if (safeUserId != activeUserId || (liveUserId != null && liveUserId != safeUserId)) {
+                    if (safeUserId != activeUserId || liveUserId != safeUserId ||
+                        !AccountSessionCoordinator.isCurrentSession(safeUserId, expectedEpoch)) {
                         record(
                             TAG,
                             "好友中心首次同步已取消：账号已切换(expect=$safeUserId, active=$activeUserId, live=$liveUserId)",
@@ -1159,8 +1162,16 @@ class ApplicationHook {
 
         // --- 初始化核心逻辑 ---
         @Synchronized
-        private fun initHandler(reason: String): Boolean {
+        private fun initHandler(reason: String, tasksStopped: Boolean = false, onComplete: ((Boolean) -> Unit)? = null): Boolean {
+            if (sessionShutdownPending) {
+                pendingInit = true
+                pendingInitReason = reason
+                onComplete?.invoke(false)
+                return false
+            }
             var sessionApplied = false
+            var completed = false
+            var completionDeferred = false
             try {
                 // 启动阶段可能出现 Service.onCreate 与 Launcher.onResume 并发触发 initHandler 的竞态：
                 // - onResume 线程看到 init=false -> 进入 initHandler 等锁
@@ -1172,6 +1183,7 @@ class ApplicationHook {
                     pendingInit = false
                     pendingInitReason = null
                     record(TAG, "✅ 已初始化完成，忽略重复初始化触发: $reason")
+                    completed = true
                     return true
                 }
 
@@ -1191,24 +1203,43 @@ class ApplicationHook {
                 val userId = HookUtil.getUserId(activeClassLoader)
                 if (userId == null) {
                     Log.w(TAG, "account_unavailable: phase=initialization trigger=$reason")
+                    onHostAccountUnavailable(reason)
                     show("用户未登录")
                     return false
                 }
 
                 // 切换会话会先推进 epoch，必须在此之前捕获旧计划及其配置。
-                if (init && shouldCaptureReloadState(reason)) {
-                    captureReloadResumeDecision(reason)
-                } else {
-                    reloadResumeDecision = null
+                if (!tasksStopped) {
+                    if (init && shouldCaptureReloadState(reason)) captureReloadResumeDecision(reason)
+                    else reloadResumeDecision = null
                 }
                 val allowPersistedSessionReuse =
                     !init &&
                         (reason == "onResume" || reason == "service_onCreate")
-                AccountSessionCoordinator.beginSessionSwitch(
-                    reason,
-                    userId,
-                    allowPersistedReuse = allowPersistedSessionReuse,
-                )
+                if (!tasksStopped) {
+                    AccountSessionCoordinator.beginSessionSwitch(reason, userId, allowPersistedReuse = allowPersistedSessionReuse)
+                    sessionShutdownPending = true
+                    val stopped = io.github.aoguai.sesameag.task.ModelTask.stopAllTaskAndNotify(mainTask) {
+                        ApplicationHookConstants.submitEntry("session_tasks_stopped") {
+                            sessionShutdownPending = false
+                            val unchanged = HookUtil.getUserId(activeClassLoader) == userId
+                            if (!unchanged) onComplete?.invoke(false)
+                            initHandler(
+                                if (unchanged) reason else "user_switch",
+                                tasksStopped = unchanged,
+                                onComplete = onComplete.takeIf { unchanged },
+                            )
+                        }
+                    }
+                    if (!stopped) {
+                        completionDeferred = true
+                        pendingInit = true
+                        pendingInitReason = reason
+                        updateRunningStatus("等待旧账号任务退出")
+                        return false
+                    }
+                    sessionShutdownPending = false
+                }
                 val admission = when (val result = AccountSlotRegistry.admitRuntimeUser(userId)) {
                     is AccountSlotAdmission.Denied -> {
                         record(TAG, "execution_gate_denied: ${result.reasonCode} process_role=main")
@@ -1242,10 +1273,7 @@ class ApplicationHook {
 
                 UserMap.setCurrentUserId(userId)
                 load(userId)
-                // 冷启动期目标应用社交库(AliAccountDaoOp)可能尚未加载完，过早 getAllFriends() 会拿到
-                // “非空但不完整”的好友快照，被 mergeFromUserMap(allowPruneMissing=true) 误剪为 REMOVED 并持久化。
-                // 这里先同步加载本地已持久化的好友身份(上次完整快照)，供本会话首轮任务使用；
-                // 真正从目标应用侧获取实时快照后移到社交库就绪概率更高的时机再做。手动刷新(force=true)不走此路径，仍立即执行。
+                // 首轮先使用已保存的好友资料；延迟采集实时缓存，任何缓存缺失都不用于判定删除。
                 runCatching { UserMap.load(userId) }.onFailure {
                     printStackTrace(TAG, "初始化加载本地好友快照失败", it)
                 }
@@ -1368,6 +1396,7 @@ class ApplicationHook {
                 val deferGenericStartupTrigger = handlePersistentLaunchAfterInit(appContext!!)
                 ModuleStatusReporter.requestUpdate(reason = "ready")
                 ApplicationHookEntry.onInitCompleted(reason, deferGenericStartupTrigger)
+                completed = true
                 return true
             } catch (th: Throwable) {
                 if (sessionApplied) {
@@ -1378,6 +1407,8 @@ class ApplicationHook {
                 }
                 printStackTrace(TAG, "startHandler", th)
                 return false
+            } finally {
+                if (!completionDeferred) onComplete?.invoke(completed)
             }
         }
 
@@ -1576,6 +1607,30 @@ class ApplicationHook {
             ApplicationHookConstants.clearPendingTriggers("execution_prerequisites_missing")
             AccountSessionCoordinator.refreshWorkflowState(appContext, "execution_prerequisites_missing", legalAccepted = legalAccepted)
             return false
+        }
+
+        internal fun onHostAccountUnavailable(reason: String) {
+            if (init || AccountSessionCoordinator.currentSession() != null || AccountSessionCoordinator.isSwitching()) {
+                destroyHandlerInternal(reason, invalidateSession = true)
+            }
+            ApplicationHookConstants.setOffline(true, "login_timeout", reason)
+        }
+
+        internal fun reconcileHostSession(reason: String): Boolean {
+            val loader = classLoader ?: return false
+            val userId = HookUtil.getUserId(loader)
+            if (userId.isNullOrBlank()) {
+                onHostAccountUnavailable(reason)
+                return false
+            }
+            val session = AccountSessionCoordinator.currentSession()
+            if (session == null || session.userId != userId ||
+                !AccountSessionCoordinator.isCurrentSession(userId, session.sessionEpoch)
+            ) {
+                initHandler("user_switch")
+                return false
+            }
+            return true
         }
 
         private fun stopHandler() {

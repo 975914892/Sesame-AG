@@ -6,6 +6,7 @@ import io.github.aoguai.sesameag.entity.RpcEntity
 import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
 import io.github.aoguai.sesameag.model.BaseModel
+import io.github.aoguai.sesameag.task.TaskExecutionReport
 import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.NetworkUtils
@@ -236,6 +237,7 @@ object RequestManager {
         tryCount: Int,
         retryInterval: Int,
     ): String {
+        TaskExecutionReport.current()?.ensureCurrent()
         rpcRequestCount.incrementAndGet()
         val method = rpcEntity.requestMethod
         val identity = RpcDailyCircuit.captureIdentity()

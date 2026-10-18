@@ -3,6 +3,11 @@ package io.github.aoguai.sesameag.util
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
+import android.os.ResultReceiver
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import io.github.aoguai.sesameag.util.settingsTransfer.ResolvedSettingsImport
 import io.github.aoguai.sesameag.util.settingsTransfer.SettingsTransferApplyResult
 import io.github.aoguai.sesameag.util.settingsTransfer.SettingsTransferApplier
@@ -25,6 +30,7 @@ object PortUtil {
             return false
         }
         try {
+            val json = SettingsTransferExporter.exportJson(userId, exportMode)
             val outputStream = context.contentResolver.openOutputStream(uri)
             if (outputStream == null) {
                 ToastUtil.showToast("导出失败：无法写入所选位置")
@@ -32,7 +38,6 @@ object PortUtil {
             }
 
             outputStream.use { output ->
-                val json = SettingsTransferExporter.exportJson(userId, exportMode)
                 output.write(json.toByteArray(Charsets.UTF_8))
                 output.flush()
                 ToastUtil.showToast("导出成功")
@@ -70,27 +75,37 @@ object PortUtil {
     }
 
     @JvmStatic
-    fun applyImport(context: Context, userId: String?, resolvedImport: ResolvedSettingsImport): SettingsTransferApplyResult {
+    suspend fun applyImport(context: Context, userId: String?, resolvedImport: ResolvedSettingsImport): SettingsTransferApplyResult {
         val result = SettingsTransferApplier.apply(userId, resolvedImport)
         if (!result.success) {
             return result
         }
-        notifyConfigReload(context, userId)
-        return result
+        return result.copy(message = notifyConfigReload(context, userId))
     }
 
-    private fun notifyConfigReload(context: Context, userId: String?) {
-        if (userId.isNullOrEmpty()) {
-            return
-        }
-        try {
-            val intent = Intent("com.eg.android.AlipayGphone.sesame.restart")
-            intent.putExtra("userId", userId)
-            intent.putExtra("configReload", true)
-            context.sendBroadcast(intent)
-        } catch (th: Throwable) {
-            Log.printStackTrace(th)
-        }
+    private suspend fun notifyConfigReload(context: Context, userId: String?): String {
+        if (userId.isNullOrBlank()) return "默认配置已保存"
+        val unconfirmed = "设置已保存，尚未确认运行态，请在支付宝中重新加载配置"
+        return withTimeoutOrNull(8_000L) {
+            suspendCancellableCoroutine<String> { continuation ->
+                val receiver = object : ResultReceiver(null) {
+                    override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                        if (continuation.isActive) continuation.resume(resultData?.getString("message") ?: unconfirmed)
+                    }
+                }
+                try {
+                    val intent = Intent("com.eg.android.AlipayGphone.sesame.restart")
+                        .setPackage("com.eg.android.AlipayGphone")
+                        .putExtra("userId", userId)
+                        .putExtra("configReload", true)
+                        .putExtra("configReloadResult", receiver)
+                    context.sendBroadcast(intent)
+                } catch (failure: Throwable) {
+                    Log.printStackTrace(failure)
+                    if (continuation.isActive) continuation.resume(unconfirmed)
+                }
+            }
+        } ?: unconfirmed
     }
 
 }

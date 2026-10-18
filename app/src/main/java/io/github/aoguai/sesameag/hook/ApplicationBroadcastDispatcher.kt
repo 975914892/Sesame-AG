@@ -96,9 +96,15 @@ internal object ApplicationBroadcastDispatcher {
         val safeIntent = Intent(intent)
         ApplicationHookConstants.submitEntry("broadcast_restart") {
             val targetUserId = safeIntent.getStringExtra("userId")
-            val currentUserId = HookUtil.getUserId(ApplicationHook.classLoader!!)
+            val receiver = safeIntent.getParcelableExtra<android.os.ResultReceiver>("configReloadResult")
+            val reply: (String) -> Unit = { message ->
+                runCatching { receiver?.send(0, android.os.Bundle().apply { putString("message", message) }) }
+                    .onFailure { record(TAG, "配置重载回执发送失败: ${it.message}") }
+            }
+            val currentUserId = ApplicationHook.classLoader?.let { HookUtil.getUserId(it) }
             if (targetUserId != null && targetUserId != currentUserId) {
                 record(TAG, "忽略非当前用户的重启广播: target=$targetUserId, current=$currentUserId")
+                reply("设置已保存，切换到该账号后生效")
                 return@submitEntry
             }
             val restartReason =
@@ -107,7 +113,14 @@ internal object ApplicationBroadcastDispatcher {
                 } else {
                     "broadcast_restart"
                 }
-            ApplicationHook.restartWorkflow(restartReason)
+            ApplicationHook.restartWorkflow(restartReason) { completed ->
+                val activeUserId = ApplicationHook.classLoader?.let { HookUtil.getUserId(it) }
+                reply(when {
+                    targetUserId != activeUserId -> "设置已保存，切换到该账号后生效"
+                    completed && io.github.aoguai.sesameag.data.Config.isLoadedFor(targetUserId) -> "设置已保存并生效"
+                    else -> "设置已保存，尚未确认运行态，请在支付宝中重新加载配置"
+                })
+            }
         }
     }
 

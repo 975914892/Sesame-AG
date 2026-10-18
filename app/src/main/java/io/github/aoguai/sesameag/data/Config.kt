@@ -2,7 +2,6 @@ package io.github.aoguai.sesameag.data
 
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException
 import com.fasterxml.jackson.databind.node.ObjectNode
 import io.github.aoguai.sesameag.BuildConfig
 import io.github.aoguai.sesameag.model.ModelFields
@@ -124,7 +123,9 @@ class Config private constructor() {
          * @return 是否已修改
          */
         @JvmStatic
+        @Synchronized
         fun isModify(userId: String?): Boolean {
+            if (!isLoadedFor(userId)) return true
             INSTANCE.sanitizeFriendSelectionFields(userId)
             val configV2File = if (userId.isNullOrEmpty()) {
                 Files.getDefaultConfigV2File()
@@ -150,7 +151,18 @@ class Config private constructor() {
          */
         @JvmStatic
         @Synchronized
-        fun save(userId: String?, force: Boolean): Boolean {
+        fun save(userId: String?, force: Boolean): Boolean = try {
+            withLoadedAccount(userId) {
+                if (userId.isNullOrBlank()) saveLoaded(null, force)
+                else Files.withAccountLock(userId) { saveLoaded(userId, force) }
+            }
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, "保存目标账号配置失败", e)
+            false
+        }
+
+        private fun saveLoaded(userId: String?, force: Boolean): Boolean {
+            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
             INSTANCE.sanitizeFriendSelectionFields(userId)
             if (!force && !isModify(userId)) {
                 return true
@@ -167,11 +179,8 @@ class Config private constructor() {
 
             return try {
                 val actualUserId = userId?.takeIf { it.isNotEmpty() } ?: "默认"
-                val success = if (userId.isNullOrEmpty()) {
-                    Files.setDefaultConfigV2File(json)
-                } else {
-                    Files.setConfigV2File(userId, json)
-                }
+                val file = if (userId.isNullOrEmpty()) Files.getDefaultConfigV2File() else Files.getConfigV2File(userId)
+                val success = Files.writeAtomically(json, file)
 
                 if (!success) {
                     throw IOException("配置文件保存失败")
@@ -199,6 +208,16 @@ class Config private constructor() {
          */
         @JvmStatic
         fun isLoaded(): Boolean = INSTANCE.isInit
+
+        @Synchronized
+        fun isLoadedFor(userId: String?): Boolean =
+            INSTANCE.isInit && INSTANCE.loadedUserId == userId?.trim()?.takeIf { it.isNotEmpty() }
+
+        @Synchronized
+        fun <T> withLoadedAccount(userId: String?, action: () -> T): T {
+            check(isLoadedFor(userId)) { "账号配置已变化，请重新打开目标账号后重试" }
+            return action()
+        }
 
         @JvmStatic
         fun isLegalAcceptedForCurrentVersion(): Boolean = INSTANCE.hasAcceptedLegalForCurrentVersion()
@@ -272,98 +291,51 @@ class Config private constructor() {
         @JvmStatic
         @Synchronized
         fun load(userId: String?): Config {
-            Log.record(TAG, "开始加载配置")
-            var configV2File: File? = null
-            val actualUserId = userId?.trim()?.takeIf { it.isNotEmpty() }
-                ?: UserMap.currentUid?.trim()?.takeIf { it.isNotEmpty() }
+            val target = userId?.trim()?.takeIf { it.isNotEmpty() }
+            return if (target == null) loadAccount(null)
+            else Files.withAccountLock(target) { loadAccount(target) }
+        }
 
+        private fun loadAccount(userId: String?): Config {
+            val file = if (userId == null) Files.getDefaultConfigV2File() else Files.getConfigV2File(userId)
+            val source = if (file.exists()) file else Files.getDefaultConfigV2File()
+            val json = source.takeIf { it.exists() }?.readText(Charsets.UTF_8)
+            if (json != null) require(JsonUtil.toNode(json)?.isObject == true) { "配置文件内容无效: ${source.name}" }
+            val previousJson = toSaveStr()
+            val previousUserId = INSTANCE.loadedUserId
+            val previousInit = INSTANCE.isInit
             try {
-                val userName: String
-                if (userId.isNullOrEmpty()) {
-                    configV2File = Files.getDefaultConfigV2File()
-                    userName = "默认"
-                    if (!configV2File.exists()) {
-                        Log.record(TAG, "默认配置文件不存在，初始化新配置")
-                        unload()
-                        toSaveStr()?.let { Files.write2File(it, configV2File) }
-                    }
-                } else {
-                    configV2File = Files.getConfigV2File(userId)
-                    val userEntity = UserMap.get(userId)
-                    userName = userEntity?.showName ?: userId
+                unload()
+                INSTANCE.setModelFieldsMap(null)
+                if (json != null) {
+                    JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(json, Config::class.java)
+                    syncExtraFieldsFromJson(json)
                 }
-
-                Log.record(TAG, "加载配置: $userName")
-                val configV2FileExists = configV2File.exists()
-                val defaultConfigV2FileExists = Files.getDefaultConfigV2File().exists()
-
-                when {
-                    configV2FileExists -> {
-                        val json = Files.readFromFile(configV2File)
-                        Log.runtime(TAG, "读取配置文件成功: ${configV2File.path}")
-                        var preparedJson = json
-                        try {
-                            JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(preparedJson, Config::class.java)
-                        } catch (e: UnrecognizedPropertyException) {
-                            Log.error(TAG, "配置文件中存在无法识别的字段: '${e.propertyName}'，将尝试移除并重新加载。")
-                            try {
-                                // 移除无法识别的字段并重新解析
-                                val mapper = JsonUtil.copyMapper()
-                                val rootNode = mapper.readTree(preparedJson)
-                                (rootNode as ObjectNode).remove(e.propertyName)
-                                preparedJson = mapper.writeValueAsString(rootNode)
-                                mapper.readerForUpdating(INSTANCE).readValue(preparedJson, Config::class.java)
-                                Log.error(TAG, "成功移除问题字段并加载配置。")
-                                // 保存修复后的配置
-                                toSaveStr()?.let { Files.write2File(it, configV2File) }
-                                Log.error(TAG, "已保存修复后的配置文件。")
-                            } catch (innerEx: Exception) {
-                                Log.printStackTrace(TAG, "移除问题字段后，加载配置仍然失败。", innerEx)
-                                throw innerEx // 抛出内部异常，触发重置逻辑
-                            }
-                        }
-                        syncExtraFieldsFromJson(preparedJson)
-                        INSTANCE.sanitizeFriendSelectionFields(actualUserId)
-                        Log.record(TAG, "格式化配置成功:$configV2File")
-                        val formatted = toSaveStr()
-                        if (formatted != null && formatted != json) {
-                            Log.record(TAG, "格式化配置: $userName")
-                            Files.write2File(formatted, configV2File)
-                        }
-                    }
-                    defaultConfigV2FileExists -> {
-                        val json = Files.readFromFile(Files.getDefaultConfigV2File())
-                        val preparedJson = json
-                        JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(preparedJson, Config::class.java)
-                        syncExtraFieldsFromJson(preparedJson)
-                        INSTANCE.sanitizeFriendSelectionFields(actualUserId)
-                        Log.record(TAG, "复制新配置: $userName")
-                        Files.write2File(toSaveStr() ?: preparedJson, configV2File)
-                    }
-                    else -> {
-                        unload()
-                        Log.record(TAG, "初始新配置: $userName")
-                        toSaveStr()?.let { Files.write2File(it, configV2File) }
+                INSTANCE.sanitizeFriendSelectionFields(userId)
+                if (!file.exists()) {
+                    check(Files.writeAtomically(requireNotNull(toSaveStr()), file)) { "创建配置文件失败" }
+                }
+                INSTANCE.loadedUserId = userId
+                INSTANCE.isInit = true
+                TaskCommon.update()
+                Log.record(TAG, "已加载配置: ${userId ?: "默认"}")
+                return INSTANCE
+            } catch (failure: Throwable) {
+                unload()
+                if (previousInit && previousJson != null) {
+                    try {
+                        JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(previousJson, Config::class.java)
+                        syncExtraFieldsFromJson(previousJson)
+                        INSTANCE.loadedUserId = previousUserId
+                        INSTANCE.isInit = true
+                    } catch (restore: Throwable) {
+                        failure.addSuppressed(restore)
+                        INSTANCE.isInit = false
                     }
                 }
-            } catch (t: Throwable) {
-                Log.error(TAG, "重置配置失败$t")
-                Log.error(TAG, "重置配置")
-                try {
-                    unload()
-                    configV2File?.let { file ->
-                        toSaveStr()?.let { json -> Files.write2File(json, file) }
-                    }
-                } catch (e: Exception) {
-                    Log.printStackTrace(TAG, "重置配置失败", e)
-                }
+                Log.printStackTrace(TAG, "加载配置失败，未覆盖原文件", failure)
+                throw failure
             }
-
-            INSTANCE.sanitizeFriendSelectionFields(actualUserId)
-            INSTANCE.loadedUserId = actualUserId
-            INSTANCE.isInit = true
-            TaskCommon.update()
-            return INSTANCE
         }
 
         /**
@@ -372,6 +344,7 @@ class Config private constructor() {
         @JvmStatic
         @Synchronized
         fun unload() {
+            Model.getModelConfigMap().values.forEach { model -> model.fields.values.forEach { it.reset() } }
             for (modelFields in INSTANCE.modelFieldsMap.values) {
                 for (modelField in modelFields.values) {
                     modelField?.reset()
@@ -459,6 +432,7 @@ class Config private constructor() {
         private fun createConfigSkeletonForLegalWrite(userId: String?): String? {
             val previousJson = toSaveStr()
             val previousInit = INSTANCE.isInit
+            val previousUserId = INSTANCE.loadedUserId
 
             return try {
                 load(userId)
@@ -478,6 +452,7 @@ class Config private constructor() {
                     Log.printStackTrace(TAG, "恢复 Config 单例状态失败", restoreEx)
                 } finally {
                     INSTANCE.isInit = previousInit
+                    INSTANCE.loadedUserId = previousUserId
                 }
             }
         }

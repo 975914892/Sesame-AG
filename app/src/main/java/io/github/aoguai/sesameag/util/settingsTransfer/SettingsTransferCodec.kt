@@ -53,6 +53,28 @@ object SettingsTransferCodec {
         return snapshot
     }
 
+    fun validateConfigValue(field: ModelField<*>, configValue: String?) {
+        if (configValue.isNullOrBlank()) return
+        when (field) {
+            is StringModelField, is TextModelField -> Unit
+            is BooleanModelField -> require(
+                configValue.trim().lowercase() in setOf("true", "false", "1", "0")
+            ) { "${field.code} 需要有效布尔值" }
+            is ChoiceModelField, is IntegerModelField -> require(configValue.trim().toIntOrNull() != null) {
+                "${field.code} 需要有效整数"
+            }
+            else -> {
+                val mapper = JsonUtil.copyMapper()
+                    .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                    .disable(com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+                requireNotNull(mapper.readValue<Any>(configValue, mapper.typeFactory.constructType(field.valueType))) {
+                    "${field.code} 内容无效"
+                }
+            }
+        }
+    }
+
     fun fingerprintUser(userId: String?): String? {
         val safeUserId = userId?.trim().orEmpty()
         if (safeUserId.isEmpty()) {

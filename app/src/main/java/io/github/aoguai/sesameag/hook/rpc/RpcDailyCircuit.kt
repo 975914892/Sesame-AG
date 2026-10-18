@@ -5,6 +5,7 @@ import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
 import io.github.aoguai.sesameag.hook.AccountSessionIdentity
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.task.TaskExecutionReport
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONObject
 
@@ -17,15 +18,15 @@ object RpcDailyCircuit {
         response.optString("offlineReason") == STOP_REASON ||
             response.optJSONObject("_taskFlowStopObject")?.let(::isStopResponse) == true
 
-    internal fun captureIdentity(): AccountSessionIdentity = AccountSessionIdentity(
+    internal fun captureIdentity(): AccountSessionIdentity = TaskExecutionReport.current()?.identity ?: AccountSessionIdentity(
         UserMap.currentUid?.trim().orEmpty(),
         AccountSessionCoordinator.currentSessionEpoch(),
     )
 
     internal fun isCurrent(identity: AccountSessionIdentity): Boolean =
-        identity.userId.isNotBlank() && identity.userId == UserMap.currentUid?.trim() &&
-            identity.sessionEpoch == AccountSessionCoordinator.currentSessionEpoch() &&
-            AccountSessionCoordinator.currentUserId().let { it == null || it == identity.userId }
+        TaskExecutionReport.current()?.executionJob?.isActive != false &&
+            identity.userId == UserMap.currentUid?.trim() &&
+            AccountSessionCoordinator.isCurrentSession(identity.userId, identity.sessionEpoch)
 
     private fun flag(method: String): String = StatusFlags.FLAG_RPC_DAILY_RISK_STOP_PREFIX + method
 

@@ -1299,21 +1299,27 @@ private fun FriendSelectionEditorScreen(
         FriendRefreshCoordinator(refreshScope).also { it.bindUser(userId) }
     }
     val refreshState by friendRefreshCoordinator.state.collectAsStateWithLifecycle()
-    var friendConfig by remember(userId) { mutableStateOf(FriendRepository.current(userId)) }
+    var friendConfig by remember(userId) {
+        mutableStateOf(runCatching { FriendRepository.current(userId) }
+            .getOrElse { io.github.aoguai.sesameag.entity.friend.FriendCenterConfig(userId = userId) })
+    }
     var friendConfigGeneration by remember(userId) { mutableStateOf(0) }
 
     fun reloadFriendConfig() {
         val generation = friendConfigGeneration + 1
         friendConfigGeneration = generation
         refreshScope.launch {
-            val refreshedConfig = withContext(Dispatchers.IO) {
-                UserMap.setCurrentUserId(userId)
-                UserMap.load(userId)
-                FriendRepository.mergeFromUserMap(userId, allowPruneMissing = true)
-                FriendRepository.current(userId)
-            }
-            if (generation == friendConfigGeneration) {
-                friendConfig = refreshedConfig
+            try {
+                val refreshedConfig = withContext(Dispatchers.IO) {
+                    UserMap.setCurrentUserId(userId)
+                    val friends = UserMap.load(userId)
+                    FriendRepository.mergeFromUserMap(userId, currentUsers = friends)
+                }
+                if (generation == friendConfigGeneration) friendConfig = refreshedConfig
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(context, "好友数据加载失败：${e.message}", android.widget.Toast.LENGTH_LONG).show()
             }
         }
     }

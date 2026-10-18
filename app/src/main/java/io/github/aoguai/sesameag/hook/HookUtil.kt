@@ -3,6 +3,7 @@ package io.github.aoguai.sesameag.hook
 import android.content.Context
 import io.github.aoguai.sesameag.entity.UserEntity
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.maps.UserMap
 import java.lang.reflect.Field
@@ -102,108 +103,63 @@ object HookUtil {
         }.getOrNull()
     }
 
-    fun hookUser(classLoader: ClassLoader): FriendRefreshResult {
-        var targetUserId = UserMap.currentUid.orEmpty()
+    fun hookUser(classLoader: ClassLoader, identity: AccountSessionIdentity): FriendRefreshResult {
+        val selfId = identity.userId
         return try {
-            val selfId = getUserId(classLoader)
-            if (selfId.isNullOrBlank()) {
-                val message = "hookUser 跳过：未获取到当前账号 userId"
-                Log.runtime(TAG, message)
-                return FriendRefreshResult(success = false, userId = targetUserId, message = message)
-            }
-            targetUserId = selfId
-            val sameAccount = UserMap.currentUid == selfId
-            val previousUsers = if (sameAccount) {
-                UserMap.getUserMap().toMap()
-            } else {
-                emptyMap()
-            }
-            UserMap.setCurrentUserId(selfId)
-            UserMap.saveMinimalSelf(selfId)
-            val clsUserIndependentCache = loadClass(classLoader, "com.alipay.mobile.socialcommonsdk.bizdata.UserIndependentCache")
-            val clsAliAccountDaoOp = loadClass(classLoader, "com.alipay.mobile.socialcommonsdk.bizdata.contact.data.AliAccountDaoOp")
-            val aliAccountDaoOp = callStaticMethod(clsUserIndependentCache, "getCacheObj", clsAliAccountDaoOp)
-                ?: error("AliAccountDaoOp 缓存对象为空")
-            val allFriends = callMethod(aliAccountDaoOp, "getAllFriends") as? List<*> ?: emptyList<Any>()
-            if (allFriends.isEmpty()) {
-                if (!sameAccount || UserMap.getUserMap().isEmpty()) {
-                    UserMap.load(selfId)
-                }
-                val cachedCenter = FriendRepository.current(selfId)
-                val center = if (cachedCenter.profiles.isEmpty() && UserMap.getUserMap().isNotEmpty()) {
-                    FriendRepository.mergeFromUserMap(selfId, allowPruneMissing = false)
-                } else {
-                    cachedCenter
-                }
-                val message = "支付宝本地好友缓存为空，已保留旧好友中心"
-                Log.runtime(TAG, message)
-                return FriendRefreshResult(
-                    success = false,
-                    userId = selfId,
-                    message = message,
-                    profiles = center.profiles.size,
-                    groups = center.groups.size
-                )
-            }
-            UserMap.unload()
-            val friendClass = allFriends.firstOrNull()?.javaClass
-                ?: return FriendRefreshResult(false, selfId, "支付宝本地好友缓存为空，已保留旧好友中心")
+            check(AccountSessionCoordinator.isCurrentSession(selfId, identity.sessionEpoch) &&
+                UserMap.currentUid == selfId && getUserId(classLoader) == selfId) { "账号会话已变化" }
+            val cacheClass = loadClass(classLoader, "com.alipay.mobile.socialcommonsdk.bizdata.UserIndependentCache")
+            val daoClass = loadClass(classLoader, "com.alipay.mobile.socialcommonsdk.bizdata.contact.data.AliAccountDaoOp")
+            val dao = callStaticMethod(cacheClass, "getCacheObj", daoClass) ?: error("AliAccountDaoOp 缓存对象为空")
+            val allFriends = callMethod(dao, "getAllFriends") as? List<*> ?: emptyList<Any>()
+            check(allFriends.isNotEmpty()) { "支付宝本地好友缓存为空，已保留旧好友中心" }
+            val friendClass = requireNotNull(allFriends.firstOrNull()).javaClass
             val userIdField = findField(friendClass, "userId")
             val accountField = findField(friendClass, "account")
             val nameField = findField(friendClass, "name")
             val nickNameField = findField(friendClass, "nickName")
             val remarkNameField = findField(friendClass, "remarkName")
             val friendStatusField = findField(friendClass, "friendStatus")
-            var selfEntity: UserEntity? = null
-            allFriends.forEach { userObject ->
-                runCatching {
-                    val userId = userIdField.get(userObject) as? String
-                    val account = accountField.get(userObject) as? String
-                    val name = nameField.get(userObject) as? String
-                    val nickName = nickNameField.get(userObject) as? String
-                    val remarkName = remarkNameField.get(userObject) as? String
-                    val friendStatus = friendStatusField.get(userObject) as? Int
-                    val userEntity = UserEntity(userId, account, friendStatus, name, nickName, remarkName)
-                    if (userId == selfId) selfEntity = userEntity
-                    UserMap.add(userEntity)
-                }.onFailure {
-                    Log.runtime(TAG, "addUserObject err:")
-                    Log.printStackTrace(it)
+            val observed = linkedMapOf<String, UserEntity>()
+            var parseFailures = 0
+            allFriends.forEach { item ->
+                try {
+                    val id = userIdField.get(item) as? String
+                    require(!id.isNullOrBlank()) { "好友账号为空" }
+                    observed[id] = UserEntity(
+                        id, accountField.get(item) as? String, friendStatusField.get(item) as? Int,
+                        nameField.get(item) as? String, nickNameField.get(item) as? String,
+                        remarkNameField.get(item) as? String
+                    )
+                } catch (e: Exception) {
+                    parseFailures++
+                    Log.printStackTrace(TAG, "好友解析失败", e)
                 }
             }
-            if (UserMap.getUserMap().isEmpty()) {
-                val center = FriendRepository.current(selfId)
-                val message = "支付宝本地好友缓存解析为空，已保留旧好友中心"
-                Log.runtime(TAG, message)
-                return FriendRefreshResult(
-                    success = false,
-                    userId = selfId,
-                    message = message,
-                    profiles = center.profiles.size,
-                    groups = center.groups.size
-                )
+            Log.runtime(TAG, "好友采集: user=$selfId epoch=${identity.sessionEpoch} input=${allFriends.size} parsed=${observed.size} failed=$parseFailures")
+            check(parseFailures == 0) { "好友缓存解析不完整，已保留旧数据" }
+            check(observed.keys.any { it != selfId }) { "好友缓存尚未就绪，已保留旧数据" }
+            AccountSessionCoordinator.withCurrentSession(identity) {
+                check(UserMap.currentUid == selfId && getUserId(classLoader) == selfId) { "提交前账号已变化" }
+                val snapshot = UserMap.getUserMap(selfId) + observed
+                val center = Files.withAccountTransaction(
+                    selfId, listOf(requireNotNull(Files.getFriendIdMapFile(selfId)), Files.getFriendCenterFile(selfId))
+                ) {
+                    check(UserMap.save(selfId, snapshot)) { "friend.json 保存失败" }
+                    val merged = FriendRepository.mergeFromUserMap(
+                        selfId, currentUsers = observed, refreshRelations = true
+                    )
+                    check(getUserId(classLoader) == selfId) { "保存期间账号已变化" }
+                    merged
+                }
+                UserMap.replace(selfId, snapshot)
+                val message = "好友刷新完成: input=${observed.size}, profiles=${center.profiles.size}, groups=${center.groups.size}"
+                Log.runtime(TAG, "$message user=$selfId epoch=${identity.sessionEpoch} saved=true")
+                FriendRefreshResult(true, selfId, message, center.profiles.size, center.groups.size)
             }
-
-            selfEntity?.let { UserMap.saveSelf(it) }
-            val userMapSaved = UserMap.save(selfId)
-            val center = FriendRepository.mergeFromUserMap(selfId, previousUsers, allowPruneMissing = true)
-            val message = if (userMapSaved) {
-                "好友刷新完成: profiles=${center.profiles.size}, groups=${center.groups.size}"
-            } else {
-                "好友刷新完成，但 friend.json 保存失败"
-            }
-            Log.runtime(TAG, "userCache load success ! $message")
-            FriendRefreshResult(
-                success = userMapSaved,
-                userId = selfId,
-                message = message,
-                profiles = center.profiles.size,
-                groups = center.groups.size
-            )
-        } catch (t: Throwable) {
-            val message = "hookUser 失败: ${t.message ?: t.javaClass.simpleName}"
-            Log.printStackTrace(TAG, "hookUser 失败", t)
-            FriendRefreshResult(success = false, userId = targetUserId, message = message)
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, "hookUser 失败", e)
+            FriendRefreshResult(false, selfId, "好友刷新未完成：${e.message ?: e.javaClass.simpleName}")
         }
     }
 

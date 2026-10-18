@@ -186,7 +186,10 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
             createdAt = now,
             updatedAt = now
         )
-        FriendRepository.upsertGroup(state.userId, group)
+        if (FriendRepository.upsertGroup(state.userId, group) == null) {
+            _uiState.value = state.copy(message = "分组保存失败，请稍后重试")
+            return
+        }
         refresh(state.userId, group.id)
     }
 
@@ -195,10 +198,14 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
         val normalizedGroupId = groupId.trim()
         if (normalizedGroupId.isEmpty()) return
         if (state.userId.isBlank()) return
-        FriendRepository.deleteGroup(state.userId, normalizedGroupId)
+        if (!FriendRepository.deleteGroup(state.userId, normalizedGroupId)) {
+            _uiState.value = state.copy(message = "分组删除失败，请稍后重试")
+            return
+        }
         Config.load(state.userId)
-        if (Config.sanitizeFriendSelectionFieldsForUser(state.userId)) {
-            Config.save(state.userId, false)
+        if (Config.sanitizeFriendSelectionFieldsForUser(state.userId) && !Config.save(state.userId, false)) {
+            refresh(state.userId, message = "分组已删除，但关联配置保存失败")
+            return
         }
         refresh(state.userId)
     }
@@ -208,11 +215,14 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
         val normalizedGroupId = groupId.trim()
         val normalizedName = name.trim()
         if (state.userId.isBlank() || normalizedGroupId.isEmpty() || normalizedName.isBlank()) return
-        val group = FriendRepository.current(state.userId).groups.firstOrNull { it.id == normalizedGroupId } ?: return
-        FriendRepository.upsertGroup(
-            state.userId,
-            group.copy(name = normalizedName)
-        )
+        if (!FriendRepository.update(state.userId) { config ->
+            val group = requireNotNull(config.groups.firstOrNull { it.id == normalizedGroupId })
+            group.name = normalizedName
+            group.updatedAt = System.currentTimeMillis()
+        }) {
+            _uiState.value = state.copy(message = "分组保存失败，请稍后重试")
+            return
+        }
         refresh(state.userId, normalizedGroupId)
     }
 
@@ -228,17 +238,14 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
         val normalizedFriendUserId = friendUserId.trim()
         if (normalizedGroupId.isEmpty() || normalizedFriendUserId.isEmpty()) return
         if (state.userId.isBlank()) return
-        val group = FriendRepository.current(state.userId).groups.firstOrNull { it.id == normalizedGroupId } ?: return
-        val nextMembers = linkedSetOf<String>().apply { addAll(group.memberIds) }
-        if (checked) {
-            nextMembers.add(normalizedFriendUserId)
-        } else {
-            nextMembers.remove(normalizedFriendUserId)
+        if (!FriendRepository.update(state.userId) { config ->
+            val group = requireNotNull(config.groups.firstOrNull { it.id == normalizedGroupId })
+            if (checked) group.memberIds.add(normalizedFriendUserId) else group.memberIds.remove(normalizedFriendUserId)
+            group.updatedAt = System.currentTimeMillis()
+        }) {
+            _uiState.value = state.copy(message = "分组成员保存失败，请稍后重试")
+            return
         }
-        FriendRepository.upsertGroup(
-            state.userId,
-            group.copy(memberIds = nextMembers)
-        )
         refresh(state.userId, normalizedGroupId)
     }
 
@@ -251,18 +258,14 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
             .filter { it.isNotEmpty() }
             .distinct()
         if (normalizedIds.isEmpty()) return
-        val group = FriendRepository.current(state.userId).groups.firstOrNull { it.id == normalizedGroupId } ?: return
-        val nextMembers = linkedSetOf<String>().apply { addAll(group.memberIds) }
-        if (checked) {
-            nextMembers.addAll(normalizedIds)
-        } else {
-            nextMembers.removeAll(normalizedIds.toSet())
+        if (!FriendRepository.update(state.userId) { config ->
+            val group = requireNotNull(config.groups.firstOrNull { it.id == normalizedGroupId })
+            if (checked) group.memberIds.addAll(normalizedIds) else group.memberIds.removeAll(normalizedIds.toSet())
+            group.updatedAt = System.currentTimeMillis()
+        }) {
+            _uiState.value = state.copy(message = "分组成员保存失败，请稍后重试")
+            return
         }
-        if (nextMembers == group.memberIds) return
-        FriendRepository.upsertGroup(
-            state.userId,
-            group.copy(memberIds = nextMembers)
-        )
         refresh(state.userId, normalizedGroupId)
     }
 
@@ -284,7 +287,9 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
             searchQuery = state.searchQuery,
             filter = state.filter
         )
-        if (FriendRepository.save(state.userId, optimisticConfig)) {
+        if (FriendRepository.update(state.userId) { config ->
+            requireNotNull(config.profiles[normalizedFriendUserId]).globalBlocked = blocked
+        }) {
             refresh(state.userId, state.selectedGroupId)
         } else {
             _uiState.value = buildState(
@@ -324,7 +329,9 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
             searchQuery = state.searchQuery,
             filter = state.filter
         )
-        if (FriendRepository.save(state.userId, optimisticConfig)) {
+        if (FriendRepository.update(state.userId) { config ->
+            changedIds.forEach { id -> config.profiles[id]?.globalBlocked = blocked }
+        }) {
             refresh(state.userId, state.selectedGroupId)
         } else {
             _uiState.value = buildState(
@@ -343,18 +350,24 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
         previousState: FriendCenterUiState,
         message: String = "",
     ): FriendCenterUiState = withContext(Dispatchers.IO) {
-        UserMap.setCurrentUserId(userId)
-        UserMap.load(userId)
-        // 以当前账号 friend.json 快照为准，同步时把缺失好友标记为失效，避免长期残留“伪有效”关系。
-        FriendRepository.mergeFromUserMap(userId, allowPruneMissing = true)
-        buildState(
-            userId = userId,
-            preferredGroupId = previousState.selectedGroupId,
-            config = FriendRepository.current(userId),
-            searchQuery = previousState.searchQuery,
-            filter = previousState.filter,
-            message = message,
-        )
+        try {
+            UserMap.setCurrentUserId(userId)
+            val friends = UserMap.load(userId)
+            FriendRepository.mergeFromUserMap(userId, currentUsers = friends)
+            buildState(
+                userId = userId,
+                preferredGroupId = previousState.selectedGroupId,
+                config = FriendRepository.current(userId),
+                searchQuery = previousState.searchQuery,
+                filter = previousState.filter,
+                message = message,
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val retained = if (previousState.userId == userId) previousState else FriendCenterUiState(userId = userId)
+            retained.copy(message = "好友数据加载失败：${e.message}")
+        }
     }
 
     private fun refresh(
@@ -365,14 +378,18 @@ class FriendCenterViewModel(private val savedStateHandle: SavedStateHandle) : Vi
         message: String = ""
     ) {
         if (userId.isBlank()) return
-        _uiState.value = buildState(
-            userId = userId,
-            preferredGroupId = preferredGroupId,
-            config = FriendRepository.current(userId),
-            searchQuery = searchQuery,
-            filter = filter,
-            message = message
-        )
+        try {
+            _uiState.value = buildState(
+                userId = userId,
+                preferredGroupId = preferredGroupId,
+                config = FriendRepository.current(userId),
+                searchQuery = searchQuery,
+                filter = filter,
+                message = message
+            )
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(message = "好友数据加载失败：${e.message}")
+        }
         savedStateHandle[STATE_SELECTED_GROUP] = _uiState.value.selectedGroupId
     }
 

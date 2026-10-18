@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.model
 
+import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.util.Log
@@ -153,8 +154,7 @@ abstract class Model {
          * 销毁现有模型，然后创建新的模型实例
          */
         @JvmStatic
-        @Synchronized
-        fun initAllModel() {
+        fun initAllModel(): Unit = synchronized(Config) {
             destroyAllModel()
             
             modelClazzList.forEachIndexed { i, modelClazz ->
@@ -219,8 +219,8 @@ abstract class Model {
          * 清理所有模型实例和映射
          */
         @JvmStatic
-        @Synchronized
-        fun destroyAllModel() {
+        fun destroyAllModel(): Unit = synchronized(Config) {
+            Config.unload()
             for (i in modelArray.indices) {
                 val model = modelArray[i]
                 if (model != null) {

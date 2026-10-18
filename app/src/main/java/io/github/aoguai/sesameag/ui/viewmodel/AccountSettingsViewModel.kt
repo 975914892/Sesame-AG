@@ -276,10 +276,12 @@ class AccountSettingsViewModel(
         _uiState.update { it.copy(isSaving = true, operationMessage = null) }
         val result = runCatching {
             withContext(Dispatchers.IO) {
-                validateDrafts(snapshot.drafts)
-                applyDrafts(snapshot.drafts)
-                Config.sanitizeFriendSelectionFieldsForUser(userId)
-                check(Config.save(userId, true)) { "配置文件保存失败" }
+                Config.withLoadedAccount(userId) {
+                    validateDrafts(snapshot.drafts)
+                    applyDrafts(snapshot.drafts)
+                    Config.sanitizeFriendSelectionFieldsForUser(userId)
+                    check(Config.save(userId, true)) { "配置文件保存失败" }
+                }
             }
             LocaleSettingsApplier.apply(context)
             runCatching {
@@ -293,7 +295,6 @@ class AccountSettingsViewModel(
                 Log.printStackTrace(TAG, "Failed to send config reload broadcast", throwable)
             }
             withContext(Dispatchers.IO) {
-                UserMap.save(userId)
                 IdMapManager.getInstance(CooperateMap::class.java).save(userId)
                 currentConfigValues()
             }
@@ -334,13 +335,16 @@ class AccountSettingsViewModel(
     suspend fun import(context: Context, uri: Uri?): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val json = PortUtil.readImportText(context, uri) ?: error("无法读取导入文件")
-            val resolved = SettingsTransferImporter.resolve(json, userId)
+            val resolved = Config.withLoadedAccount(userId) { SettingsTransferImporter.resolve(json, userId) }
             val applied = PortUtil.applyImport(context, userId, resolved)
             check(applied.success) { applied.message }
-            loadAccount()
-        }.onSuccess { loaded ->
             clearSavedDrafts()
-            _uiState.value = loaded.copy(operationMessage = "导入成功")
+            val loaded = runCatching { loadAccount() }.getOrElse {
+                throw IllegalStateException("设置已保存，但页面加载失败：${it.message}", it)
+            }
+            loaded.copy(operationMessage = applied.message)
+        }.onSuccess { loaded ->
+            _uiState.value = loaded
         }
     }.map { Unit }
 
@@ -441,15 +445,15 @@ class AccountSettingsViewModel(
         }
     }
 
-    private fun loadAccount(): AccountSettingsUiState {
+    private fun loadAccount(): AccountSettingsUiState = synchronized(Config) {
         val normalizedUserId = AccountSlotRegistry.normalizeUserId(userId)
         require(normalizedUserId != null && normalizedUserId in Files.listExistingUserConfigIds()) {
             "账号配置不存在或账号标识无效"
         }
         Model.initAllModel()
         UserMap.setCurrentUserId(normalizedUserId)
-        UserMap.load(normalizedUserId)
-        FriendRepository.mergeFromUserMap(normalizedUserId, allowPruneMissing = true)
+        val friends = UserMap.load(normalizedUserId)
+        FriendRepository.mergeFromUserMap(normalizedUserId, currentUsers = friends)
         Status.load(normalizedUserId)
         Config.load(normalizedUserId)
 
@@ -498,7 +502,7 @@ class AccountSettingsViewModel(
         val pendingAuditClearKeys = fields.keys.filterTo(linkedSetOf()) {
             it.savedStateKey() in restoredAuditClears
         }
-        return AccountSettingsUiState(
+        AccountSettingsUiState(
             isLoading = false,
             groups = groups,
             drafts = mergedDrafts,

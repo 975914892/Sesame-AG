@@ -57,6 +57,32 @@ object CustomSettings {
         )
     }
 
+    fun normalizeForImport(data: Map<*, *>): LinkedHashMap<String, Any?> {
+        val normalized = linkedMapOf<String, Any?>()
+        data.forEach { (key, value) ->
+            require(key is String) { "自定义设置字段名无效" }
+            normalized[key] = value
+        }
+        listOf(onlyOnceDaily, autoHandleOnceDaily).forEach { field ->
+            val value = data[field.code]
+            require(value == null || value is Boolean) { "自定义设置 ${field.code} 需要布尔值" }
+        }
+        data[onlyOnceDailyList.code]?.let { value ->
+            require(value is Collection<*> && value.all { it == null || it is String }) {
+                "自定义设置 ${onlyOnceDailyList.code} 需要模块列表"
+            }
+            val field = SelectModelField(onlyOnceDailyList.code, onlyOnceDailyList.name, LinkedHashSet<String?>(), getModuleList())
+            field.setObjectValue(value)
+            normalized[field.code] = field.value
+        }
+        data[autoHandleOnceDailyTimes.code]?.let { value ->
+            require(value is String) { "自定义设置 ${autoHandleOnceDailyTimes.code} 需要时间段字符串" }
+            val field = TimeWindowListModelField(autoHandleOnceDailyTimes.code, autoHandleOnceDailyTimes.name, value, allowDisable = true)
+            normalized[field.code] = field.value
+        }
+        return normalized
+    }
+
     private fun resetToDefault() {
         onlyOnceDaily.setObjectValue(false)
         autoHandleOnceDaily.setObjectValue(false)
@@ -72,14 +98,15 @@ object CustomSettings {
     fun trySave(userId: String): Boolean {
         if (userId.isEmpty()) return false
         return try {
-            val file = Files.getCustomSetFile(userId) ?: return false
-            val data = mutableMapOf<String, Any?>()
-            data[onlyOnceDaily.code] = onlyOnceDaily.value
-            data[onlyOnceDailyList.code] = onlyOnceDailyList.value
-            data[autoHandleOnceDaily.code] = autoHandleOnceDaily.value
-            data[autoHandleOnceDailyTimes.code] = autoHandleOnceDailyTimes.value
-            val json = JsonUtil.formatJson(data)
-            Files.write2File(json, file)
+            Files.withAccountLock(userId) {
+                val file = requireNotNull(Files.getCustomSetFile(userId))
+                val data = mutableMapOf<String, Any?>()
+                data[onlyOnceDaily.code] = onlyOnceDaily.value
+                data[onlyOnceDailyList.code] = onlyOnceDailyList.value
+                data[autoHandleOnceDaily.code] = autoHandleOnceDaily.value
+                data[autoHandleOnceDailyTimes.code] = autoHandleOnceDailyTimes.value
+                Files.writeAtomically(JsonUtil.formatJson(data), file)
+            }
         } catch (e: Throwable) {
             Log.printStackTrace(TAG, "Failed to save custom settings", e)
             false
@@ -89,19 +116,18 @@ object CustomSettings {
     @JvmStatic
     fun load(userId: String) {
         if (userId.isEmpty()) return
-        resetToDefault()
         try {
-            val file = Files.getCustomSetFile(userId) ?: return
-            if (!file.exists()) {
-                return
+            Files.withAccountLock(userId) {
+                val file = requireNotNull(Files.getCustomSetFile(userId))
+                val json = file.readText(Charsets.UTF_8)
+                val data = if (json.isBlank()) emptyMap<String, Any?>()
+                    else normalizeForImport(JsonUtil.copyMapper().readValue(json, Map::class.java))
+                resetToDefault()
+                applyLoadedValues(data)
             }
-            val json = Files.readFromFile(file)
-            if (json.isBlank()) {
-                return
-            }
-            val data = JsonUtil.copyMapper().readValue(json, Map::class.java)
-            applyLoadedValues(data)
         } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            resetToDefault()
             Log.printStackTrace(TAG, "Failed to load custom settings, keeping defaults", e)
             Log.runtime(TAG, "自定义设置加载失败，已回退默认值:userId=$userId")
             Log.record(TAG, "自定义设置加载失败，已回退默认值:userId=$userId")

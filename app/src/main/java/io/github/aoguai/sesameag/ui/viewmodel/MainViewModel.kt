@@ -443,8 +443,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val latestUserIds = Files.listExistingUserConfigIds(requireReadable = true)
                 val newList = mutableListOf<UserEntity>()
                 for (userId in latestUserIds) {
-                    UserMap.loadSelf(userId)
-                    UserMap.get(userId)?.let { newList.add(it) }
+                    UserMap.readSelf(userId)?.let { newList.add(it) }
                 }
                 currentCoroutineContext().ensureActive()
                 _userList.value = newList

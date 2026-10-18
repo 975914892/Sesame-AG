@@ -2,6 +2,10 @@ package io.github.aoguai.sesameag.task
 
 import io.github.aoguai.sesameag.task.common.TaskFlowExecutionState
 import io.github.aoguai.sesameag.task.common.TaskFlowRunResult
+import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.AccountSessionIdentity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.asContextElement
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -16,7 +20,19 @@ enum class TaskExecutionOutcome {
 }
 
 /** 每次模块执行独立收集结果；协程切换线程时保留归属，不传给独立调度的子任务。 */
-internal class TaskExecutionReport {
+internal class TaskExecutionReport(
+    val identity: AccountSessionIdentity = current()?.identity
+        ?: AccountSessionCoordinator.currentSession()?.let { AccountSessionIdentity(it.userId, it.sessionEpoch) }
+        ?: AccountSessionIdentity("", 0L),
+) {
+    var executionJob: Job? = current()?.executionJob
+
+    fun ensureCurrent(userId: String? = null) {
+        if (executionJob?.isActive == false ||
+            !AccountSessionCoordinator.isCurrentSession(identity.userId, identity.sessionEpoch) ||
+            (userId != null && identity.userId != userId)
+        ) throw CancellationException("任务账号会话已失效")
+    }
     companion object {
         private val activeReport = ThreadLocal<TaskExecutionReport?>()
 

@@ -83,7 +83,7 @@ object SettingsTransferCacheRegistry {
                 return@forEach
             }
             val file = resolveUserFile(safeUserId, rule.fileName)
-            if (!Files.write2File(entry.content, file)) {
+            if (!Files.writeAtomically(entry.content, file)) {
                 Log.runtime(TAG, "写入缓存失败: ${rule.fileName}")
                 return false
             }
@@ -98,15 +98,16 @@ object SettingsTransferCacheRegistry {
         return true
     }
 
-    fun targetFilesForScope(userId: String?, scope: ConfigPortScope): List<File> {
+    fun targetFilesForScope(userId: String?, scope: ConfigPortScope, entries: Collection<SettingsTransferCacheEntry>): List<File> {
         val safeUserId = userId?.trim().orEmpty()
         if (safeUserId.isEmpty()) {
             return emptyList()
         }
         val files = linkedSetOf<File>()
-        rules.filter { it.scope == scope }
+        val keys = entries.map { it.key }.toSet()
+        rules.filter { it.scope == scope && it.key in keys }
             .forEach { files.add(resolveUserFile(safeUserId, it.fileName)) }
-        if (scope == ConfigPortScope.GENERIC) {
+        if (scope == ConfigPortScope.GENERIC && IP_DRAW_LEGACY_CACHE_KEY in keys) {
             files.add(resolveUserFile(safeUserId, IP_DRAW_LEGACY_CACHE_FILE))
         }
         return files.toList()
@@ -157,7 +158,7 @@ object SettingsTransferCacheRegistry {
                 shopItems.clear()
                 shopItems.putAll(snapshot.shopItems)
             }
-            Files.write2File(JsonUtil.formatJson(data), file)
+            Files.writeAtomically(JsonUtil.formatJson(data), file)
         }.onFailure {
             Log.printStackTrace(TAG, "写入 IP 抽抽乐旧快照失败", it)
         }.getOrDefault(false)

@@ -666,6 +666,7 @@ class Status {
         @Synchronized
         @JvmStatic
         fun save(nowCalendar: Calendar = Calendar.getInstance()) {
+            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
             val targetUid = UserMap.currentUid
             if (targetUid.isNullOrEmpty()) {
                 Log.record(TAG, "用户为空，状态保存失败")
@@ -763,7 +764,12 @@ class Status {
          */
         @JvmStatic
         @JvmOverloads
-        fun setFlagToday(flag: String, retryTimes: String? = null) {
+        @Synchronized
+        fun setFlagToday(flag: String, retryTimes: String? = null, expectedUserId: String? = null) {
+            if (expectedUserId != null) {
+                check(UserMap.currentUid == expectedUserId && INSTANCE.currentUid == expectedUserId) { "今日标记账号已变化" }
+                check(!ApplicationHookConstants.isOffline()) { "离线状态不能确认好友同步完成" }
+            }
             if (ApplicationHookConstants.isOffline()) {
                 if (offlineSkippedTodayFlags.add(flag)) {
                     Log.record(TAG, "离线模式跳过今日标识: $flag")
@@ -789,8 +795,10 @@ class Status {
         }
 
         private fun setFlagTodayInternal(flag: String, retryTimes: String?) {
+            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
             val (module, name) = parseFlag(flag)
             val flags = INSTANCE.moduleFlags.getOrPut(module) { HashMap() }
+            val oldFlags = HashMap(flags)
             val oldCount = flags[name] ?: 0
 
             var changed = false
@@ -817,7 +825,13 @@ class Status {
             }
 
             if (changed) {
-                save()
+                try {
+                    save()
+                } catch (e: Exception) {
+                    flags.clear()
+                    flags.putAll(oldFlags)
+                    throw e
+                }
             }
         }
 
