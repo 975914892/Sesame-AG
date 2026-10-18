@@ -54,6 +54,11 @@ class ReserveEntity(i: String, n: String) : MapperEntity() {
          * @param id 要删除的保留项 ID
          */
         @JvmStatic
+        fun invalidate() {
+            synchronized(ReserveEntity::class.java) { list = null }
+        }
+
+        @JvmStatic
         fun remove(id: String) {
             getList()
             synchronized(ReserveEntity::class.java) {

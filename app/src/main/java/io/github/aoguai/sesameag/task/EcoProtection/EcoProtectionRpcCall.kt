@@ -1,6 +1,8 @@
 package io.github.aoguai.sesameag.task.EcoProtection
 
 import io.github.aoguai.sesameag.hook.RequestManager.requestString
+import org.json.JSONArray
+import org.json.JSONObject
 
 object EcoProtectionRpcCall {
     private const val VERSION = "20230522"
@@ -36,6 +38,12 @@ object EcoProtectionRpcCall {
                     + "\",\"source\":\"ancientreethome\"}]")
         )
     }
+
+    fun doRubickActivity(actionCode: String, activityId: String, paramMap: JSONObject): String = requestString(
+        "com.alipay.charityactivity.rubick.rpc.h5.doRubickActivity",
+        JSONArray().put(JSONObject().put("actionCode", actionCode).put("activityId", activityId)
+            .put("paramMap", paramMap).put("source", "forest")).toString(),
+    )
 
     fun protect(activityId: String?, ancientTreeProjectId: String?, cityCode: String?): String {
         return requestString(

@@ -203,6 +203,8 @@ class AccountSettingsViewModel(
         FieldKey("AntForest", "vitalityExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY
         FieldKey("AntSesameCredit", "sesameGrainExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN
         FieldKey("GoldenBeanTreasure", "goldenBeanMallExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL
+        FieldKey("Reserve", "reserveList"),
+        FieldKey("Reserve", "certificateTargets") -> ExchangeOptionsRefreshBridge.TARGET_RESERVE
         else -> null
     }
 

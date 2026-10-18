@@ -1,6 +1,8 @@
 package io.github.aoguai.sesameag.task.reserve
 
 import io.github.aoguai.sesameag.hook.RequestManager
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * 保护地RPC调用
@@ -51,6 +53,11 @@ object ReserveRpcCall {
             "[{\"projectId\":$projectIdNum,\"sToken\":\"${System.currentTimeMillis()}\",\"version\":\"$VERSION\",\"source\":\"chInfo_ch_appcenter__chsub_9patch\"}]"
         )
     }
+
+    fun applyGoldAnimalCert(projectId: String): String = RequestManager.requestString(
+        "alipay.antforest.forest.h5.applyGoldAnimalCert",
+        JSONArray().put(JSONObject().put("projectId", projectId)).toString(),
+    )
 
     /**
      * 查询地图树苗

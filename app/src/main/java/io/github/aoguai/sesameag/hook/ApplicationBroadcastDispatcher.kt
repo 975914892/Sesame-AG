@@ -27,6 +27,7 @@ import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
 import io.github.aoguai.sesameag.task.exchange.ExchangeFetchProgress
 import io.github.aoguai.sesameag.task.goldenBean.GoldenBeanTreasure
 import io.github.aoguai.sesameag.task.myBankWelfare.MyBankWelfare
+import io.github.aoguai.sesameag.task.reserve.Reserve
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log.capture
@@ -623,6 +624,10 @@ internal object ApplicationBroadcastDispatcher {
                     ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY -> {
                         Model.getModel(AntForest::class.java)?.refreshVitalityExchangeOptionsForRemote(forceRefresh)
                             ?: error("森林模块未初始化")
+                    }
+
+                    ExchangeOptionsRefreshBridge.TARGET_RESERVE -> {
+                        Reserve.initReserve(forceRefresh)
                     }
 
                     ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL -> {
