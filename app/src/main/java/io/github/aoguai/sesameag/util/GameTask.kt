@@ -3,6 +3,7 @@ package io.github.aoguai.sesameag.util
 import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.internal.AlipayMiniMarkHelper
 import io.github.aoguai.sesameag.hook.internal.AuthCodeHelper
+import io.github.aoguai.sesameag.hook.rpc.capture.RpcTrafficCapture
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -86,8 +87,9 @@ enum class GameTask(
         }
     }
 
-    private fun login(logger: (String) -> Unit): String? =
-        try {
+    private fun login(logger: (String) -> Unit): String? {
+        var captureRequestId: String? = null
+        return try {
             val authCode = AuthCodeHelper.getAuthCode(appId)
             val mark = AlipayMiniMarkHelper.getAlipayMiniMark(appId, version)
             val requestId = "${System.currentTimeMillis()}_${(1..350).random()}"
@@ -110,10 +112,13 @@ enum class GameTask(
                     setRequestProperty("x-release-type", "ONLINE")
                 }
 
+            captureRequestId = RpcTrafficCapture.recordModuleHttpRequest(connection, body)
             OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(body) }
             val responseCode = connection.responseCode
             val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
             val responseText = stream?.bufferedReader()?.use { it.readText() } ?: "EMPTY"
+            RpcTrafficCapture.recordModuleHttpResponse(captureRequestId, connection, responseCode, responseText)
+            captureRequestId = null
             val response = JSONObject(responseText)
             if (response.optInt("code") == 1) {
                 response.optJSONObject("data")?.optString("token")?.takeIf { it.isNotBlank() }
@@ -122,9 +127,11 @@ enum class GameTask(
                 null
             }
         } catch (error: Exception) {
+            RpcTrafficCapture.recordModuleHttpError(captureRequestId, error)
             logger("登录异常: ${error.message.orEmpty()}")
             null
         }
+    }
 
     suspend fun report(eggCount: Int): Boolean = reportDetailed(eggCount).completed
 
@@ -190,8 +197,9 @@ enum class GameTask(
         current: Int,
         total: Int,
         actionFinishChannel: String,
-    ): GameTaskSingleReportResult =
-        try {
+    ): GameTaskSingleReportResult {
+        var captureRequestId: String? = null
+        return try {
             val mark = AlipayMiniMarkHelper.getAlipayMiniMark(appId, version)
             val body =
                 JSONObject()
@@ -214,10 +222,13 @@ enum class GameTask(
                     setRequestProperty("referer", "https://$appId.hybrid.alipay-eco.com/$appId/$version/index.html")
                 }
 
+            captureRequestId = RpcTrafficCapture.recordModuleHttpRequest(connection, body)
             OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(body) }
             val responseCode = connection.responseCode
             val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
             val responseText = stream?.bufferedReader()?.use { it.readText() } ?: "NULL_RESPONSE"
+            RpcTrafficCapture.recordModuleHttpResponse(captureRequestId, connection, responseCode, responseText)
+            captureRequestId = null
             val response = JSONObject(responseText)
             if (response.optInt("code") == 1) {
                 GameTaskSingleReportResult(success = true)
@@ -228,11 +239,13 @@ enum class GameTask(
                 )
             }
         } catch (error: Exception) {
+            RpcTrafficCapture.recordModuleHttpError(captureRequestId, error)
             GameTaskSingleReportResult(
                 success = false,
                 message = "第${current}/${total}次上报异常: ${error.message.orEmpty()}",
             )
         }
+    }
 
     private fun getDynamicUserAgent(): String {
         val systemUserAgent = System.getProperty("http.agent") ?: "Mozilla/5.0 (Linux; Android 11)"

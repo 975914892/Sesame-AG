@@ -13,6 +13,8 @@ import java.io.FileWriter
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
+import org.json.JSONArray
+import org.json.JSONObject
 
 object Files {
     private val TAG = Files::class.java.simpleName
@@ -229,7 +231,9 @@ object Files {
     @JvmStatic
     fun exportFile(file: File, hasTime: Boolean): File? {
         val exportFile = createExportTargetFile(file, hasTime) ?: return null
-        val sensitiveKeywords = collectLogSensitiveKeywords()
+        val sensitiveKeywords = if (LogCatalog.findByFileName(file.name)?.techKind == LogTechKind.CAPTURE) {
+            emptyList()
+        } else collectLogSensitiveKeywords()
         if (sensitiveKeywords.isEmpty()) {
             if (!copy(file, exportFile)) {
                 Log.error(TAG, "Failed to copy file: ${file.absolutePath} to ${exportFile.absolutePath}")
@@ -305,6 +309,37 @@ object Files {
     }
 
     internal fun maskSensitiveText(text: String, sensitiveKeywords: List<String>): String {
+        val capture = if (text.firstOrNull() == '{') {
+            runCatching { JSONObject(text) }.getOrNull()
+        } else null
+        if (capture?.optString("schema") == "rpc-capture") {
+            fun maskValue(value: Any?): Any? = when (value) {
+                is JSONObject -> {
+                    // 编码字节不属于文本，替换其中的字符会破坏字节长度与流偏移。
+                    if (value.optString("encoding") == "base64" &&
+                        value.opt("size") is Number && value.opt("data") is String
+                    ) {
+                        value
+                    } else {
+                        val keys = value.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            value.put(key, maskValue(value.opt(key)))
+                        }
+                        value
+                    }
+                }
+                is JSONArray -> {
+                    for (index in 0 until value.length()) {
+                        value.put(index, maskValue(value.opt(index)))
+                    }
+                    value
+                }
+                is String -> sensitiveKeywords.fold(value) { result, keyword -> result.replace(keyword, "***") }
+                else -> value
+            }
+            return maskValue(capture).toString()
+        }
         var sanitized = text
         sensitiveKeywords.forEach { keyword ->
             sanitized = sanitized.replace(keyword, "***")
