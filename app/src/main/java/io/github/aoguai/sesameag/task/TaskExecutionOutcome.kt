@@ -11,6 +11,7 @@ enum class TaskExecutionOutcome {
     FAILED,
     SKIPPED,
     CANCELLED,
+    /** 本轮尚未完成；不表示已经注册持久续接，也不代替具体失败原因。 */
     DEFERRED,
 }
 

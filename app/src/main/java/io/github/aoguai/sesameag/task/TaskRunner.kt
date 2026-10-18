@@ -48,12 +48,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * 协程任务执行器 (优化版)
- *
- * 核心改进:
- * 1. **并发执行**: 支持任务并发运行，缩短总耗时。
- * 2. **生命周期**: 绑定到调用者的生命周期，防止泄漏。
- * 3. **逻辑简化**: 移除复杂的宽限期嵌套，使用标准的协程超时机制。
+ * 统一任务调度：管理模块执行顺序、并发、超时、取消和执行结果。
+ * 具体业务进展由模块及统一任务执行流程确认；持久续接须显式注册到持久任务调度。
  */
 class CoroutineTaskRunner(allModels: List<Model>) {
 

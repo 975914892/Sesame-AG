@@ -197,7 +197,7 @@ object EnergyRainCoroutine {
                             var matchedConfiguredTarget = false
                             var retryableGrantFailure = false
 
-                            for (j in 0 until grantInfos.length()) {
+                            for (j in (0 until grantInfos.length()).shuffled()) {
                                 val grantInfo = grantInfos.getJSONObject(j)
                                 if (!grantInfo.optBoolean("canGrantedStatus", false)) {
                                     continue

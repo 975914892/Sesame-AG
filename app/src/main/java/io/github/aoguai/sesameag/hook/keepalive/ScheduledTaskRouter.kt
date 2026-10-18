@@ -12,7 +12,10 @@ import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.antDodo.AntDodo
 import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antForest.EnergyWaitingManager
+import io.github.aoguai.sesameag.task.antForest.AntForest
+import io.github.aoguai.sesameag.task.antForest.FOREST_PLANT_CHILD_KIND
 import io.github.aoguai.sesameag.task.antMember.AntMember
+import io.github.aoguai.sesameag.task.antOrchard.AntOrchard
 import io.github.aoguai.sesameag.task.antSesameCredit.AntSesameCredit
 import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.antStall.AntStall
@@ -360,6 +363,26 @@ object ScheduledTaskRouter {
                         RouteResult.FAILED
                     }
                 }
+            }
+            return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
+        }
+        if (childKind == FOREST_PLANT_CHILD_KIND) {
+            if (targetProcess) {
+                val forest = Model.getModel(AntForest::class.java) ?: return RouteResult.DEFERRED
+                if (!forest.isEnable() || forest.receiveForestTaskAward?.value != true) return RouteResult.SKIPPED
+                return if (forest.triggerPersistentPlantTask(schedule.payloadJson, schedule.id, source)) {
+                    RouteResult.HANDLED
+                } else RouteResult.FAILED
+            }
+            return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
+        }
+        if (childKind == AntOrchard.PERSISTENT_CHILD_KIND) {
+            if (targetProcess) {
+                val orchard = Model.getModel(AntOrchard::class.java) ?: return RouteResult.DEFERRED
+                if (!orchard.isEnable()) return RouteResult.SKIPPED
+                return if (orchard.triggerPersistentContinuation(schedule.payloadJson, schedule.id, source)) {
+                    RouteResult.HANDLED
+                } else RouteResult.FAILED
             }
             return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
         }

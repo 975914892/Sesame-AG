@@ -5,6 +5,12 @@ import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
 import android.util.Base64
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.ApplicationHook
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.hook.internal.SecurityBodyHelper
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.model.ModelFields
@@ -15,12 +21,14 @@ import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.IntegerModelField
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
+import io.github.aoguai.sesameag.task.TaskExecutionOutcome
 import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.GameCenterPlayRpcCall
 import io.github.aoguai.sesameag.task.common.TaskFlowAction
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
+import io.github.aoguai.sesameag.task.common.TaskFlowExecutionState
 import io.github.aoguai.sesameag.task.common.TaskFlowItem
 import io.github.aoguai.sesameag.task.common.TaskFlowPhase
 import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
@@ -37,6 +45,8 @@ import io.github.aoguai.sesameag.util.RandomUtil
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
@@ -44,6 +54,7 @@ import java.util.Calendar
 class AntOrchard : ModelTask() {
     companion object {
         private val TAG = AntOrchard::class.java.simpleName
+        internal const val PERSISTENT_CHILD_KIND = "orchard_continuation"
         private const val ENTRY_SOURCE = "ch_appcenter__chsub_9patch"
         private const val ACTION_SOURCE = "gonggexiguan"
         private const val YEB_SOURCE = "yaoqianshu_qiehuan"
@@ -160,7 +171,118 @@ class AntOrchard : ModelTask() {
         return modelFields
     }
 
-    override suspend fun runSuspend() {
+    private val continuationMutex = Mutex()
+
+    private fun orchardContinuationState(action: String, level: String = ""): TaskFlowExecutionState {
+        val owner = AccountSessionCoordinator.currentUserId().orEmpty()
+        val epoch = AccountSessionCoordinator.currentSessionEpoch()
+        val date = Calendar.getInstance()
+        val day = "${date[Calendar.YEAR]}-${date[Calendar.DAY_OF_YEAR]}"
+        val previous = PersistentScheduleRegistry.listFresh().firstOrNull {
+            it.dedupeKey == "orchard_${owner}::$action" && it.ownerUserId == owner && it.sessionEpoch == epoch
+        }?.let { JSONObject(it.payloadJson) }
+        return TaskFlowExecutionState(previous?.takeIf {
+            it.optString("day") == day && it.optString("level") == level
+        }?.optJSONObject("executionState"))
+    }
+
+    private fun scheduleOrchardContinuation(
+        action: String, triggerAtMs: Long, level: String = "", executionState: TaskFlowExecutionState? = null,
+    ): Boolean {
+        val context = ApplicationHook.appContext
+        val owner = AccountSessionCoordinator.currentUserId().orEmpty()
+        val epoch = AccountSessionCoordinator.currentSessionEpoch()
+        if (context == null || owner.isBlank() || epoch <= 0L) {
+            Log.error(TAG, "农场续接缺少应用或账号会话 action=$action")
+            return false
+        }
+        val key = "orchard_${owner}::$action"
+        val date = Calendar.getInstance()
+        val day = "${date[Calendar.YEAR]}-${date[Calendar.DAY_OF_YEAR]}"
+        date.add(Calendar.DAY_OF_YEAR, 1)
+        date.set(Calendar.HOUR_OF_DAY, 0)
+        date.set(Calendar.MINUTE, 0)
+        date.set(Calendar.SECOND, 0)
+        date.set(Calendar.MILLISECOND, 0)
+        val payload = JSONObject().put("child_kind", PERSISTENT_CHILD_KIND)
+            .put("owner_user_id", owner).put("session_epoch", epoch)
+            .put("action", action).put("day", day).put("level", level)
+            .put("executionState", executionState?.toJson())
+        val existing = PersistentScheduleRegistry.listFresh().firstOrNull {
+            it.dedupeKey == key && it.ownerUserId == owner && it.sessionEpoch == epoch &&
+                it.state in setOf(PersistentScheduleState.SCHEDULED, PersistentScheduleState.QUEUED, PersistentScheduleState.RUNNING)
+        }
+        if (existing != null) {
+            val previous = JSONObject(existing.payloadJson)
+            if (previous.optString("day") == day && previous.optString("level") == level) {
+                return PersistentScheduleRegistry.updatePayload(existing.id, owner, epoch, payload.toString())
+            }
+        }
+        val schedule = UnifiedScheduler.schedulePersistentTrigger(
+            context = context, name = "芭芭农场续接:$action", kind = PersistentScheduleKind.MODULE_CHILD,
+            triggerAtMs = triggerAtMs, dedupeKey = key, payloadJson = payload.toString(),
+            toleranceMs = (date.timeInMillis - triggerAtMs).coerceAtLeast(1L),
+            ownerUserId = owner, sessionEpoch = epoch,
+        )
+        if (schedule.state != PersistentScheduleState.SCHEDULED) {
+            Log.error(TAG, "农场续接注册失败 action=$action error=${schedule.lastError}")
+            return false
+        }
+        val triggerTime = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(triggerAtMs))
+        Log.orchard("农场已注册持久续接[$action]，预计执行时间 $triggerTime")
+        return true
+    }
+
+    internal fun triggerPersistentContinuation(payloadJson: String, scheduleId: String, source: String): Boolean {
+        val payload = JSONObject(payloadJson)
+        return executePersistentChild(
+            scheduleId = scheduleId, ownerUserId = payload.optString("owner_user_id"),
+            sessionEpoch = payload.optLong("session_epoch"), source = source, workflowMutex = continuationMutex,
+        ) {
+            val date = Calendar.getInstance()
+            if (!isEnable() || payload.optString("day") != "${date[Calendar.YEAR]}-${date[Calendar.DAY_OF_YEAR]}") {
+                return@executePersistentChild TaskExecutionOutcome.SKIPPED
+            }
+            userId = payload.optString("owner_user_id")
+            executeIntervalInt = maxOf(executeInterval.value ?: 0, 500)
+            val action = payload.optString("action")
+            if (action == "money_tree") {
+                return@executePersistentChild if (receiveMoneyTreeReward()) TaskExecutionOutcome.SUCCESS else TaskExecutionOutcome.FAILED
+            }
+            if (receiveOrchardTaskAward.value != true) return@executePersistentChild TaskExecutionOutcome.SKIPPED
+            val adapter = when (action) {
+                "daily" -> OrchardDailyTaskFlowAdapter()
+                "star" -> OrchardDailyTaskFlowAdapter(starTasks = true)
+                "camp" -> {
+                    val level = payload.optString("level")
+                    if (level.isBlank() || level == "0") return@executePersistentChild TaskExecutionOutcome.FAILED
+                    CampTakeoverTaskFlowAdapter(level)
+                }
+                else -> {
+                    Log.error(TAG, "农场续接动作无效 action=$action")
+                    return@executePersistentChild TaskExecutionOutcome.FAILED
+                }
+            }
+            // 恢复原动作快照；同一动作只回查，有新进度时仍可领奖或推进下一步。
+            val executionState = TaskFlowExecutionState(payload.optJSONObject("executionState"))
+            val result = TaskFlowEngine(adapter, roundSleepMs = executeIntervalInt.toLong(), executionState = executionState).run()
+            payload.put("executionState", executionState.toJson())
+            if (!PersistentScheduleRegistry.updatePayload(scheduleId, payload.getString("owner_user_id"),
+                    payload.getLong("session_epoch"), payload.toString())) {
+                Log.error(TAG, "农场续接状态保存失败 action=$action id=$scheduleId")
+                return@executePersistentChild TaskExecutionOutcome.FAILED
+            }
+            when {
+                result.completed -> TaskExecutionOutcome.SUCCESS
+                result.failureCount > 0 -> TaskExecutionOutcome.FAILED
+                result.interrupted -> TaskExecutionOutcome.CANCELLED
+                // 恢复的待确认动作不一定增加本轮 deferredCount，未完成仍交回后续调度。
+                else -> TaskExecutionOutcome.DEFERRED
+            }
+        }
+    }
+
+    override suspend fun runSuspend() = continuationMutex.withLock {
         try {
             Log.orchard("执行开始-${getName()}")
             skipManurePotCollectThisRound = false
@@ -561,33 +683,31 @@ class AntOrchard : ModelTask() {
             taobaoData.optJSONObject("yebScenePlantInfo")?.has("plantProgressInfo") == false
         }
 
-    // ... 其余方法保持不变 ...
-    internal fun receiveMoneyTreeReward() {
+    internal fun receiveMoneyTreeReward(): Boolean {
+        if (Status.hasFlagToday(StatusFlags.FLAG_ANTORCHARD_MONEY_TREE_COLLECTED)) return true
         try {
             val cal = Calendar.getInstance()
-            val hour = cal.get(Calendar.HOUR_OF_DAY)
-            // 每天7点后尝试领取
-            if (hour >= 7 && !Status.hasFlagToday(StatusFlags.FLAG_ANTORCHARD_MONEY_TREE_COLLECTED)) {
-                Log.orchard("检测到7点已过，尝试领取摇钱树余额奖励...")
-                val res = AntOrchardRpcCall.moneyTreeTrigger()
-                val json = JSONObject(res)
-                if (json.optBoolean("success")) {
-                    val result = json.optJSONObject("result")
-                    val awardInfo = result?.optJSONObject("awardInfo")
-                    val amount = awardInfo?.optString("totalAmount", "0") ?: "0"
-
-                    if (amount != "0") {
-                        Log.orchard("摇钱树💰[获得余额]#$amount 元")
-                    } else {
-                        Log.orchard("摇钱树暂无奖励可领")
-                    }
-                    Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_MONEY_TREE_COLLECTED)
-                } else {
-                    Log.orchard("摇钱树奖励领取失败: $json")
-                }
+            if (cal.get(Calendar.HOUR_OF_DAY) < 7) {
+                cal.set(Calendar.HOUR_OF_DAY, 7)
+                cal.set(Calendar.MINUTE, 0)
+                cal.set(Calendar.SECOND, 0)
+                cal.set(Calendar.MILLISECOND, 0)
+                scheduleOrchardContinuation("money_tree", cal.timeInMillis)
+                return false
             }
+            val json = JSONObject(AntOrchardRpcCall.moneyTreeTrigger())
+            if (!json.optBoolean("success")) {
+                Log.error(TAG, "摇钱树奖励领取失败: $json")
+                return false
+            }
+            val amount = json.optJSONObject("result")?.optJSONObject("awardInfo")?.optString("totalAmount", "0") ?: "0"
+            if (amount != "0") Log.orchard("摇钱树💰[获得余额]#$amount 元") else Log.orchard("摇钱树暂无奖励可领")
+            Status.setFlagToday(StatusFlags.FLAG_ANTORCHARD_MONEY_TREE_COLLECTED)
+            return true
         } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException || t is InterruptedException) throw t
             Log.printStackTrace(TAG, "receiveMoneyTreeReward err:", t)
+            return false
         }
     }
 
@@ -693,11 +813,24 @@ class AntOrchard : ModelTask() {
             if (userId.isNotBlank()) {
                 this.userId = userId
             }
-            TaskFlowEngine(
+            val dailyState = orchardContinuationState("daily")
+            val daily = TaskFlowEngine(
                 OrchardDailyTaskFlowAdapter(),
                 roundSleepMs = executeIntervalInt.toLong(),
+                executionState = dailyState,
             ).run()
-            TaskFlowEngine(OrchardDailyTaskFlowAdapter(starTasks = true), roundSleepMs = 0L).run()
+            if (daily.completed) {
+                PersistentScheduleRegistry.removeByDedupeKey(ApplicationHook.appContext, "orchard_${this.userId}::daily")
+            } else if (dailyState.pendingActionConfirmations.isNotEmpty()) {
+                scheduleOrchardContinuation("daily", System.currentTimeMillis() + 5_000L, executionState = dailyState)
+            }
+            val starState = orchardContinuationState("star")
+            val star = TaskFlowEngine(OrchardDailyTaskFlowAdapter(starTasks = true), roundSleepMs = 0L, executionState = starState).run()
+            if (star.completed) {
+                PersistentScheduleRegistry.removeByDedupeKey(ApplicationHook.appContext, "orchard_${this.userId}::star")
+            } else if (starState.pendingActionConfirmations.isNotEmpty()) {
+                scheduleOrchardContinuation("star", System.currentTimeMillis() + 5_000L, executionState = starState)
+            }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "doOrchardDailyTask err:", t)
         }
@@ -799,6 +932,12 @@ class AntOrchard : ModelTask() {
                     when {
                         item.actionType == "ANTFOREST_DEFOLIATION" -> TaskFlowPhase.BUSINESS_ACTION
 
+                        // 该任务要求闯关进度；没有时长合同不能用通用完成请求替代业务动作。
+                        item.id == "ORCHARD_FLRW_ZH5_FKSSJ" &&
+                            item.raw?.let(::orchardGamePlayContract) == null &&
+                            GameCenterPlayRpcCall.resolveTaskAction(item.raw).action == GameCenterPlayRpcCall.TaskAction.DEFERRED ->
+                            TaskFlowPhase.BUSINESS_ACTION
+
                         item.raw?.let(::isSupportedTaobaoVisitTask) == true -> TaskFlowPhase.READY_TO_COMPLETE
 
                         item.actionType == "SYSTEM_SWITCH" -> TaskFlowPhase.BUSINESS_ACTION
@@ -833,7 +972,7 @@ class AntOrchard : ModelTask() {
             }
             when (phase) {
                 TaskFlowPhase.BUSINESS_ACTION -> {
-                    logTaskSkipOnce(item, "action=${item.actionType} 依赖业务动作或其他模块完成，跳过")
+                    logTaskSkipOnce(item, "等待业务条件满足 action=${item.actionType}，本轮不提交完成请求")
                     return true
                 }
 
@@ -941,14 +1080,7 @@ class AntOrchard : ModelTask() {
                     task = task,
                 )
             }
-            if (starTasks && item.id == "ORCHARD_NORMAL_STAR") return completeStarTask(item)
-            if (starTasks) return TaskFlowActionResult.failure(
-                failureType = TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE,
-                message = "努力流星游戏缺少可执行的完成合同",
-                rpc = "OrchardDailyTaskFlowAdapter.complete",
-                raw = task.toString(),
-                detail = orchardActionDetail(item, "complete"),
-            )
+            if (starTasks) return completeStarTask(item)
             if (isSupportedTaobaoVisitTask(task)) {
                 return executeTaobaoVisitTask(task, item)
             }
@@ -1044,9 +1176,15 @@ class AntOrchard : ModelTask() {
             val response = JSONObject(AntOrchardRpcCall.finishTask(
                 "", item.sceneCode, item.id, "h5", outBizNo = "${item.id}_${System.currentTimeMillis()}",
             ))
-            if (!isOrchardRpcSuccessResponse(response)) return buildOrchardTaskFailureResult(
-                response, item.id, item.title, "complete", "AntOrchardRpcCall.finishTask", item,
-            )
+            if (!isOrchardRpcSuccessResponse(response)) {
+                val failure = buildOrchardTaskFailureResult(
+                    response, item.id, item.title, "complete", "AntOrchardRpcCall.finishTask", item,
+                )
+                // 当前完成接口拒绝不能证明整条游戏链路无闭环，不据此自动拉黑。
+                return if (failure.failureType == TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE) {
+                    failure.copy(failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW)
+                } else failure
+            }
             return TaskFlowActionResult.success(refreshAfterAction = true, progressChanged = false)
         }
 
@@ -1114,21 +1252,22 @@ class AntOrchard : ModelTask() {
 
         override fun isQuerySuccess(response: JSONObject): Boolean = isOrchardRpcSuccessResponse(response)
 
+        override fun isQueryComplete(response: JSONObject): Boolean =
+            response.optJSONObject("taskTriggerPlayInfo")?.optJSONArray("taskList") != null
+
         override fun extractItems(response: JSONObject): List<TaskFlowItem> {
             val tasks = response.optJSONObject("taskTriggerPlayInfo")?.optJSONArray("taskList") ?: return emptyList()
             val items = mutableListOf<TaskFlowItem>()
             for (index in 0 until tasks.length()) {
                 val task = tasks.getJSONObject(index)
-                if (task.optString("sceneCode") != LEYUAN_DAILY_TASK_SCENE_CODE ||
-                    task.optString("taskStatus") != "FINISHED"
-                ) continue
+                if (task.optString("sceneCode") != LEYUAN_DAILY_TASK_SCENE_CODE) continue
                 val taskType = task.getString("taskType")
                 require(taskType.isNotBlank()) { "农场乐园奖励缺少 taskType: $task" }
                 items.add(
                     TaskFlowItem(
                         id = taskType,
                         title = resolveLeyuanTaskTitle(task),
-                        status = "FINISHED",
+                        status = task.optString("taskStatus"),
                         type = taskType,
                         sceneCode = LEYUAN_DAILY_TASK_SCENE_CODE,
                         raw = task,
@@ -1141,7 +1280,12 @@ class AntOrchard : ModelTask() {
             return items
         }
 
-        override fun mapPhase(item: TaskFlowItem): TaskFlowPhase = TaskFlowPhase.REWARD_READY
+        override fun mapPhase(item: TaskFlowItem): TaskFlowPhase = when (item.status) {
+            "FINISHED" -> TaskFlowPhase.REWARD_READY
+            "RECEIVED", "DONE" -> TaskFlowPhase.TERMINAL
+            "TODO" -> TaskFlowPhase.BUSINESS_ACTION
+            else -> TaskFlowPhase.UNKNOWN
+        }
 
         override fun receive(item: TaskFlowItem): TaskFlowActionResult {
             val task = requireNotNull(item.raw)
@@ -2569,7 +2713,13 @@ class AntOrchard : ModelTask() {
     internal fun runCampTakeover() {
         val level = treeLevel?.takeIf { it.isNotBlank() && it != "0" } ?: return
         try {
-            TaskFlowEngine(CampTakeoverTaskFlowAdapter(level), roundSleepMs = executeIntervalInt.toLong()).run()
+            val executionState = orchardContinuationState("camp", level)
+            val result = TaskFlowEngine(CampTakeoverTaskFlowAdapter(level), roundSleepMs = executeIntervalInt.toLong(), executionState = executionState).run()
+            if (result.completed) {
+                PersistentScheduleRegistry.removeByDedupeKey(ApplicationHook.appContext, "orchard_${userId}::camp")
+            } else if (executionState.pendingActionConfirmations.isNotEmpty()) {
+                scheduleOrchardContinuation("camp", System.currentTimeMillis() + 5_000L, level, executionState)
+            }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException || t is InterruptedException) throw t
             Log.printStackTrace(TAG, "农场营地接管失败", t)
@@ -2731,7 +2881,7 @@ class AntOrchard : ModelTask() {
                 Log.orchard("未设置农场助力好友列表，跳过农场助力")
                 return
             }
-            for (uid in friendSet) {
+            for (uid in friendSet.shuffled()) {
                 if (FriendGuard.shouldSkipFriend(uid, TAG, "农场助力")) {
                     continue
                 }

@@ -15,6 +15,7 @@ import java.io.RandomAccessFile
 import java.nio.channels.FileLock
 import java.nio.channels.FileLockInterruptionException
 
+/** 持久任务调度：保存显式注册的待办及执行状态；模块返回 DEFERRED 不会自动注册待办。 */
 object PersistentScheduleRegistry {
     private const val TAG = "PersistentScheduleRegistry"
     private const val STORE_KEY = "persistentSchedules"
@@ -123,6 +124,22 @@ object PersistentScheduleRegistry {
         SystemWakeScheduler.schedule(context, effectiveSchedule, silent = true)
         Log.record(TAG, "持久调度注册失败，已恢复旧调度[${effectiveSchedule.name}]")
         return effectiveSchedule.withFailure("system_alarm_schedule_failed", now)
+    }
+
+    /** 业务续接更新进度，不改变本次调度状态或重新注册闹钟。 */
+    fun updatePayload(id: String, ownerUserId: String, sessionEpoch: Long, payloadJson: String): Boolean {
+        var updated = false
+        updateSchedule(id) { current ->
+            if (current.ownerUserId == ownerUserId && current.sessionEpoch == sessionEpoch &&
+                current.kind == PersistentScheduleKind.MODULE_CHILD
+            ) {
+                updated = true
+                current.copy(payloadJson = payloadJson, updatedAtMs = System.currentTimeMillis())
+            } else {
+                current
+            }
+        }
+        return updated
     }
 
     fun removeByDedupeKey(

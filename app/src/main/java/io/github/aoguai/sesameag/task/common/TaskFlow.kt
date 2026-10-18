@@ -45,6 +45,7 @@ enum class TaskFlowAction(
 enum class DeferredReason {
     TIME_WINDOW,
     CAPACITY_LIMIT,
+    /** 动作已受理、尚待业务状态确认；不表示时长任务或已经注册持久续接。 */
     STATE_CONFIRMATION,
     PREREQUISITE_PENDING,
     CHILD_TASK_PENDING,
@@ -190,12 +191,46 @@ private data class TaskFlowActionCandidate(
 /**
  * 动作去重状态的生命周期由调用方决定；默认每次任务流运行独立创建。
  */
-class TaskFlowExecutionState {
+class TaskFlowExecutionState(snapshot: JSONObject? = null) {
     internal val failedActionSnapshotKeys = mutableSetOf<String>()
     internal val unresolvedActionFailures = mutableMapOf<String, Pair<TaskFlowItem, TaskFlowAction>>()
     internal val deferredActionKeys = mutableSetOf<String>()
     internal val executedActionSnapshotKeys = mutableSetOf<String>()
     internal val pendingActionConfirmations = mutableMapOf<String, Pair<TaskFlowItem, TaskFlowAction>>()
+
+    init {
+        val executed = snapshot?.optJSONArray("executed")
+        for (index in 0 until (executed?.length() ?: 0)) {
+            executedActionSnapshotKeys.add(requireNotNull(executed).getString(index))
+        }
+        val pending = snapshot?.optJSONArray("pending")
+        for (index in 0 until (pending?.length() ?: 0)) {
+            val entry = requireNotNull(pending).getJSONObject(index)
+            val item = entry.getJSONObject("item")
+            pendingActionConfirmations[entry.getString("key")] = TaskFlowItem(
+                id = item.getString("id"), title = item.getString("title"), status = item.getString("status"),
+                type = item.getString("type"), sceneCode = item.getString("sceneCode"),
+                actionType = item.getString("actionType"), progress = item.getString("progress"),
+                current = if (item.isNull("current")) null else item.getInt("current"),
+                limit = if (item.isNull("limit")) null else item.getInt("limit"),
+                raw = item.optJSONObject("raw"),
+            ) to TaskFlowAction.valueOf(entry.getString("action"))
+        }
+    }
+
+    /** 续接只恢复已提交动作；失败和临时延后仍由下次服务端快照重新判断。 */
+    fun toJson(): JSONObject {
+        val pending = org.json.JSONArray()
+        for ((key, value) in pendingActionConfirmations) {
+            val (item, action) = value
+            pending.put(JSONObject().put("key", key).put("action", action.name).put("item",
+                JSONObject().put("id", item.id).put("title", item.title).put("status", item.status)
+                    .put("type", item.type).put("sceneCode", item.sceneCode).put("actionType", item.actionType)
+                    .put("progress", item.progress).put("current", item.current ?: JSONObject.NULL)
+                    .put("limit", item.limit ?: JSONObject.NULL).put("raw", item.raw)))
+        }
+        return JSONObject().put("executed", org.json.JSONArray(executedActionSnapshotKeys)).put("pending", pending)
+    }
 }
 
 interface TaskFlowAdapter {
@@ -349,6 +384,7 @@ interface TaskFlowAdapter {
         )
 }
 
+/** 统一任务执行流程：执行、领奖、刷新和确认进展；不负责注册持久任务调度。 */
 class TaskFlowEngine(
     private val adapter: TaskFlowAdapter,
     private val roundSleepMs: Long = 1000L,
@@ -512,6 +548,11 @@ class TaskFlowEngine(
                         it.sceneCode == previous.sceneCode && it.type == previous.type
                 } ?: continue
                 val phase = adapter.mapPhase(refreshed)
+                if (phase == TaskFlowPhase.BUSINESS_ACTION && action == TaskFlowAction.COMPLETE) {
+                    // 保留未完成业务状态，但不再为不可自动执行的动作续接此前提交。
+                    confirmations.remove()
+                    continue
+                }
                 val phaseConfirmed = phase != adapter.mapPhase(previous) &&
                     (phase.toAction() != null || phase == TaskFlowPhase.TERMINAL)
                 val progressConfirmed =
@@ -573,8 +614,8 @@ class TaskFlowEngine(
                     continue
                 }
                 if (actionSnapshotKey in pendingActionConfirmations) {
-                    adapter.logInfo("${adapter.flowName}[回查后状态仍待确认，保留后续调度续接：${item.title}]")
-                    roundActions.add(TaskFlowRoundAction("待续接${action.logName}", item.title))
+                    adapter.logInfo("${adapter.flowName}[本轮回查仍未确认，等待下次模块查询：${item.title}]")
+                    roundActions.add(TaskFlowRoundAction("待确认${action.logName}", item.title))
                     continue
                 }
                 if (actionSnapshotKey in executedActionSnapshotKeys) {
@@ -1024,6 +1065,8 @@ class TaskFlowEngine(
             if (action == null) {
                 if (phase == TaskFlowPhase.UNKNOWN) {
                     adapter.onUnknownPhase(item, phase)
+                } else if (phase == TaskFlowPhase.BUSINESS_ACTION) {
+                    adapter.logInfo("${adapter.flowName}[等待业务条件满足：${item.title}]")
                 }
                 continue
             }

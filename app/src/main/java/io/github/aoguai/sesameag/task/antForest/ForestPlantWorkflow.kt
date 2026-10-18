@@ -1,6 +1,23 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.data.Status
+import io.github.aoguai.sesameag.data.StatusFlags
+import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
+import io.github.aoguai.sesameag.task.common.DeferredReason
+import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
+import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
+import io.github.aoguai.sesameag.task.common.TaskFlowEngine
+import io.github.aoguai.sesameag.task.common.TaskFlowItem
+import io.github.aoguai.sesameag.task.common.TaskFlowPhase
+import io.github.aoguai.sesameag.task.common.TaskFlowRunResult
+import io.github.aoguai.sesameag.task.common.TaskFlowSnapshot
+import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -55,4 +72,122 @@ internal fun AntForest.waterMemberPlant() {
     } catch (t: Throwable) {
         Log.printStackTrace("ForestPlant", "绿植浇水处理异常", t)
     }
+}
+
+internal const val FOREST_PLANT_CHILD_KIND = "forest_plant_task"
+
+internal fun AntForest.runMemberPlantTasks(continuation: JSONObject? = null): TaskFlowRunResult {
+    return TaskFlowEngine(object : TaskFlowAdapter {
+        override val moduleName = "蚂蚁森林"
+        override val flowName = "绿植浏览任务"
+
+        override fun isFlowHandledToday() = Status.hasFlagToday(StatusFlags.FLAG_FOREST_PLANT_BROWSE_DONE)
+
+        override fun query() = JSONObject(AntForestRpcCall.queryPlantTaskList())
+
+        override fun isQuerySuccess(response: JSONObject) =
+            response.optBoolean("success") || response.optString("resultCode") == "SUCCESS"
+
+        override fun isQueryComplete(response: JSONObject) = isQuerySuccess(response) && response.has("taskList")
+
+        override fun extractItems(response: JSONObject): List<TaskFlowItem> {
+            val list = response.optJSONArray("taskList") ?: return emptyList()
+            return (0 until list.length()).mapNotNull { index ->
+                val task = list.optJSONObject(index) ?: return@mapNotNull null
+                if (task.optString("taskCode") != "GUANG_TASK") return@mapNotNull null
+                TaskFlowItem(
+                    id = "GUANG_TASK",
+                    title = task.optString("title").ifBlank { "绿植浏览" },
+                    status = if (task.optBoolean("completed")) "COMPLETED" else "TODO",
+                    raw = task,
+                )
+            }
+        }
+
+        override fun mapPhase(item: TaskFlowItem) =
+            if (item.status == "COMPLETED") TaskFlowPhase.TERMINAL else TaskFlowPhase.READY_TO_COMPLETE
+
+        override fun complete(item: TaskFlowItem): TaskFlowActionResult {
+            val context = ApplicationHook.appContext ?: return TaskFlowActionResult.failure(
+                TaskRpcFailureType.RETRYABLE_RPC, message = "绿植任务缺少应用上下文",
+            )
+            val owner = AccountSessionCoordinator.currentUserId().orEmpty()
+            val epoch = AccountSessionCoordinator.currentSessionEpoch()
+            if (owner.isBlank() || epoch <= 0L) return TaskFlowActionResult.failure(
+                TaskRpcFailureType.RETRYABLE_RPC, message = "绿植任务缺少账号会话",
+            )
+            val dedupePrefix = "forest_plant_${owner}::${item.id}::"
+            if (continuation == null) {
+                val pending = PersistentScheduleRegistry.list().firstOrNull {
+                    it.dedupeKey.startsWith(dedupePrefix) && it.ownerUserId == owner && it.sessionEpoch == epoch &&
+                        it.state in setOf(PersistentScheduleState.SCHEDULED, PersistentScheduleState.QUEUED, PersistentScheduleState.RUNNING)
+                }
+                if (pending != null) return TaskFlowActionResult.defer(
+                    DeferredReason.CHILD_TASK_PENDING, message = "绿植浏览等待到点续接", deferredUntil = pending.triggerAtMs,
+                )
+            }
+            val stage = continuation?.optString("stage") ?: "BROWSE"
+            val page = continuation?.optInt("page", 2) ?: 2
+            if (stage !in setOf("BROWSE", "AWARD") || (stage == "BROWSE" && page !in 2..3)) {
+                return TaskFlowActionResult.failure(TaskRpcFailureType.NON_RETRYABLE_INVALID, message = "绿植续接步骤无效")
+            }
+            val result = JSONObject(
+                if (stage == "AWARD") AntForestRpcCall.receivePlantTaskAward(item.id)
+                else AntForestRpcCall.queryPlantFeeds(page),
+            )
+            if (!isQuerySuccess(result)) return TaskFlowActionResult.failure(
+                TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                code = result.optString("resultCode"),
+                message = "绿植${if (stage == "AWARD") "领奖" else "浏览"}失败",
+                raw = result.toString(),
+            )
+            if (stage == "AWARD") {
+                Log.forest("绿植浏览🌱领奖响应：${result.opt("awardResult") ?: "待回查任务状态"}")
+                return TaskFlowActionResult.success()
+            }
+            val items = result.optJSONArray("itemDTOList") ?: return TaskFlowActionResult.failure(
+                TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW, message = "绿植浏览缺少商品列表", raw = result.toString(),
+            )
+            val now = System.currentTimeMillis()
+            val startedAt = continuation?.optLong("started_at", now) ?: now
+            val nextPage = page == 2 && items.length() > 0
+            val nextStage = if (nextPage) "BROWSE" else "AWARD"
+            // 已确认的页面流程为第2、3页间隔7秒，末页停留后领奖，总时长不少于35秒。
+            val readyAt = if (nextPage) now + 7_000L else maxOf(startedAt + 35_000L, now + 21_000L)
+            val payload = JSONObject()
+                .put("child_kind", FOREST_PLANT_CHILD_KIND)
+                .put("owner_user_id", owner)
+                .put("session_epoch", epoch)
+                .put("stage", nextStage)
+                .put("page", 3)
+                .put("started_at", startedAt)
+            val schedule = UnifiedScheduler.schedulePersistentTrigger(
+                context = context,
+                name = "绿植浏览:${if (nextPage) "下一页" else "领奖"}",
+                kind = PersistentScheduleKind.MODULE_CHILD,
+                triggerAtMs = readyAt,
+                dedupeKey = dedupePrefix + if (nextPage) "page3" else "award",
+                payloadJson = payload.toString(),
+                ownerUserId = owner,
+                sessionEpoch = epoch,
+            )
+            if (schedule.state != PersistentScheduleState.SCHEDULED) return TaskFlowActionResult.failure(
+                TaskRpcFailureType.RETRYABLE_RPC, message = "绿植续接注册失败：${schedule.lastError}",
+            )
+            return TaskFlowActionResult.defer(
+                DeferredReason.TIME_WINDOW, message = "绿植浏览已登记到点续接", deferredUntil = readyAt,
+            )
+        }
+
+        override fun onAllTasksDone(snapshot: TaskFlowSnapshot) {
+            if (snapshot.totalTasks > 0) {
+                Status.setFlagToday(StatusFlags.FLAG_FOREST_PLANT_BROWSE_DONE)
+                Log.forest("绿植浏览🌱服务端已确认任务完成")
+            }
+        }
+
+        override fun onQueryFailed(response: JSONObject) = Log.error("ForestPlant", "绿植任务查询失败：$response")
+        override fun logInfo(message: String) = Log.forest(message)
+        override fun logError(message: String) = Log.error("ForestPlant", message)
+    }).run()
 }

@@ -4,6 +4,7 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.TimeCounter
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONObject
+import kotlinx.coroutines.sync.withLock
 
 private val FOREST_TAG: String = AntForest::class.java.simpleName
 
@@ -130,17 +131,10 @@ internal fun AntForest.runEnergyOnlyCollectionWorkflow(tc: TimeCounter): JSONObj
     return selfHomeObj
 }
 
-internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
-    selfHomeObj: JSONObject?,
-    tc: TimeCounter,
-) {
-    if (selfHomeObj == null) {
-        return
-    }
-    var shouldRefreshForestHomeAfterEnergyRain = false
-
-    checkAndHandleWhackMole()
-    tc.countDebug("拼手速")
+// 首次处理和后续刷新共用主页收益入口，不重跑游戏、兑换等独立任务。
+private fun AntForest.collectSelfHomeRewards(selfHomeObj: JSONObject, tc: TimeCounter) {
+    collectGiftBox(selfHomeObj)
+    tc.countDebug("收取自己的礼盒")
 
     val processObj =
         if (isTeam(selfHomeObj)) {
@@ -159,15 +153,32 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
         givenProps(processObj)
         tc.countDebug("收取道具")
     }
+    collectEnergyBomb(selfHomeObj)
+    tc.countDebug("收取炸弹卡能量")
+}
+
+internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
+    selfHomeObj: JSONObject?,
+    tc: TimeCounter,
+) {
+    if (selfHomeObj == null) {
+        return
+    }
+    var shouldRefreshForestHomeAfterEnergyRain = false
+
+    checkAndHandleWhackMole()
+    tc.countDebug("拼手速")
+
+    collectSelfHomeRewards(selfHomeObj, tc)
     handleEnergyPvpChallenge()
     tc.countDebug("1V1能量挑战赛")
 
-    collectEnergyBomb(selfHomeObj)
-    tc.countDebug("收取炸弹卡能量")
-
     if (receiveForestTaskAward?.value == true) {
         receiveTaskAward()
-        waterMemberPlant()
+        plantTaskMutex.withLock {
+            waterMemberPlant()
+            runMemberPlantTasks()
+        }
         tc.countDebug("森林任务")
         handleGift7thSign(selfHomeObj)
         tc.countDebug("森林七日礼包")
@@ -244,7 +255,7 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
 
     doforestgame()
 
-    updateSelfHomePage(
+    val latestHomeObj = updateSelfHomePage(
         collectRobMultiplierEnergy = true,
         homePageSource =
             if (shouldRefreshForestHomeAfterEnergyRain) {
@@ -254,6 +265,7 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
             },
     )
     tc.countDebug("领取N倍卡能量")
+    latestHomeObj?.let { collectSelfHomeRewards(it, tc) }
 
     logForestEnergyInfo()
     tc.stop()
