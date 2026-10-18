@@ -212,6 +212,7 @@ class AntOcean : ModelTask() {
     private var PDL_task: BooleanModelField? = null
     private var aiFishEnable: BooleanModelField? = null
     private var aiFishAutoTask: BooleanModelField? = null
+    private var aiFishExchangeCertificate: BooleanModelField? = null
 
     private val loggedMessages = HashSet<String>()
 
@@ -286,7 +287,7 @@ class AntOcean : ModelTask() {
                 "海洋生态保护 | 范围",
                 ProtectType.DONT_PROTECT,
                 ProtectType.nickNames,
-            ).withDesc("选择申请保护的范围；“仅保护沙滩”只处理服务端标记为 BEACH 的项目。").also { userprotectType = it },
+            ).withDesc("选择申请保护的范围。").also { userprotectType = it },
         )
         modelFields.addField(
             SelectAndCountModelField(
@@ -294,7 +295,7 @@ class AntOcean : ModelTask() {
                 "海洋生态保护 | 列表与目标证书数",
                 LinkedHashMap(),
                 AlipayBeach::getListAsMapperEntity,
-            ).withDesc("配置项目及目标证书总数；候选以当前服务端返回的 cultivationCode 为准，旧选择需重新配置。").also { protectOceanList = it },
+            ).withDesc("配置项目及目标证书总数；候选以当前服务端返回的 cultivationCode 为准。").also { protectOceanList = it },
         )
         modelFields.addField(
             BooleanModelField("PDL_task", "潘多拉任务 | 开启", false)
@@ -313,6 +314,11 @@ class AntOcean : ModelTask() {
                 .withDesc(
                     "自动完成并领取海洋摸鱼任务，获取额外摸鱼次数。需开启“海洋摸鱼 | 开启”。",
                 ).also { aiFishAutoTask = it },
+        )
+        modelFields.addField(
+            BooleanModelField("aiFishExchangeCertificate", "海洋摸鱼 | 自动兑换科学证书", false)
+                .withDesc("开启海洋摸鱼后，兑换当前等级可领取的科学证书。")
+                .also { aiFishExchangeCertificate = it },
         )
         return modelFields
     }
@@ -853,9 +859,54 @@ class AntOcean : ModelTask() {
             }
 
             touchAiFish(homeJo)
+            if (aiFishExchangeCertificate?.value == true) {
+                exchangeAiFishCertificates()
+            }
         } catch (t: Throwable) {
             Log.runtime(TAG, "runAiFish err:")
             Log.printStackTrace(TAG, t)
+        }
+    }
+
+    private suspend fun exchangeAiFishCertificates() {
+        var previousStates: List<String>? = null
+        var exchangeResult: JSONObject? = null
+        while (!Thread.currentThread().isInterrupted) {
+            val detail = JsonUtil.parseJSONObjectOrNull(AntOceanRpcCall.queryAiFishProject())
+            if (detail == null) {
+                Log.error(TAG, "海洋摸鱼证书查询返回空")
+                return
+            }
+            if (!ResChecker.checkRes(TAG, "海洋摸鱼证书查询失败：", detail)) return
+            val phases = detail.optJSONObject("project")?.optJSONArray("phaseList")
+            if (phases == null) {
+                Log.error(TAG, "海洋摸鱼证书查询缺少阶段状态：$detail")
+                return
+            }
+            val states = (0 until phases.length()).map { phases.getJSONObject(it).getString("exchangeStatus") }
+            val previous = previousStates
+            if (previous != null) {
+                val confirmed = previous.indices.any {
+                    previous[it] == "canExchange" && states.getOrNull(it)?.let { state -> state != "canExchange" } == true
+                }
+                if (!confirmed) {
+                    Log.error(TAG, "海洋摸鱼证书兑换后的阶段状态未确认，停止继续兑换")
+                    return
+                }
+                val properties = exchangeResult?.optJSONObject("properties")
+                val name = properties?.optString("certificateName").orEmpty().ifBlank { "科学证书" }
+                Log.ocean("海洋摸鱼🐟已兑换[$name]")
+            }
+            if (states.none { it == "canExchange" }) return
+            val result = JsonUtil.parseJSONObjectOrNull(AntOceanRpcCall.exchangeAiFishProject())
+            if (result == null) {
+                Log.error(TAG, "海洋摸鱼证书兑换返回空")
+                return
+            }
+            if (!ResChecker.checkRes(TAG, "海洋摸鱼证书兑换失败：", result)) return
+            previousStates = states
+            exchangeResult = result
+            delay(500)
         }
     }
 
@@ -1941,38 +1992,50 @@ class AntOcean : ModelTask() {
     private fun fillUserFlagAndClean(
         userIds: List<String>,
         maxSuccessfulCleans: Int = Int.MAX_VALUE,
+        knownFlags: Map<String, JSONObject> = emptyMap(),
     ): Int? {
         if (userIds.isEmpty() || maxSuccessfulCleans <= 0) return 0
         if (Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)) return 0
 
+        val flagsById = knownFlags.toMutableMap()
         val ja = JSONArray()
         for (id in userIds) {
             if (id.isNotBlank() && !FriendGuard.shouldSkipFriend(id, TAG, "神奇海洋好友清理")) {
-                ja.put(id)
+                if (!flagsById.containsKey(id)) {
+                    ja.put(id)
+                }
             }
         }
-        if (ja.length() == 0) return 0
-
-        val s = AntOceanRpcCall.fillUserFlag(ja)
-        val jo = JsonUtil.parseJSONObjectOrNull(s) ?: return 0
-        if (RpcDailyCircuit.isStopResponse(jo) || RpcOfflineRisk.isHardBlocked(jo)) {
-            Log.error(TAG, "好友清理停止[rpc=alipay.antocean.ocean.h5.fillUserFlag]: $jo")
-            return null
-        }
-        if (!ResChecker.checkRes(TAG, jo)) {
-            if (isHelpCleanLimit(jo)) {
-                markHelpCleanLimit(jo)
-            } else {
-                Log.runtime(TAG, extractOceanResultDesc(jo))
+        if (ja.length() > 0) {
+            val s = AntOceanRpcCall.fillUserFlag(ja)
+            val jo = JsonUtil.parseJSONObjectOrNull(s) ?: return 0
+            if (RpcDailyCircuit.isStopResponse(jo) || RpcOfflineRisk.isHardBlocked(jo)) {
+                Log.error(TAG, "好友清理停止[rpc=alipay.antocean.ocean.h5.fillUserFlag]: $jo")
+                return null
             }
-            return 0
-        }
+            if (!ResChecker.checkRes(TAG, jo)) {
+                if (isHelpCleanLimit(jo)) {
+                    markHelpCleanLimit(jo)
+                } else {
+                    Log.runtime(TAG, extractOceanResultDesc(jo))
+                }
+                return 0
+            }
 
-        val fillFlagVOList = jo.optJSONArray("fillFlagVOList") ?: return 0
+            val fillFlagVOList = jo.optJSONArray("fillFlagVOList")
+            if (fillFlagVOList != null) {
+                for (i in 0 until fillFlagVOList.length()) {
+                    val flag = fillFlagVOList.getJSONObject(i)
+                    flagsById[flag.optString("userId")] = flag
+                }
+            }
+        }
         var successfulCleans = 0
-        for (i in 0 until fillFlagVOList.length()) {
+        // 复用首屏详情，并按随机候选顺序消费补全响应。
+        for (userId in userIds) {
             if (Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)) return successfulCleans
-            val result = cleanFriendOcean(fillFlagVOList.getJSONObject(i))
+            val flag = flagsById[userId] ?: continue
+            val result = cleanFriendOcean(flag)
             if (result.stopResponse != null) return null
             if (result.cleaned) successfulCleans++
             if (successfulCleans >= maxSuccessfulCleans) {
@@ -2006,58 +2069,44 @@ class AntOcean : ModelTask() {
                 return 0
             }
 
-            // 1) 先处理首屏 fillFlagVOList（通常为 20 个）
+            val candidateIds = linkedSetOf<String>()
+            val knownFlags = mutableMapOf<String, JSONObject>()
+            val currentUid = UserMap.currentUid
             val firstFillFlags = jo.optJSONArray("fillFlagVOList")
             if (firstFillFlags != null) {
                 for (i in 0 until firstFillFlags.length()) {
-                    val result = cleanFriendOcean(firstFillFlags.getJSONObject(i))
-                    if (result.stopResponse != null) return successfulCleans
-                    if (result.cleaned) successfulCleans++
-                    if (successfulCleans >= maxSuccessfulCleans ||
-                        Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)
-                    ) {
-                        return successfulCleans
+                    val flag = firstFillFlags.getJSONObject(i)
+                    val userId = flag.optString("userId")
+                    if (userId.isNotBlank() && userId != currentUid) {
+                        candidateIds.add(userId)
+                        knownFlags[userId] = flag
                     }
                 }
             }
 
-            // 2) 扩展处理：若首屏无可清理，继续从 allRankingList 取后续用户并通过 fillUserFlag 补全 canClean
-            val allRankingList = jo.optJSONArray("allRankingList") ?: return successfulCleans
-            val pageSize = jo.optInt("pageSize", 20).takeIf { it in 1..50 } ?: 20
-
-            var pos = pageSize
-            val idList = ArrayList<String>(pageSize)
-            val currentUid = UserMap.currentUid
-
-            while (pos < allRankingList.length() &&
-                successfulCleans < maxSuccessfulCleans &&
-                !Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)
-            ) {
-                val friend = allRankingList.optJSONObject(pos)
-                val userId = friend?.optString("userId").orEmpty()
-                if (userId.isNotBlank() && userId != currentUid) {
-                    idList.add(userId)
-                }
-
-                pos++
-                if (idList.size >= pageSize) {
-                    successfulCleans +=
-                        fillUserFlagAndClean(
-                            idList,
-                            maxSuccessfulCleans - successfulCleans,
-                        ).let { it ?: return successfulCleans }
-                    idList.clear()
+            val allRankingList = jo.optJSONArray("allRankingList")
+            if (allRankingList != null) {
+                for (pos in 0 until allRankingList.length()) {
+                    val friend = allRankingList.optJSONObject(pos)
+                    val userId = friend?.optString("userId").orEmpty()
+                    if (userId.isNotBlank() && userId != currentUid) {
+                        candidateIds.add(userId)
+                    }
                 }
             }
-
-            if (idList.isNotEmpty() &&
-                successfulCleans < maxSuccessfulCleans &&
-                !Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)
-            ) {
+            val pageSize = jo.optInt("pageSize", 20).takeIf { it in 1..50 } ?: 20
+            // 首屏与后续好友一起随机，避免有限清理次数固定消耗在首屏。
+            for (idList in candidateIds.shuffled().chunked(pageSize)) {
+                if (successfulCleans >= maxSuccessfulCleans ||
+                    Status.hasFlagToday(StatusFlags.FLAG_ANTOCEAN_HELP_CLEAN_ALL_FRIEND_LIMIT)
+                ) {
+                    break
+                }
                 successfulCleans +=
                     fillUserFlagAndClean(
                         idList,
                         maxSuccessfulCleans - successfulCleans,
+                        knownFlags,
                     ).let { it ?: return successfulCleans }
             }
         } catch (t: Throwable) {
@@ -2248,6 +2297,11 @@ class AntOcean : ModelTask() {
 
                 item.status == TaskStatus.TODO.name && isSelfCleanTask(item.type) -> {
                     TaskFlowPhase.READY_TO_COMPLETE
+                }
+
+                item.status == TaskStatus.TODO.name && item.type == "KBXY_QDRW_HAIYANG" &&
+                    GameCenterPlayRpcCall.resolveTaskAction(item.raw).action == GameCenterPlayRpcCall.TaskAction.DEFERRED -> {
+                    TaskFlowPhase.BUSINESS_ACTION
                 }
 
                 item.status == TaskStatus.TODO.name && isOceanActionTask(item.type) -> {

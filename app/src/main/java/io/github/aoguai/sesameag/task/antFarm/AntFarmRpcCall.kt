@@ -746,9 +746,8 @@ object AntFarmRpcCall {
             if (failure.code == "1009" || failure.code == "331") {
                 return failure.copy(failureType = TaskRpcFailureType.BUSINESS_LIMIT)
             }
-            // 该协议的 102 响应不能证明任务未推进，仍由所属列表确认。
-            if (failure.code != "102") return failure
-            Log.error(TAG, "场景任务待回查[$taskSceneCode/$bizKey] code=102 msg=${failure.message} raw=$raw")
+            // 保留失败语义；后续列表确认进展时由统一任务执行流程消解失败。
+            return failure
         }
         return TaskFlowActionResult.defer(
             DeferredReason.STATE_CONFIRMATION,

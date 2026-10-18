@@ -253,8 +253,14 @@ class ChouChouLe {
 
                 override fun mapPhase(item: TaskFlowItem) = when (item.status) {
                     "FINISHED" -> TaskFlowPhase.REWARD_READY
-                    "TODO" -> if ((item.limit ?: 0) <= 0 || (item.current ?: 0) < (item.limit ?: 0))
-                        TaskFlowPhase.READY_TO_COMPLETE else TaskFlowPhase.TERMINAL
+                    "TODO" -> when {
+                        // 抓包确认这两项依赖充值消费，保留领奖分支，不代替真实业务提交完成。
+                        item.id == "MYZY_pay_rcccl_fkssj" || item.id == "MYZY_pay_IPccl_fkssj" ->
+                            TaskFlowPhase.BUSINESS_ACTION
+                        (item.limit ?: 0) <= 0 || (item.current ?: 0) < (item.limit ?: 0) ->
+                            TaskFlowPhase.READY_TO_COMPLETE
+                        else -> TaskFlowPhase.TERMINAL
+                    }
                     "RECEIVED" -> TaskFlowPhase.TERMINAL
                     else -> TaskFlowPhase.UNKNOWN
                 }

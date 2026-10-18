@@ -1448,35 +1448,28 @@ modelFields.addField(
                     Log.farm("DEBUG:$ownerAnimal")
 
                     syncAnimalStatus(ownerFarmId)
-                    var guest = false
-                    when (SubAnimalType.valueOf(ownerAnimal.subAnimalType!!)) {
-                        SubAnimalType.GUEST -> {
-                            guest = true
-                            Log.farm("小鸡到好友家去做客了")
-                        }
-
+                    val subAnimalType = SubAnimalType.values().firstOrNull { it.name == ownerAnimal.subAnimalType }
+                    when (subAnimalType) {
+                        SubAnimalType.GUEST -> Log.farm("小鸡到好友家去做客了")
                         SubAnimalType.NORMAL -> Log.farm("小鸡太饿，离家出走了")
                         SubAnimalType.PIRATE -> Log.farm("小鸡外出探险了")
                         SubAnimalType.WORK -> Log.farm("小鸡出去工作啦")
+                        null -> Log.error(TAG, "小鸡外出类型未知：${ownerAnimal.subAnimalType}")
                     }
-                    var hungry = false
                     val userName =
                         UserMap.getMaskName(AntFarmRpcCall.farmId2UserId(ownerAnimal.currentFarmId))
-                    when (AnimalFeedStatus.valueOf(ownerAnimal.animalFeedStatus!!)) {
-                        AnimalFeedStatus.HUNGRY -> {
-                            hungry = true
-                            Log.farm("小鸡在[$userName]的庄园里挨饿")
-                        }
-
-                        AnimalFeedStatus.EATING -> Log.farm("小鸡在[$userName]的庄园里吃得津津有味"
-                        )
+                    val feedStatus = AnimalFeedStatus.values().firstOrNull { it.name == ownerAnimal.animalFeedStatus }
+                    when (feedStatus) {
+                        AnimalFeedStatus.HUNGRY -> Log.farm("小鸡在[$userName]的庄园里挨饿")
+                        AnimalFeedStatus.EATING -> Log.farm("小鸡在[$userName]的庄园里吃得津津有味")
                         AnimalFeedStatus.SLEEPY -> Log.farm("小鸡在[$userName]的庄园里睡觉")
                         AnimalFeedStatus.NONE -> Log.farm("小鸡在[$userName]的庄园里状态未知")
+                        null -> Log.error(TAG, "小鸡进食状态未知：${ownerAnimal.animalFeedStatus}")
                     }
                     val recall = when (recallAnimalType!!.value) {
                         RecallAnimalType.ALWAYS -> true
-                        RecallAnimalType.WHEN_THIEF -> !guest
-                        RecallAnimalType.WHEN_HUNGRY -> hungry
+                        RecallAnimalType.WHEN_THIEF -> subAnimalType != null && subAnimalType != SubAnimalType.GUEST
+                        RecallAnimalType.WHEN_HUNGRY -> feedStatus == AnimalFeedStatus.HUNGRY
                         else -> false
                     }
                     if (recall) {
@@ -1865,13 +1858,13 @@ modelFields.addField(
         val blocked = hasBlockingFarmPropStatus(itemStatusList)
         val mixedPayment = moneyPrice > 0 || outSpuId.isNotBlank()
         val safety = when {
-            blocked -> ExchangeSafety.UNAVAILABLE
             mixedPayment -> ExchangeSafety.LOG_ONLY
+            blocked -> ExchangeSafety.UNAVAILABLE
             else -> ExchangeSafety.AUTO
         }
         val safetyReason = when {
-            blocked -> statusText
             mixedPayment -> "乐园币+现金混合支付"
+            blocked -> statusText
             else -> ""
         }
         val effectTags = ExchangeEffectCatalog.tagsFor(ExchangeEffectCatalog.SOURCE_FARM_PARADISE, spuName)
@@ -2007,12 +2000,10 @@ modelFields.addField(
         if (paradiseCoinExchangeBenefit?.value != true) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
-        val selectedIds = paradiseCoinExchangeBenefitList?.value
-            ?.filterNotNull()
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.toSet()
-            ?: emptySet()
+        val selectedIds = ExchangeReplenisher.remainingSelectedIds(
+            paradiseCoinExchangeBenefitList?.value, Status.Companion::canParadiseCoinExchangeBenefitToday
+        )
+        if (selectedIds.isEmpty()) return ExchangeReplenishResult.NOT_AVAILABLE
         var queryFailure: TaskFlowActionResult? = null
         return runCatching {
             val jo = queryParadiseCoinExchangeSnapshot(onFailure = {
@@ -2054,12 +2045,8 @@ modelFields.addField(
                     continue
                 }
                 matchedSelected = true
-                if (exchangeItem.safety != ExchangeSafety.AUTO) continue
-                if (!Status.canParadiseCoinExchangeBenefitToday(spuId) ||
-                    isExchange(mallItemInfo.optJSONArray("itemStatusList") ?: JSONArray(), spuId, spuName)
-                ) {
-                    continue
-                }
+                if (exchangeItem.safety == ExchangeSafety.LOG_ONLY) continue
+                if (!Status.canParadiseCoinExchangeBenefitToday(spuId)) continue
                 val result = exchangeBenefit(spuId, onFailure)
                 if (result == ExchangeReplenishResult.EXCHANGED) {
                     exchangedCount += 1
@@ -2085,6 +2072,10 @@ modelFields.addField(
     }
 
     internal suspend fun paradiseCoinExchangeBenefit() {
+        val selectedIds = ExchangeReplenisher.remainingSelectedIds(
+            paradiseCoinExchangeBenefitList?.value, Status.Companion::canParadiseCoinExchangeBenefitToday
+        )
+        if (selectedIds.isEmpty()) return
         try {
             val jo = queryParadiseCoinExchangeSnapshot().payload
 
@@ -2095,6 +2086,7 @@ modelFields.addField(
             val mallItemSimpleList = jo.getJSONArray("mallItemSimpleList")
             for (i in 0..<mallItemSimpleList.length()) {
                 val mallItemInfo = mallItemSimpleList.getJSONObject(i)
+                if (mallItemInfo.optString("spuId") !in selectedIds) continue
                 val oderInfo: String?
                 val spuName = mallItemInfo.getString("spuName")
                 val minPrice = mallItemInfo.getInt("minPrice")
@@ -2105,18 +2097,12 @@ modelFields.addField(
                 oderInfo = exchangeItem.displayName()
                 IdMapManager.getInstance(ParadiseCoinBenefitIdMap::class.java)
                     .add(spuId, oderInfo)
-                if (exchangeItem.safety != ExchangeSafety.AUTO) {
+                if (exchangeItem.safety == ExchangeSafety.LOG_ONLY) {
                     Log.farm("乐园币兑换💸跳过[${exchangeItem.displayName()}]#${exchangeItem.safetyReason.ifBlank { exchangeItem.safety.name }}")
                     continue
                 }
-                if (!Status.canParadiseCoinExchangeBenefitToday(spuId) ||
-                    paradiseCoinExchangeBenefitList?.value?.contains(spuId) != true ||
-                    isExchange(itemStatusList ?: JSONArray(), spuId, spuName)
-                ) {
-                    continue
-                }
                 var exchangedCount = 0
-                while (!ApplicationHookConstants.isOffline() &&
+                while (!ApplicationHookConstants.isOffline() && Status.canParadiseCoinExchangeBenefitToday(spuId) &&
                     exchangeBenefit(spuId) == ExchangeReplenishResult.EXCHANGED
                 ) {
                     exchangedCount += 1
@@ -2695,7 +2681,7 @@ modelFields.addField(
             return
         }
         try {
-            for (animal in animals) {
+            for (animal in animals?.toList().orEmpty().shuffled()) {
                 if (AnimalInteractStatus.STEALING.name == animal.animalInteractStatus && (SubAnimalType.GUEST.name != animal.subAnimalType) && (SubAnimalType.WORK.name != animal.subAnimalType)) {
                     // 赶鸡
                     val userId = AntFarmRpcCall.farmId2UserId(animal.masterFarmId)
@@ -5657,10 +5643,11 @@ modelFields.addField(
             val useFamilyFeedForMembers =
                 family?.value == true && familyOptions?.value?.contains("feedFamilyAnimal") == true
             val feedFriendEntries = if (useFamilyFeedForMembers) {
-                feedFriendAnimalMap.entries.toList()
+                feedFriendAnimalMap.entries.shuffled()
             } else {
+                // 保留家庭成员优先，只随机同一优先级内的好友。
                 feedFriendAnimalMap.entries
-                    .toList()
+                    .shuffled()
                     .sortedByDescending { AntFarmFamily.isFamilyMember(it.key) }
             }
             for (entry in feedFriendEntries) {
@@ -5768,17 +5755,17 @@ modelFields.addField(
         try {
             var hasNext = false
             var pageStartSum = 0
-            var s: String?
-            var jo: JSONObject
+            val friendRankings = mutableListOf<JSONObject>()
+            // 汇总所有页后再随机，避免每页洗牌仍优先处理首页好友。
             do {
-                s = AntFarmRpcCall.rankingList(pageStartSum)
+                val s = AntFarmRpcCall.rankingList(pageStartSum)
                 // 检查空响应
                 if (s.isNullOrEmpty()) {
                     Log.farm("notifyFriend.rankingList: 收到空响应，终止通知")
                     break // 跳出do-while循环
                 }
-                jo = JSONObject(s)
-                var memo = jo.getString("memo")
+                val jo = JSONObject(s)
+                val memo = jo.getString("memo")
                 if (ResChecker.checkRes(TAG, jo)) {
                     hasNext = jo.getBoolean("hasNext")
                     val jaRankingList = jo.getJSONArray("rankingList")
@@ -5788,52 +5775,56 @@ modelFields.addField(
                     }
                     pageStartSum += jaRankingList.length()
                     for (i in 0..<jaRankingList.length()) {
-                        jo = jaRankingList.getJSONObject(i)
-                        val userId = jo.getString("userId")
-                        val userName = UserMap.getMaskName(userId)
-                        var isNotifyFriend = notifyFriendList?.contains(userId) == true
-                        if (notifyFriendType?.value == NotifyFriendType.DONT_NOTIFY) {
-                            isNotifyFriend = !isNotifyFriend
-                        }
-                        if (!isNotifyFriend || userId == UserMap.currentUid) {
-                            continue
-                        }
-                        val starve =
-                            jo.has("actionType") && "starve_action" == jo.getString("actionType")
-                        if (jo.getBoolean("stealingAnimal") && !starve) {
-                            val friendFarmJo = enterFriendFarmIfAvailable(userId, "通知赶鸡")
-                            if (friendFarmJo == null) {
-                                continue // 跳过当前好友，处理下一个
-                            }
-                            jo = friendFarmJo
-                            memo = jo.getString("memo")
-                            if (ResChecker.checkRes(TAG, jo)) {
-                                jo = jo.getJSONObject("farmVO").getJSONObject("subFarmVO")
-                                val friendFarmId = jo.getString("farmId")
-                                val jaAnimals = jo.getJSONArray("animals")
-                                var notified = notifyFriend?.value == true
-                                for (j in 0..<jaAnimals.length()) {
-                                    jo = jaAnimals.getJSONObject(j)
-                                    val animalId = jo.getString("animalId")
-                                    val masterFarmId = jo.getString("masterFarmId")
-                                    if (masterFarmId != friendFarmId && masterFarmId != ownerFarmId) {
-                                        if (notified) continue
-                                        jo = jo.getJSONObject("animalStatusVO")
-                                        notified =
-                                            notifyFriend(jo, friendFarmId, animalId, userName)
-                                    }
-                                }
-                            } else {
-                                Log.farm(memo)
-                                Log.farm(s)
-                            }
-                        }
+                        friendRankings.add(jaRankingList.getJSONObject(i))
                     }
                 } else {
                     Log.farm(memo)
                     Log.farm(s)
                 }
             } while (hasNext)
+
+            for (friend in friendRankings.shuffled()) {
+                var jo = friend
+                val userId = jo.getString("userId")
+                val userName = UserMap.getMaskName(userId)
+                var isNotifyFriend = notifyFriendList?.contains(userId) == true
+                if (notifyFriendType?.value == NotifyFriendType.DONT_NOTIFY) {
+                    isNotifyFriend = !isNotifyFriend
+                }
+                if (!isNotifyFriend || userId == UserMap.currentUid) {
+                    continue
+                }
+                val starve =
+                    jo.has("actionType") && "starve_action" == jo.getString("actionType")
+                if (jo.getBoolean("stealingAnimal") && !starve) {
+                    val friendFarmJo = enterFriendFarmIfAvailable(userId, "通知赶鸡")
+                    if (friendFarmJo == null) {
+                        continue // 跳过当前好友，处理下一个
+                    }
+                    jo = friendFarmJo
+                    val memo = jo.getString("memo")
+                    if (ResChecker.checkRes(TAG, jo)) {
+                        jo = jo.getJSONObject("farmVO").getJSONObject("subFarmVO")
+                        val friendFarmId = jo.getString("farmId")
+                        val jaAnimals = jo.getJSONArray("animals")
+                        var notified = notifyFriend?.value == true
+                        for (j in 0..<jaAnimals.length()) {
+                            jo = jaAnimals.getJSONObject(j)
+                            val animalId = jo.getString("animalId")
+                            val masterFarmId = jo.getString("masterFarmId")
+                            if (masterFarmId != friendFarmId && masterFarmId != ownerFarmId) {
+                                if (notified) continue
+                                jo = jo.getJSONObject("animalStatusVO")
+                                notified =
+                                    notifyFriend(jo, friendFarmId, animalId, userName)
+                            }
+                        }
+                    } else {
+                        Log.farm(memo)
+                        Log.farm(friendFarmJo.toString())
+                    }
+                }
+            }
             Log.farm("饲料剩余[" + foodStock + "g]")
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "notifyFriend err:",t)
@@ -6908,7 +6899,7 @@ modelFields.addField(
             val map = visitFriendList?.resolvedCountMap() ?: emptyMap()
             if (map.isEmpty()) return
             val currentUid = UserMap.currentUid
-            for (entry in map.entries.toList()) {
+            for (entry in map.entries.shuffled()) {
                 val userId = entry.key.trim()
                 val count = entry.value
                 // 跳过自己和非法数量
@@ -7357,15 +7348,15 @@ modelFields.addField(
 
             var hasNext: Boolean
             var pageStartSum = 0
-            var s: String?
-            var jo: JSONObject?
             var checkedCount = 0  // 检查过的好友数量
             var availableCount = 0  // 可雇佣状态的好友数量
             val initialAnimalCount = animalCount  // 记录初始数量
+            val friendRankings = mutableListOf<JSONObject>()
 
+            // 先汇总所有页，有限雇佣名额不再固定分配给首页好友。
             do {
-                s = AntFarmRpcCall.rankingList(pageStartSum)
-                jo = JSONObject(s)
+                val s = AntFarmRpcCall.rankingList(pageStartSum)
+                val jo = JSONObject(s)
                 val memo = jo.getString("memo")
                 if (ResChecker.checkRes(TAG, jo)) {
                     hasNext = jo.getBoolean("hasNext")
@@ -7376,46 +7367,7 @@ modelFields.addField(
                     }
                     pageStartSum += jaRankingList.length()
                     for (i in 0..<jaRankingList.length()) {
-                        val joo = jaRankingList.getJSONObject(i)
-                        val userId = joo.getString("userId")
-                        if (FriendGuard.shouldSkipFriend(userId, TAG, "雇佣小鸡")) {
-                            continue
-                        }
-                        var isHireAnimal = hireAnimalSet.contains(userId)
-                        if (hireAnimalType!!.value == HireAnimalType.DONT_HIRE) {
-                            isHireAnimal = !isHireAnimal
-                        }
-                        if (!isHireAnimal || userId == UserMap.currentUid) {
-                            continue
-                        }
-
-                        checkedCount++
-                        val actionTypeListStr = joo.optJSONArray("actionTypeList")?.toString().orEmpty()
-                        val canHire = actionTypeListStr.contains("can_hire_action") ||
-                            joo.optString("actionType") == "can_hire_action" ||
-                            joo.optBoolean("canGrabHire", false)
-                        if (canHire) {
-                            availableCount++
-                            if (hireAnimalAction(userId)) {
-                                animalCount++
-                                if (hireAnimalFoodInsufficient || foodStock < 50) {
-                                    Log.farm("雇佣小鸡👷[饲料不足，停止本轮雇佣] 当前${foodStock}g，至少需要50g")
-                                    break
-                                }
-                                if (animalCount >= 3) {
-                                    break
-                                }
-                                continue
-                            }
-                            if (hireAnimalFoodInsufficient) {
-                                break
-                            }
-                            // 检查农场是否已满
-                            if (isFarmFull) {
-                                animalCount = 3  // 标记庄园已满，避免下次循环继续尝试
-                                break  // 跳出for循环
-                            }
-                        }
+                        friendRankings.add(jaRankingList.getJSONObject(i))
                     }
                 } else {
                     Log.farm(memo)
@@ -7423,6 +7375,49 @@ modelFields.addField(
                     break
                 }
             } while (hasNext && animalCount < 3 && !hireAnimalFoodInsufficient && foodStock >= 50)
+
+            for (joo in friendRankings.shuffled()) {
+                if (animalCount >= 3 || hireAnimalFoodInsufficient || foodStock < 50) break
+                val userId = joo.getString("userId")
+                if (FriendGuard.shouldSkipFriend(userId, TAG, "雇佣小鸡")) {
+                    continue
+                }
+                var isHireAnimal = hireAnimalSet.contains(userId)
+                if (hireAnimalType!!.value == HireAnimalType.DONT_HIRE) {
+                    isHireAnimal = !isHireAnimal
+                }
+                if (!isHireAnimal || userId == UserMap.currentUid) {
+                    continue
+                }
+
+                checkedCount++
+                val actionTypeListStr = joo.optJSONArray("actionTypeList")?.toString().orEmpty()
+                val canHire = actionTypeListStr.contains("can_hire_action") ||
+                    joo.optString("actionType") == "can_hire_action" ||
+                    joo.optBoolean("canGrabHire", false)
+                if (canHire) {
+                    availableCount++
+                    if (hireAnimalAction(userId)) {
+                        animalCount++
+                        if (hireAnimalFoodInsufficient || foodStock < 50) {
+                            Log.farm("雇佣小鸡👷[饲料不足，停止本轮雇佣] 当前${foodStock}g，至少需要50g")
+                            break
+                        }
+                        if (animalCount >= 3) {
+                            break
+                        }
+                        continue
+                    }
+                    if (hireAnimalFoodInsufficient) {
+                        break
+                    }
+                    // 检查农场是否已满
+                    if (isFarmFull) {
+                        animalCount = 3  // 标记庄园已满，避免下次循环继续尝试
+                        break  // 跳出for循环
+                    }
+                }
+            }
 
             // 详细的结果报告
             val hiredCount = animalCount - initialAnimalCount
@@ -8093,7 +8088,7 @@ modelFields.addField(
                 }
                 val getFeedSet = getFeedlList?.resolvedIds() ?: emptySet()
                 if (getFeedType!!.value == GetFeedType.GIVE) {
-                    for (userId in userIdList) {
+                    for (userId in userIdList.shuffled()) {
                         if (invitesToSend <= 0) {
 //                            Log.farm("已达到最大邀请次数限制，停止发送邀请。");
                             break

@@ -145,6 +145,18 @@ object AntOceanRpcCall {
     }
 
     @JvmStatic
+    fun queryAiFishProject(): String = RequestManager.requestString(
+        "alipay.antaifish.h5.queryProjectDetail",
+        "[{\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+    )
+
+    @JvmStatic
+    fun exchangeAiFishProject(): String = RequestManager.requestString(
+        "alipay.antaifish.h5.exchangeProject",
+        "[{\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+    )
+
+    @JvmStatic
     fun aiFishListTask(): String {
         return RequestManager.requestString(
             "com.alipay.antieptask.listTaskopengreen",
