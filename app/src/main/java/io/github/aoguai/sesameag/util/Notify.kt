@@ -22,6 +22,7 @@ import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
 import io.github.aoguai.sesameag.hook.Toast
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.task.ModelTask
+import io.github.aoguai.sesameag.task.TaskExecutionReport
 import kotlin.concurrent.Volatile
 
 @SuppressLint("StaticFieldLeak")
@@ -395,6 +396,12 @@ object Notify {
      */
     @JvmStatic
     private fun render(force: Boolean) {
+        if (TaskExecutionReport.current() != null) {
+            // 通知读取当前账号状态，不继承触发刷新时可能已取消的业务执行上下文。
+            val ctx = context ?: return
+            ContextCompat.getMainExecutor(ctx).execute { render(force) }
+            return
+        }
         val builder = runningBuilder ?: return
         val manager = notificationManager ?: return
         if (!isNotificationStarted) {

@@ -16,6 +16,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -81,6 +82,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -135,6 +137,8 @@ fun LogViewerScreen(
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val isListDragged by listState.interactionSource.collectIsDraggedAsState()
+    var isScrollbarDragged by remember(filePath) { mutableStateOf(false) }
 
     // 菜单显示状态
     var showMenu by rememberSaveable(filePath) { mutableStateOf(false) }
@@ -156,7 +160,8 @@ fun LogViewerScreen(
     // 自动滚动逻辑
     LaunchedEffect(filePath, viewModel) {
         viewModel.scrollEvent.collectLatest { index ->
-            if (index >= 0 && index < viewModel.uiState.value.totalCount) {
+            val currentState = viewModel.uiState.value
+            if (currentState.autoScroll && index >= 0 && index < currentState.totalCount) {
                 try {
                     listState.scrollToItem(index)
                 } catch (_: CancellationException) {
@@ -168,13 +173,25 @@ fun LogViewerScreen(
         }
     }
 
-    // 智能自动滚动控制
-    LaunchedEffect(listState.canScrollForward, listState.isScrollInProgress) {
-        if (!state.isLoading && state.totalCount > 0) {
-            if (!listState.canScrollForward) {
-                viewModel.toggleAutoScroll(true)
-            } else if (listState.isScrollInProgress) {
-                viewModel.toggleAutoScroll(false)
+    // 只让用户拖动改变跟随状态，正文加载和程序滚动不代表用户离开底部。
+    LaunchedEffect(filePath, listState, viewModel) {
+        var userScrollInProgress = false
+        snapshotFlow {
+            Triple(
+                isListDragged || isScrollbarDragged,
+                listState.isScrollInProgress,
+                listState.canScrollForward,
+            )
+        }.collectLatest { (dragging, scrolling, canScrollForward) ->
+            val currentState = viewModel.uiState.value
+            if (!currentState.isLoading && currentState.totalCount > 0) {
+                if (dragging) {
+                    userScrollInProgress = true
+                    viewModel.toggleAutoScroll(false)
+                } else if (userScrollInProgress && !scrolling) {
+                    userScrollInProgress = false
+                    if (!canScrollForward) viewModel.toggleAutoScroll(true)
+                }
             }
         }
     }
@@ -355,17 +372,18 @@ fun LogViewerScreen(
                                         HorizontalDivider()
                                         DropdownMenuItem(
                                             text = { Text("滑动到顶部") },
-                                            onClick = { showMenu = false; scope.launch { listState.scrollToItem(0) } },
+                                            onClick = {
+                                                showMenu = false
+                                                viewModel.toggleAutoScroll(false)
+                                                scope.launch { listState.scrollToItem(0) }
+                                            },
                                             leadingIcon = { Icon(Icons.Default.VerticalAlignTop, null) }
                                         )
                                         DropdownMenuItem(
                                             text = { Text("滑动到底部") },
                                             onClick = {
                                                 showMenu = false
-                                                scope.launch {
-                                                    val lastIndex = (state.totalCount - 1).coerceAtLeast(0)
-                                                    listState.scrollToItem(lastIndex)
-                                                }
+                                                viewModel.toggleAutoScroll(true)
                                             },
                                             leadingIcon = { Icon(Icons.Default.VerticalAlignBottom, null) }
                                         )
@@ -454,11 +472,10 @@ fun LogViewerScreen(
                 }
             } else {
                 SelectionContainer {
-                    val listBottomPadding = if (!state.autoScroll && !state.isSearching) 120.dp else 24.dp
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 8.dp, end = 16.dp, top = 2.dp, bottom = listBottomPadding)
+                        contentPadding = PaddingValues(start = 8.dp, end = 16.dp, top = 2.dp, bottom = 8.dp)
                     ) {
                         items(
                             count = state.totalCount,
@@ -474,10 +491,15 @@ fun LogViewerScreen(
                         }
                     }
                 }
-                DraggableScrollbar(listState = listState, totalItems = state.totalCount, modifier = Modifier.align(Alignment.CenterEnd))
+                DraggableScrollbar(
+                    listState = listState,
+                    totalItems = state.totalCount,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    onDraggingChanged = { isScrollbarDragged = it },
+                )
             }
 
-            if (!state.autoScroll && !state.isSearching) {
+            if (!state.autoScroll && !state.isSearching && !state.isExporting && state.totalCount > 0) {
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
@@ -486,11 +508,14 @@ fun LogViewerScreen(
                 ) {
                     if (listState.canScrollBackward) {
                         SmallFloatingActionButton(
-                            onClick = { scope.launch { listState.scrollToItem(0) } },
+                            onClick = {
+                                viewModel.toggleAutoScroll(false)
+                                scope.launch { listState.scrollToItem(0) }
+                            },
                             containerColor = MaterialTheme.colorScheme.secondaryContainer,
                             contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                         ) {
-                            Icon(Icons.Default.KeyboardArrowUp, "Top")
+                            Icon(Icons.Default.KeyboardArrowUp, "回到顶部")
                         }
                         Spacer(modifier = Modifier.height(12.dp))
                     }
@@ -500,7 +525,7 @@ fun LogViewerScreen(
                             containerColor = MaterialTheme.colorScheme.primary,
                             contentColor = MaterialTheme.colorScheme.onPrimary
                         ) {
-                            Icon(Icons.Default.KeyboardArrowDown, "Bottom")
+                            Icon(Icons.Default.KeyboardArrowDown, "回到底部并跟随日志")
                         }
                     }
                 }
@@ -601,7 +626,12 @@ fun LogLineItem(line: String, searchQuery: String, fontSize: TextUnit, textColor
 }
 
 @Composable
-fun DraggableScrollbar(listState: LazyListState, totalItems: Int, modifier: Modifier = Modifier) {
+fun DraggableScrollbar(
+    listState: LazyListState,
+    totalItems: Int,
+    modifier: Modifier = Modifier,
+    onDraggingChanged: (Boolean) -> Unit = {},
+) {
     if (totalItems <= 0) return
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -645,14 +675,20 @@ fun DraggableScrollbar(listState: LazyListState, totalItems: Int, modifier: Modi
             .draggable(
                 orientation = Orientation.Vertical,
                 state = rememberDraggableState { delta ->
-                    isDragging = true
                     if (trackHeightPx > 0f) {
                         val dragRatio = delta / trackHeightPx
                         val targetIndex = (listState.firstVisibleItemIndex + (dragRatio * totalItems)).toInt().coerceIn(0, totalItems - 1)
                         coroutineScope.launch { listState.scrollToItem(targetIndex) }
                     }
                 },
-                onDragStopped = { isDragging = false }
+                onDragStarted = {
+                    isDragging = true
+                    onDraggingChanged(true)
+                },
+                onDragStopped = {
+                    isDragging = false
+                    onDraggingChanged(false)
+                }
             )
     ) {
         if (scrollbarInfo != null) {
