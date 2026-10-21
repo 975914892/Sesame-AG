@@ -587,9 +587,9 @@ object FarmGame {
                     item.id.isBlank() -> TaskFlowPhase.UNKNOWN
                     else -> when (item.status) {
                         "FINISHED" -> TaskFlowPhase.REWARD_READY
-                        "RECEIVED" -> if (item.actionType == "VIEW" && item.limit != null &&
+                        "RECEIVED" -> if (item.actionType in setOf("VIEW", "COUNT_DOWN") && item.limit != null &&
                             (item.current ?: 0) < item.limit) TaskFlowPhase.READY_TO_COMPLETE else TaskFlowPhase.TERMINAL
-                        "TODO" -> if (item.actionType == "VIEW") TaskFlowPhase.READY_TO_COMPLETE else TaskFlowPhase.BUSINESS_ACTION
+                        "TODO" -> if (item.actionType in setOf("VIEW", "COUNT_DOWN")) TaskFlowPhase.READY_TO_COMPLETE else TaskFlowPhase.BUSINESS_ACTION
                         else -> TaskFlowPhase.UNKNOWN
                     }
                 }
@@ -636,10 +636,6 @@ object FarmGame {
                         raw = response.toString(), rpc = "com.alipay.antieptask.receiveTaskAwardantfarm",
                         continueCurrentRoundOnFailure = true,
                     ).copy(refreshAfterAction = true)
-                }
-
-                override fun onQueryFailed(response: JSONObject) {
-                    Log.error(TAG, "小鸡乐园任务查询失败:$response")
                 }
 
                 override fun logInfo(message: String) = Log.farm(message)

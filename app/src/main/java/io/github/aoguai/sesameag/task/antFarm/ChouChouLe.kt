@@ -274,7 +274,6 @@ class ChouChouLe {
                 override fun receive(item: TaskFlowItem): TaskFlowActionResult =
                     receiveTaskAward(drawType, currentTasks.getValue(item.id))
 
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "$flowName 查询失败:$response")
                 override fun logInfo(message: String) = Log.farm(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }, roundSleepMs = 300L).run().completed

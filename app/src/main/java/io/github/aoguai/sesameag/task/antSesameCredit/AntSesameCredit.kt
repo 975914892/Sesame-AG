@@ -458,24 +458,35 @@ class AntSesameCredit : ModelTask() {
                     }
                 }
             } else {
-                val raw = AntSesameCreditRpcCall.queryLastOperateTask(payload.optString("version"))
-                val response = JSONObject(raw)
-                if (!ResChecker.checkRes(TAG, response)) {
-                    queryFailed = true
-                    Log.error(TAG, "芝麻生活记录回查失败 record=${payload.optString("recordId")} raw=$raw")
-                } else {
-                    val task = response.optJSONObject("data")?.optJSONObject("lastOperateTaskVO")
-                    confirmed = task != null && task.optString("templateId") == payload.optString("templateId") &&
-                        task.optString("recordId") == payload.optString("recordId") && task.optBoolean("finishFlag")
-                    if (confirmed) {
-                        UserDataStoreManager.getInstance(payload.optString("owner_user_id"))
-                            ?.remove("sesame_user_growth_pending:${payload.optString("recordId")}")
-                        Log.sesame("芝麻生活记录[已回查确认完成] record=${payload.optString("recordId")}")
+                val result = confirmSesameLifeRecord(
+                    version = payload.optString("version"),
+                    templateId = payload.optString("templateId"),
+                    recordId = payload.optString("recordId"),
+                )
+                confirmed = result.success
+                queryFailed = result.failureType != null
+                if (queryFailed) {
+                    Log.error(TAG, "芝麻生活记录回查失败 record=${payload.optString("recordId")} rpc=${result.rpc} code=${result.code} message=${result.message} raw=${result.raw}")
+                }
+            }
+            if (!queryFailed && (collectSesame?.value == true || sesameAlchemy?.value == true)) {
+                if (confirmed && !payload.optBoolean("pigeon")) {
+                    Status.removeFlag(StatusFlags.FLAG_SESAME_COLLECT_DONE)
+                }
+                collectSesame(collectSesameWithOneClick?.value == true || sesameAlchemy?.value == true)
+                if (confirmed && !payload.optBoolean("pigeon")) {
+                    val rewards = queryExplicitUnclaimedSesameFeedbackItems("芝麻生活记录[奖励回查]")
+                    queryFailed = rewards == null
+                    confirmed = rewards?.isEmpty() == true
+                    if (rewards?.isNotEmpty() == true) {
+                        Log.sesame("芝麻生活记录[任务已完成，奖励仍待确认] record=${payload.optString("recordId")}")
                     }
                 }
             }
-            if (collectSesame?.value == true || sesameAlchemy?.value == true) {
-                collectSesame(collectSesameWithOneClick?.value == true || sesameAlchemy?.value == true)
+            if (confirmed && !payload.optBoolean("pigeon")) {
+                UserDataStoreManager.getInstance(payload.optString("owner_user_id"))
+                    ?.remove("sesame_user_growth_pending:${payload.optString("recordId")}")
+                Log.sesame("芝麻生活记录[已回查确认完成] record=${payload.optString("recordId")}")
             }
             needsConfirmation = !confirmed
             when {
@@ -741,7 +752,6 @@ class AntSesameCredit : ModelTask() {
                     message = "锦囊接取已受理，等待进入进行中状态", refreshAfterAction = true,
                 )
             }
-            override fun onQueryFailed(response: JSONObject) = logError("成长锦囊查询失败 raw=$response")
             override fun logInfo(message: String) = Log.sesame(message)
             override fun logError(message: String) = Log.error(TAG, message)
         }).run()
@@ -834,7 +844,6 @@ class AntSesameCredit : ModelTask() {
                             message = "成就领取已受理，回查目标等级及领取时间", refreshAfterAction = true,
                         )
                     }
-                    override fun onQueryFailed(response: JSONObject) = logError("成就馆查询失败 raw=$response")
                     override fun logInfo(message: String) = Log.sesame(message)
                     override fun logError(message: String) = Log.error(TAG, message)
                 }, executionState = executionState).run()
@@ -910,7 +919,6 @@ class AntSesameCredit : ModelTask() {
                         deferredReason = DeferredReason.STATE_CONFIRMATION, message = "特权激活已受理，回查激活状态", refreshAfterAction = true,
                     )
                 }
-                override fun onQueryFailed(response: JSONObject) = logError("信用特权查询失败 raw=$response")
                 override fun logInfo(message: String) = Log.sesame(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }).run()
@@ -1364,7 +1372,7 @@ class AntSesameCredit : ModelTask() {
             interrupted = isSesameTaskFlowInterrupted(response)
             Log.error(
                 "$TAG.doAllAvailableSesameTask.queryAvailableSesameTask",
-                "芝麻信用💳[查询任务响应失败]#${response.optString("_raw", response.toString())}",
+                "$flowName[任务查询失败] raw=${response.optString("_raw", response.toString())}",
             )
         }
 
@@ -3029,7 +3037,7 @@ class AntSesameCredit : ModelTask() {
 
         override fun onQueryFailed(response: JSONObject) {
             interrupted = isSesameTaskFlowInterrupted(response)
-            Log.error(TAG, "芝麻炼金⚗️[查询任务响应失败]#${response.optString("_raw", response.toString())}")
+            Log.error(TAG, "$flowName[任务查询失败] raw=${response.optString("_raw", response.toString())}")
         }
 
         override fun onUnknownPhase(
@@ -3145,7 +3153,7 @@ class AntSesameCredit : ModelTask() {
                 )
             }
             if (antFarm.hasPendingZhimaPigeonRewardReceipt()) {
-                antFarm.runZhimaPigeonTaskFlow()
+                antFarm.runNpcTaskFlow()
                 scheduleSesameConfirmation(JSONObject().put("pigeon", true))
                 return TaskFlowActionResult.defer(
                     DeferredReason.STATE_CONFIRMATION,
@@ -3829,7 +3837,7 @@ class AntSesameCredit : ModelTask() {
         override fun onQueryFailed(response: JSONObject) {
             Log.error(
                 TAG,
-                "芝麻树🌳[查询任务失败] home=${response.optString("homeRaw")} rent=${response.optString("rentRaw")} " +
+                "$flowName[任务查询失败] home=${response.optString("homeRaw")} rent=${response.optString("rentRaw")} " +
                     "homeError=${response.opt("homeError")} rentError=${response.opt("rentError")} " +
                     "homeException=${response.optString("homeException")} rentException=${response.optString("rentException")}",
             )
@@ -6000,6 +6008,83 @@ class AntSesameCredit : ModelTask() {
         return !explicitCompletion && !terminalStatus
     }
 
+    private fun confirmSesameLifeRecord(
+        version: String,
+        templateId: String,
+        recordId: String,
+    ): TaskFlowActionResult {
+        val detail = "templateId=$templateId recordId=$recordId version=$version"
+        for (queryLast in listOf(true, false)) {
+            val rpc = when {
+                queryLast -> "AntSesameCreditRpcCall.queryLastOperateTask"
+                version == "alchemy" -> "AntSesameCreditRpcCall.Zmxy.Alchemy.alchemyQueryListV3"
+                else -> "AntSesameCreditRpcCall.queryAvailableSesameTask"
+            }
+            val raw = when {
+                queryLast -> AntSesameCreditRpcCall.queryLastOperateTask(version)
+                version == "alchemy" -> AntSesameCreditRpcCall.Zmxy.Alchemy.alchemyQueryListV3()
+                else -> AntSesameCreditRpcCall.queryAvailableSesameTask()
+            }
+            val root = parseJSONObjectOrNull(raw)
+                ?: return TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                    code = "RESPONSE_PARSE_ERROR",
+                    message = "生活记录回查响应无法解析",
+                    rpc = rpc,
+                    raw = raw,
+                    detail = detail,
+                )
+            val response = root.optJSONObject("resData") ?: root
+            if (!ResChecker.checkRes(TAG, response)) {
+                val code = response.optString("errorCode", response.optString("resultCode", ""))
+                val failureType = classifySesameTaskFailure(code, response)
+                return TaskFlowActionResult.failure(
+                    failureType = failureType,
+                    code = code,
+                    message = buildSesameRpcMessage(response, raw),
+                    rpc = rpc,
+                    raw = raw,
+                    detail = detail,
+                    stopCurrentRound = isSesameTaskFlowInterrupted(response),
+                    continueCurrentRoundOnFailure = failureType == TaskRpcFailureType.RETRYABLE_RPC ||
+                        failureType == TaskRpcFailureType.BUSINESS_LIMIT,
+                )
+            }
+            val data = response.optJSONObject("data")
+                ?: return TaskFlowActionResult.failure(
+                    failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                    code = "QUERY_DATA_EMPTY",
+                    message = "生活记录回查缺少任务数据",
+                    rpc = rpc,
+                    raw = raw,
+                    detail = detail,
+                )
+            val tasks = if (queryLast) {
+                listOfNotNull(data.optJSONObject("lastOperateTaskVO"))
+            } else {
+                val dailyTasks = data.optJSONObject("dailyTaskListVO")
+                listOfNotNull(
+                    dailyTasks?.optJSONArray("waitCompleteTaskVOS"),
+                    dailyTasks?.optJSONArray("waitJoinTaskVOS"),
+                    data.optJSONArray("toCompleteVOS"),
+                ).flatMap { tasks ->
+                    (0 until tasks.length()).mapNotNull { tasks.optJSONObject(it) }
+                }
+            }
+            if (tasks.any {
+                    it.optString("templateId") == templateId && it.optString("recordId") == recordId &&
+                        it.optBoolean("finishFlag", false)
+                }) {
+                return TaskFlowActionResult.success(refreshAfterAction = true)
+            }
+        }
+        return TaskFlowActionResult.defer(
+            deferredReason = DeferredReason.STATE_CONFIRMATION,
+            message = "同一生活记录尚未确认完成",
+            detail = detail,
+        )
+    }
+
     private fun completeSesameLifeRecord(
         task: JSONObject,
         taskTitle: String,
@@ -6078,8 +6163,9 @@ class AntSesameCredit : ModelTask() {
             )
         }
 
-        val pendingStore = UserMap.currentUid?.let { UserDataStoreManager.getInstance(it) }
+        val pendingStore = AccountSessionCoordinator.currentUserId()?.let { UserDataStoreManager.getInstance(it) }
         val pendingKey = "sesame_user_growth_pending:$recordId"
+        val userGrowth = extractQueryParam(task.optString("actionUrl"), "jumpAction") == "userGrowth"
         val feedbackResult =
             if (pendingStore?.get(pendingKey, Boolean::class.java) == true) TaskFlowActionResult.success()
             else reportSesameTaskFeedbackResult(
@@ -6094,59 +6180,38 @@ class AntSesameCredit : ModelTask() {
         if (!feedbackResult.success && feedbackResult.failureType != TaskRpcFailureType.TERMINAL_DONE) {
             return feedbackResult
         }
-
-        val confirmationRes = AntSesameCreditRpcCall.queryLastOperateTask(spec.version)
-        val confirmationJo = parseJSONObjectOrNull(confirmationRes)
-            ?: return TaskFlowActionResult.failure(
-                failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
-                code = "RESPONSE_PARSE_ERROR",
-                message = "生活记录回查响应无法解析",
-                rpc = "AntSesameCreditRpcCall.queryLastOperateTask",
-                raw = confirmationRes,
-                detail = "$actionDetail templateId=$templateId recordId=$recordId",
-            )
-        if (!ResChecker.checkRes(TAG, confirmationJo)) {
-            val code = confirmationJo.optString("errorCode", confirmationJo.optString("resultCode", ""))
-            val failureType = classifySesameTaskFailure(code, confirmationJo)
-            return TaskFlowActionResult.failure(
-                failureType = failureType,
-                code = code,
-                message = buildSesameRpcMessage(confirmationJo, confirmationRes),
-                rpc = "AntSesameCreditRpcCall.queryLastOperateTask",
-                raw = confirmationRes,
-                detail = "$actionDetail templateId=$templateId recordId=$recordId",
-                stopCurrentRound = isSesameTaskFlowInterrupted(confirmationJo),
-                continueCurrentRoundOnFailure = failureType == TaskRpcFailureType.RETRYABLE_RPC ||
-                    failureType == TaskRpcFailureType.BUSINESS_LIMIT,
+        if (userGrowth) {
+            pendingStore?.put(pendingKey, true)
+            scheduleSesameConfirmation(
+                JSONObject().put("templateId", templateId).put("recordId", recordId).put("version", spec.version),
             )
         }
-        val lastTask = confirmationJo.optJSONObject("data")?.optJSONObject("lastOperateTaskVO")
-        if (lastTask != null && lastTask.optString("templateId") == templateId &&
-            lastTask.optString("recordId") == recordId && lastTask.optBoolean("finishFlag", false)
-        ) {
-            pendingStore?.remove(pendingKey)
+
+        val confirmation = confirmSesameLifeRecord(spec.version, templateId, recordId)
+        if (confirmation.failureType != null) {
+            return confirmation.copy(detail = "$actionDetail ${confirmation.detail}")
+        }
+        if (confirmation.success) {
+            if (!userGrowth) {
+                pendingStore?.remove(pendingKey)
+            }
             spec.joinedRecordIds?.remove(templateId)
             Log.sesame("${spec.logPrefix}[生活记录回查确认完成]#$taskTitle templateId=$templateId recordId=$recordId")
-            return TaskFlowActionResult.success(refreshAfterAction = true)
+            return confirmation
+        }
+        // userGrowth 的业务完成由外部应用确认，普通生活记录推送不能替代。
+        if (userGrowth) {
+            Log.sesame("${spec.logPrefix}[外跳业务尚未确认完成，保留记录回查]#$taskTitle templateId=$templateId recordId=$recordId")
+            return confirmation.copy(
+                message = "外跳业务自动执行尚未接通，保留记录回查",
+                detail = "$actionDetail ${confirmation.detail} jumpAction=userGrowth confirmationState=PENDING",
+                refreshAfterAction = true,
+            )
         }
         if (feedbackResult.failureType == TaskRpcFailureType.TERMINAL_DONE) {
             return feedbackResult.copy(
                 failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
                 message = "任务回调返回终态，但同一生活记录尚未回查确认：${feedbackResult.message}",
-                refreshAfterAction = true,
-            )
-        }
-
-        // userGrowth 外跳任务由业务侧确认完成，不能用普通生活记录推送代替。
-        if (extractQueryParam(task.optString("actionUrl"), "jumpAction") == "userGrowth") {
-            pendingStore?.put(pendingKey, true)
-            scheduleSesameConfirmation(JSONObject().put("templateId", templateId).put("recordId", recordId).put("version", spec.version))
-            return TaskFlowActionResult.defer(
-                deferredReason = DeferredReason.PREREQUISITE_PENDING,
-                message = "外跳业务尚未确认完成，保留任务并等待回查",
-                rpc = "AntSesameCreditRpcCall.queryLastOperateTask",
-                raw = confirmationRes,
-                detail = "$actionDetail jumpAction=userGrowth confirmationState=PENDING",
                 refreshAfterAction = true,
             )
         }

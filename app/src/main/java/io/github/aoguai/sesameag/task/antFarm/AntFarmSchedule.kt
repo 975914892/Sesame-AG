@@ -93,8 +93,7 @@ internal fun AntFarm.scheduleFarmPendingWork() {
             "exchange" -> enableChouchoule?.value != true || autoExchange?.value != true
             "rankAwards" -> donationCompetition?.value != true
             "loveChicken" -> loveChickenGathering?.value != true
-            "zhimaPigeon" -> !isZhimaPigeonConfigured()
-            "awards" -> false
+            "zhimaPigeon", "awards" -> false
             else -> true
         }
     }
@@ -121,7 +120,10 @@ internal suspend fun AntFarm.runDueFarmWork() {
                 runFarmPriorityDonations()
                 runLoveChickenGatheringWorkflow()
             }
-            "zhimaPigeon" -> if (isZhimaPigeonConfigured()) runZhimaPigeonTaskFlow()
+            "zhimaPigeon" -> {
+                if (isZhimaPigeonConfigured()) handleNpcAnimalLogic()
+                runNpcTaskFlow()
+            }
             "awards" -> receiveFarmAwards()
             "draw" -> if (enableChouchoule?.value == true) ChouChouLe().run(this)
             "exchange" -> if (enableChouchoule?.value == true && autoExchange?.value == true) ChouChouLe().run(this)

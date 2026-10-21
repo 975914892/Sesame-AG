@@ -1174,32 +1174,43 @@ object AntFarmRpcCall {
         return requestString("com.alipay.antfarm.sendBackAnimal", "[$args]")
     }
 
-    /**
-     * 获取芝麻NPC任务列表
-     */
     @JvmStatic
-    fun listZhimaNpcFarmTask(): String {
-        val args =
-            "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"zhimaxiaoji_lianjin\",\"taskSceneCode\":\"ANTFARM_ZHIMA_NPC_TASK\",\"version\":\"$VERSION\"}]"
-        return requestString("com.alipay.antfarm.listFarmTask", args)
-    }
+    fun npcVisitAnimal(): String = requestString(
+        "com.alipay.antfarm.npcVisitAnimal",
+        JSONArray().put(JSONObject().put("requestType", "NORMAL").put("sceneCode", "ANTFARM")
+            .put("source", "H5").put("version", VERSION)).toString(),
+    )
 
-    /**
-     * 领取芝麻NPC任务奖励
-     */
     @JvmStatic
-    fun receiveZhimaNpcFarmTaskAward(
+    fun npcVisitAnimalReport(animalId: String, actionType: String): String = requestString(
+        "com.alipay.antfarm.npcVisitAnimalReport",
+        JSONArray().put(JSONObject().put("animalId", animalId).put("actionType", actionType)
+            .put("reportTime", System.currentTimeMillis()).put("requestType", "NORMAL")
+            .put("sceneCode", "ANTFARM").put("source", "H5").put("version", VERSION)).toString(),
+    )
+
+    @JvmStatic
+    fun listNpcFarmTask(source: String, taskSceneCode: String): String = requestString(
+        "com.alipay.antfarm.listFarmTask",
+        JSONArray().put(JSONObject().put("requestType", "NORMAL").put("sceneCode", "ANTFARM")
+            .put("source", source).put("taskSceneCode", taskSceneCode).put("version", VERSION)).toString(),
+    )
+
+    @JvmStatic
+    fun receiveNpcFarmTaskAward(
         taskId: String,
         awardType: String,
+        source: String,
+        taskSceneCode: String,
     ): String {
         val args =
             JSONObject().apply {
                 put("awardType", awardType)
                 put("requestType", "NORMAL")
                 put("sceneCode", "ANTFARM")
-                put("source", "zhimaxiaoji_lianjin")
+                put("source", source)
                 put("taskId", taskId)
-                put("taskSceneCode", "ANTFARM_ZHIMA_NPC_TASK")
+                put("taskSceneCode", taskSceneCode)
                 put("version", VERSION)
             }
         return requestString("com.alipay.antfarm.receiveFarmTaskAward", JSONArray().put(args).toString())
