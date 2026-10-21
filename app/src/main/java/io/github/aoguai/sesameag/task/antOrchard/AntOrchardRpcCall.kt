@@ -468,14 +468,51 @@ object AntOrchardRpcCall {
         )
     }
 
-    fun noticeGame(appId: String): String {
+    fun orchardIndexFeeds(): String = RequestManager.requestString(
+        "com.alipay.antorchard.indexFeeds",
+        JSONArray().put(JSONObject().put("pageNum", 1).put("requestType", "NORMAL")
+            .put("sceneCode", "ORCHARD").put("source", ENTRY_SOURCE).put("version", VERSION)
+            .put("filterItemList", JSONArray()
+                .put(JSONObject().put("itemType", "qianyi").put("itemIdList", JSONArray()))
+                .put(JSONObject().put("itemType", "game").put("itemIdList", JSONArray())))).toString(),
+    )
+
+    fun orchardIndexDelivery(): String = RequestManager.requestString(
+        "com.alipay.antorchard.orchardIndexDelivery",
+        JSONArray().put(JSONObject().put("requestType", "NORMAL").put("sceneCode", "ORCHARD")
+            .put("source", ENTRY_SOURCE).put("version", VERSION)).toString(),
+    )
+
+    fun enterHomeGame(appId: String): String = RequestManager.requestString(
+        "com.alipay.gamecenteruprod.biz.rpc.v3.submitUserAction",
+        JSONArray().put(JSONObject().put("actionCode", "enterGame").put("gameId", appId)
+            .put("source", "gameFramework")).toString(),
+    )
+
+    fun reportHomeGameEvent(appId: String, eventId: String, eventKey: String, elapsedMs: Long = 0): String {
+        val attributes = JSONObject().put("CH_INFO", "lianyun_nc_sydb")
+            .put("PLAY_SCENE", "NORMAL").put("SCENE_ID", "nongchangleyuan")
+        if (eventId == "GAME_FIRST_FRAME") attributes.put("ALIVE_ENTER", "0")
+        // 此键保留支付宝客户端的协议拼写，已由实际 submitEvent 请求及成功响应确认。
+        if (elapsedMs > 0) attributes.put("GAME_ELAPASED_TIME", elapsedMs)
+        val source = when (eventId) {
+            "GAME_FIRST_FRAME" -> "paladinx_auto"
+            "loading_completed" -> "my.reportLoadingCompleted"
+            else -> "my.reportGamePlay"
+        }
+        return RequestManager.requestString("com.alipay.gameevent.biz.rpc.submitEvent",
+            JSONArray().put(JSONObject().put("appId", appId).put("eventId", eventId)
+                .put("eventAttrMap", attributes).put("idempotentNo", eventKey).put("source", source)).toString())
+    }
+
+    fun noticeGame(appId: String, source: String = ACTION_SOURCE): String {
         val jsonArgs =
             """
              [{
                 "appId": "$appId",
                 "requestType": "NORMAL",
                 "sceneCode": "ORCHARD",
-                "source": "$ACTION_SOURCE",
+                "source": "$source",
                 "version": "$VERSION"
             }]
             """.trimIndent()

@@ -371,16 +371,11 @@ internal object MonopolyPatrolWorkflow {
         override fun mapPhase(item: TaskFlowItem): TaskFlowPhase = when (item.status) {
             "FINISHED" -> TaskFlowPhase.REWARD_READY
             "RECEIVED" -> TaskFlowPhase.TERMINAL
-            "TODO" -> if (item.raw?.optJSONObject("taskBaseInfo")?.optString("taskMode") == "NORMAL" &&
-                item.actionType == "VISIT_FLOAT_BALL") TaskFlowPhase.READY_TO_COMPLETE else TaskFlowPhase.BUSINESS_ACTION
+            "TODO" -> TaskFlowPhase.READY_TO_COMPLETE
             else -> TaskFlowPhase.UNKNOWN
         }
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
-            val base = requireNotNull(item.raw).getJSONObject("taskBaseInfo")
-            val seconds = JSONObject(base.getString("prodPlayParam")).getLong("timeCount")
-            require(seconds > 0 && seconds <= Long.MAX_VALUE / 1000) { "巡护浏览时长无效:$base" }
-            GlobalThreadPools.sleepCompat(seconds * 1000)
             if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) {
                 return TaskFlowActionResult.failure(TaskRpcFailureType.RETRYABLE_RPC, message = "巡护已中断", stopCurrentRound = true)
             }
@@ -410,7 +405,6 @@ internal object MonopolyPatrolWorkflow {
 
         override fun actionKey(item: TaskFlowItem, action: TaskFlowAction): String =
             "${action.logName}:${item.sceneCode}:${item.id}:${item.status}:${item.progress}"
-        override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "巡护任务查询失败或缺少任务列表:$response")
         override fun logInfo(message: String) = Log.forestPatrol(message)
         override fun logError(message: String) = Log.error(TAG, message)
     }

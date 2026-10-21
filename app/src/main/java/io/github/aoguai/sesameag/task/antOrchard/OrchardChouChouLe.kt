@@ -31,7 +31,9 @@ internal fun AntOrchard.runOrchardChouChouLe(userId: String) {
         if (!adapter.isActivityActive() && !adapter.shouldProbeNewRound()) return
         val entry = JSONObject(AntOrchardRpcCall.enterDrawActivity())
         adapter.recordActivityResponse(entry)
-        if (!ResChecker.checkRes(TAG, entry)) {
+        val entrySuccess = if (entry.has("success")) entry.optBoolean("success")
+            else entry.optString("code") == "100000000" || ResChecker.checkRes(TAG, entry)
+        if (!entrySuccess) {
             Log.error(TAG, "农场抽抽乐活动查询失败 raw=$entry")
             return
         }
@@ -193,7 +195,10 @@ private class OrchardDrawTaskFlowAdapter(
         when (item.status) {
             "FINISHED" -> TaskFlowPhase.REWARD_READY
             "TODO" -> when {
-                item.actionType == "VISIT_FLOAT_BALL" -> TaskFlowPhase.READY_TO_COMPLETE
+                item.actionType == "VISIT_FLOAT_BALL" ||
+                    (item.actionType == "CALL_APP_OUT_TASK" &&
+                        item.raw?.optJSONObject("taskBaseInfo")?.optString("taskMode") == "NORMAL") ->
+                    TaskFlowPhase.READY_TO_COMPLETE
                 item.limit != null && item.current != null && item.current < item.limit ->
                     TaskFlowPhase.BUSINESS_ACTION
 
@@ -204,13 +209,6 @@ private class OrchardDrawTaskFlowAdapter(
         }
 
     override fun complete(item: TaskFlowItem): TaskFlowActionResult {
-        val base = requireNotNull(item.raw).getJSONObject("taskBaseInfo")
-        if (item.actionType == "VISIT_FLOAT_BALL") {
-            val playParam = JSONObject(base.getString("prodPlayParam"))
-            val seconds = playParam.getLong("timeCount")
-            require(seconds > 0 && seconds <= Long.MAX_VALUE / 1000) { "农场抽抽乐浏览时长无效: $playParam" }
-            CoroutineUtils.sleepCompat(seconds * 1000)
-        }
         if (!isActivityActive()) return TaskFlowActionResult.failure(
             failureType = TaskRpcFailureType.NON_RETRYABLE_INVALID,
             message = "农场抽抽乐活动已停止",
@@ -255,10 +253,6 @@ private class OrchardDrawTaskFlowAdapter(
 
     override fun actionKey(item: TaskFlowItem, action: TaskFlowAction): String =
         "${action.logName}:${item.sceneCode}:${item.id}:${item.status}:${item.progress}"
-
-    override fun onQueryFailed(response: JSONObject) {
-        Log.error(TAG, "农场抽抽乐任务查询失败或缺少 taskInfoList raw=$response")
-    }
 
     override fun logInfo(message: String) = Log.orchard(message)
 
