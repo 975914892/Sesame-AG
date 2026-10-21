@@ -186,7 +186,6 @@ internal fun AntForest.runMemberPlantTasks(continuation: JSONObject? = null): Ta
             }
         }
 
-        override fun onQueryFailed(response: JSONObject) = Log.error("ForestPlant", "绿植任务查询失败：$response")
         override fun logInfo(message: String) = Log.forest(message)
         override fun logError(message: String) = Log.error("ForestPlant", message)
     }).run()

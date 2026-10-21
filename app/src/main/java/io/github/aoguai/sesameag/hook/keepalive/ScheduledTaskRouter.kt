@@ -14,6 +14,7 @@ import io.github.aoguai.sesameag.task.antFarm.AntFarm
 import io.github.aoguai.sesameag.task.antForest.EnergyWaitingManager
 import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.task.antForest.FOREST_PLANT_CHILD_KIND
+import io.github.aoguai.sesameag.task.antForest.FOREST_READ_CHILD_KIND
 import io.github.aoguai.sesameag.task.antMember.AntMember
 import io.github.aoguai.sesameag.task.antOrchard.AntOrchard
 import io.github.aoguai.sesameag.task.antSesameCredit.AntSesameCredit
@@ -363,6 +364,16 @@ object ScheduledTaskRouter {
                         RouteResult.FAILED
                     }
                 }
+            }
+            return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
+        }
+        if (childKind == FOREST_READ_CHILD_KIND) {
+            if (targetProcess) {
+                val forest = Model.getModel(AntForest::class.java) ?: return RouteResult.DEFERRED
+                if (!forest.isEnable() || forest.forestRead?.value != true) return RouteResult.SKIPPED
+                return if (forest.triggerPersistentReadTask(schedule.payloadJson, schedule.id, source)) {
+                    RouteResult.HANDLED
+                } else RouteResult.FAILED
             }
             return routeResult(dispatchExecute(context, schedule, source, wakenAtTime = false, wakenTime = null))
         }

@@ -9,9 +9,6 @@ import org.json.JSONObject
 
 /**
  * 医疗健康任务（绿色医疗、电子小票）
- *
- * @author Byseven
- * @date 2025/3/7
  */
 object Healthcare {
 

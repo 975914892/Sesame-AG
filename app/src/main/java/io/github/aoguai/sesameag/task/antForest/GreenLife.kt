@@ -141,7 +141,6 @@ object GreenLife {
                 )
             }
 
-            override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "森林集市打卡查询失败:$response")
             override fun logInfo(message: String) = Log.forest(message)
             override fun logError(message: String) = Log.error(TAG, message)
         }).run()

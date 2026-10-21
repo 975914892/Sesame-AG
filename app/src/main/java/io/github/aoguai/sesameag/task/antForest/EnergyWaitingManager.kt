@@ -127,7 +127,6 @@ class SmartRetryStrategy {
  * 3. 不提前收取：避免无效请求
  * 4. 精确时机：确保在正确的时间点执行收取
  *
- * @author Sesame-AG
  */
 object EnergyWaitingManager {
     private const val TAG = "EnergyWaitingManager"
@@ -1753,7 +1752,6 @@ object EnergyWaitingManager {
     ) {
         managerScope.launch {
             try {
-                delay(1000)
                 if (!isRunSessionCurrent(ownerUserId, sessionEpoch) || !isReadyForWaitingExecution()) {
                     Log.forest("森林蹲点恢复取消：会话已切换或回调未就绪[user=$ownerUserId][session=$sessionEpoch][$reason]")
                     return@launch

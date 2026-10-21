@@ -3,11 +3,6 @@ package io.github.aoguai.sesameag.entity
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.VitalityRewardsMap
 
-/**
- * @author Byseven
- * @date 2025/1/20
- * @apiNote
- */
 class VitalityStore(i: String, n: String) : MapperEntity() {
     init {
         this.id = i

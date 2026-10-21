@@ -102,6 +102,7 @@ object StatusFlags {
 
     /** 森林抽抽乐：常规场景今日已完成 */
     const val FLAG_ANTFOREST_CHOUCHOULE_NORMAL_COMPLETED = "forest::chouChouLe::normal::completed"
+    const val FLAG_ANTFOREST_DAILY_DRESS = "forest::dailyDress"
 
     /** 森林抽抽乐：活动场景今日已完成 */
     const val FLAG_ANTFOREST_CHOUCHOULE_ACTIVITY_COMPLETED = "forest::chouChouLe::activity::completed"
@@ -266,6 +267,7 @@ object StatusFlags {
 
     /** 运动问答：绿色能量已取得收取回执 */
     const val FLAG_ANTSPORTS_MOTION_QUIZ_GREEN_CONFIRMED = "AntSports::motionQuizGreenConfirmed"
+    const val FLAG_ANTSPORTS_MOTION_QUIZ_WELFARE_CONFIRMED = "AntSports::motionQuizWelfareConfirmed"
 
     /** 运动签到：今日已处理或已进入业务止损 */
     const val FLAG_ANTSPORTS_CHECK_IN_HANDLED_TODAY: String = "AntSports::checkInHandledToday"
@@ -356,6 +358,8 @@ object StatusFlags {
 
     /** 农场：今天日常任务列表已确认无待处理项 */
     const val FLAG_ANTORCHARD_TASKS_DONE = "AntOrchard::tasksDone"
+    const val FLAG_ANTORCHARD_HOME_GAME_DONE_PREFIX = "AntOrchard::homeGameDone::"
+    const val FLAG_ANTFOREST_READ_DONE = "AntForest::readDone"
 
     /** 农场组件：每日回访奖励 */
     const val FLAG_ANTORCHARD_WIDGET_DAILY_AWARD: String = "Flag_Antorchard_Widget_Daily_Award"
