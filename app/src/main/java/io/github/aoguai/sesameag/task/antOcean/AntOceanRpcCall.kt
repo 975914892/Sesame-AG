@@ -8,8 +8,6 @@ import org.json.JSONObject
 
 /**
  * 神奇海洋 RPC调用
- * @author Constanline
- * @since 2023/08/01
  */
 object AntOceanRpcCall {
     private const val VERSION = "20241203"
@@ -154,6 +152,20 @@ object AntOceanRpcCall {
     fun exchangeAiFishProject(): String = RequestManager.requestString(
         "alipay.antaifish.h5.exchangeProject",
         "[{\"source\":\"$SOURCE_AI_FISH\",\"uniqueId\":\"${getUniqueId()}\"}]"
+    )
+
+    @JvmStatic
+    fun queryNeedAppraiseFishList(): String = RequestManager.requestString(
+        "alipay.antaifish.h5.queryNeedAppraiseFishList",
+        JSONArray().put(JSONObject().put("source", SOURCE_AI_FISH).put("uniqueId", getUniqueId())).toString(),
+    )
+
+    @JvmStatic
+    fun fishAppraise(fish: JSONObject): String = RequestManager.requestString(
+        "alipay.antaifish.h5.fishAppraise",
+        JSONArray().put(JSONObject().put("appraiseType", "LIKE").put("imageId", fish.getString("imageId"))
+            .put("seasonId", fish.getString("seasonId")).put("targetUserId", fish.getString("userId"))
+            .put("source", SOURCE_AI_FISH).put("uniqueId", getUniqueId())).toString(),
     )
 
     @JvmStatic

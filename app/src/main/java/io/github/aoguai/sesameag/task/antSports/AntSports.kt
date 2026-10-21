@@ -1954,10 +1954,6 @@ class AntSports : ModelTask() {
             Log.sports("✅ 当前运动任务面板已确认今日无可处理项")
         }
 
-        override fun onQueryFailed(response: JSONObject) {
-            Log.error(TAG, "运动任务面板查询失败 raw=$response")
-        }
-
         override fun afterFailure(
             item: TaskFlowItem,
             action: TaskFlowAction,
@@ -2156,19 +2152,24 @@ class AntSports : ModelTask() {
             var healthFound = false
             var greenConfirmed = Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_MOTION_QUIZ_GREEN_CONFIRMED)
             var greenFound = false
+            var welfareConfirmed = Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_MOTION_QUIZ_WELFARE_CONFIRMED)
+            var welfareFound = false
             var failed = false
             val attempted = mutableSetOf<String>()
             for (index in 0 until prizes.length()) {
                 if (ApplicationHookConstants.isOffline()) return
                 val prize = prizes.optJSONObject(index) ?: continue
                 val taskId = prize.optString("taskId")
-                val appId = Uri.parse(prize.optString("toUseJumpUrl")).takeIf { it.isHierarchical }?.getQueryParameter("appId")
+                val jumpUri = Uri.parse(prize.optString("toUseJumpUrl")).takeIf { it.isHierarchical }
+                val appId = jumpUri?.getQueryParameter("appId")
                 val isHealth = taskId == MOTION_DAILY_QUIZ_REWARD_TASK_ID
                 val isGreen = appId == "2060090000376980"
-                if (!isHealth && !isGreen) continue
+                val isWelfare = appId == "77700207"
+                if (!isHealth && !isGreen && !isWelfare) continue
                 if (isHealth) healthFound = true
                 if (isGreen) greenFound = true
-                if (isHealth && healthConfirmed || isGreen && greenConfirmed) continue
+                if (isWelfare) welfareFound = true
+                if (isHealth && healthConfirmed || isGreen && greenConfirmed || isWelfare && welfareConfirmed) continue
                 val creativityId = prize.optString("id")
                 if (creativityId.isBlank()) {
                     Log.error(TAG, "运动问答奖励缺少id taskId=$taskId appId=$appId")
@@ -2191,6 +2192,29 @@ class AntSports : ModelTask() {
                         }
                     }
                     if (isGreen) greenConfirmed = collectMotionFactcheckEnergy()
+                    if (isWelfare) {
+                        val query = Uri.parse("https://localhost/?" + jumpUri?.getQueryParameter("query").orEmpty())
+                        val campId = query.getQueryParameter("campId").orEmpty()
+                        val prizeId = query.getQueryParameter("prizeId").orEmpty()
+                        check(campId.isNotBlank() && prizeId.isNotBlank()) { "福利金奖励缺少campId或prizeId" }
+                        val received = JSONObject(AntSportsRpcCall.receiveMotionQuizWelfare(campId, prizeId))
+                        if (ResChecker.checkRes(TAG, received)) {
+                            val receipts = received.optJSONObject("result")?.optJSONArray("prizes")
+                            welfareConfirmed = (0 until (receipts?.length() ?: 0)).any { i ->
+                                receipts?.optJSONObject(i)?.let {
+                                    it.optString("campId") == campId && it.optString("prizeId") == prizeId &&
+                                        it.optString("sendStatus") == "SUCCESS"
+                                } == true
+                            }
+                        }
+                        if (welfareConfirmed) {
+                            Status.setFlagToday(StatusFlags.FLAG_ANTSPORTS_MOTION_QUIZ_WELFARE_CONFIRMED)
+                            Log.sports("运动问答福利金已确认领取")
+                        } else {
+                            failed = true
+                            Log.error(TAG, "运动问答福利金尚未确认发放[quizId=$quizId] raw=$received")
+                        }
+                    }
                 } catch (t: Throwable) {
                     if (t is CancellationException || t is InterruptedException) throw t
                     failed = true
@@ -2212,12 +2236,12 @@ class AntSports : ModelTask() {
                 Log.error(TAG, "运动问答领奖后未回查到同一题目[quizId=$quizId]，保留后续确认")
                 return
             }
-            if ((healthFound || greenFound) && (!healthFound || healthConfirmed) &&
-                (!greenFound || greenConfirmed) && !failed
+            if ((healthFound || greenFound || welfareFound) && (!healthFound || healthConfirmed) &&
+                (!greenFound || greenConfirmed) && (!welfareFound || welfareConfirmed) && !failed
             ) {
-                markMotionDailyQuizDone("可领取能量奖励已确认")
+                markMotionDailyQuizDone("可领取奖励已确认")
             } else {
-                Log.error(TAG, "运动问答奖励尚未全部确认[quizId=$quizId][health=$healthConfirmed][green=$greenConfirmed]，保留后续处理")
+                Log.error(TAG, "运动问答奖励尚未全部确认[quizId=$quizId][health=$healthConfirmed][green=$greenConfirmed][welfare=$welfareConfirmed]，保留后续处理")
             }
         } catch (t: Throwable) {
             if (t is CancellationException || t is InterruptedException) throw t
@@ -6202,6 +6226,11 @@ class AntSports : ModelTask() {
                 }
                 if (associatedTaskFailed) return
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "queryTrainItem err:", t)
         }
@@ -6239,7 +6268,7 @@ class AntSports : ModelTask() {
                 }
 
                 val memberPriceJson = queryMemberPriceRankingForBattle(coinBalance) ?: return
-                val candidates = collectClubMemberCandidates(memberPriceJson).shuffled()
+                val candidates = collectClubMemberCandidates(memberPriceJson).shuffled().sortedBy { it.price }
                 if (candidates.isEmpty()) {
                     Log.sports("抢好友大战🧑‍🤝‍🧑暂无可抢好友")
                     return
@@ -6324,6 +6353,11 @@ class AntSports : ModelTask() {
                 )
                 return
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "buyMember err:", t)
         }
@@ -6384,6 +6418,11 @@ class AntSports : ModelTask() {
             } else {
                 Log.sports("抢好友大战🧑‍🤝‍🧑买回自身成员成功[消耗${price}能量]")
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "buyBackSoldSelfMember err:", t)
         }
@@ -6391,7 +6430,6 @@ class AntSports : ModelTask() {
 
     private fun queryClubHomeForBattle(): JSONObject? {
         val clubHomeJson = JSONObject(AntSportsRpcCall.queryClubHome())
-        GlobalThreadPools.sleepCompat(500)
         if (!isSportsRpcSuccess(clubHomeJson)) {
             Log.error(
                 TAG,
@@ -6474,7 +6512,6 @@ class AntSports : ModelTask() {
 
     private fun queryMemberPriceRankingForBattle(coinBalance: Int): JSONObject? {
         val memberPriceJson = JSONObject(AntSportsRpcCall.queryMemberPriceRanking(coinBalance))
-        GlobalThreadPools.sleepCompat(500)
         if (!isSportsRpcSuccess(memberPriceJson)) {
             Log.error(
                 TAG,
@@ -6540,7 +6577,6 @@ class AntSports : ModelTask() {
         val clubMemberDetailJson = JSONObject(
             AntSportsRpcCall.queryClubMember(candidate.memberId, candidate.originBossId)
         )
-        GlobalThreadPools.sleepCompat(500)
         if (!isSportsRpcSuccess(clubMemberDetailJson) || !clubMemberDetailJson.has("member")) {
             Log.error(
                 TAG,
@@ -7826,7 +7862,6 @@ class AntSports : ModelTask() {
                         "${it.optString("name").ifBlank { it.optString("itemId") }}+${it.optInt("modifyCount")}" })
                     return TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, "回查离线奖励", refreshAfterAction = true)
                 }
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "健康岛离线奖励查询失败:$response")
                 override fun logInfo(message: String) = Log.sports(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }).run()
@@ -7872,7 +7907,6 @@ class AntSports : ModelTask() {
                     Log.sports("健康岛[${item.title}]领取已受理，回查气泡状态")
                     return TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, "回查策略气泡", refreshAfterAction = true)
                 }
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "健康岛策略气泡查询失败:$response")
                 override fun logInfo(message: String) = Log.sports(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }, executionState = strategyBubbleState).run().completed

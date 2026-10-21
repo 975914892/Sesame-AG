@@ -23,10 +23,6 @@ import java.util.UUID
  * - 运动币兑换与礼品领取
  * - 健康岛（Neverland）任务系统
  * - 抢好友大战功能
- *
- * @author [Original Java Author]
- * @since 2025.01.20
- * @version 1.0.0
  */
 object AntSportsRpcCall {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -283,6 +279,13 @@ object AntSportsRpcCall {
                 .put("version", "2.0")).toString(),
         )
     }
+
+    fun receiveMotionQuizWelfare(campId: String, prizeId: String): String = RequestManager.requestString(
+        "com.alipay.loanpromoweb.promo.camp.trigger",
+        JSONArray().put(JSONObject().put("campId", campId).put("prizeId", prizeId)).toString(),
+        tryCount = 1,
+        retryInterval = 0,
+    )
 
     fun clickMotionQuizReceiveSort(
         quizId: String,
