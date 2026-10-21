@@ -111,7 +111,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.github.aoguai.sesameag.entity.KVMap
 import io.github.aoguai.sesameag.entity.friend.FriendCapabilityState
 import io.github.aoguai.sesameag.entity.friend.FriendRelation
 import io.github.aoguai.sesameag.entity.friend.FriendRelationFilter
@@ -168,7 +167,6 @@ private enum class AccountDialog {
 
 private data class SelectionRequest(
     val field: FieldEditorUiModel,
-    val single: Boolean,
     val withCount: Boolean,
 )
 
@@ -742,8 +740,8 @@ private fun ModelFields(
                 value = state.drafts[field.key].orEmpty(),
                 modelField = viewModel.currentField(field.key),
                 onValueChange = { viewModel.updateDraft(field.key, it) },
-                onOpenSelection = { single, withCount ->
-                    onOpenSelection(SelectionRequest(field, single, withCount))
+                onOpenSelection = { withCount ->
+                    onOpenSelection(SelectionRequest(field, withCount))
                 },
                 onOpenFriendSelection = { onOpenFriendSelection(field) },
                 auditClearPending = field.key in state.pendingAuditClearKeys,
@@ -772,7 +770,7 @@ private fun FieldEditor(
     value: String,
     modelField: io.github.aoguai.sesameag.model.ModelField<*>?,
     onValueChange: (String) -> Unit,
-    onOpenSelection: (single: Boolean, withCount: Boolean) -> Unit,
+    onOpenSelection: (withCount: Boolean) -> Unit,
     onOpenFriendSelection: () -> Unit,
     auditClearPending: Boolean,
     onClearAudit: () -> Unit,
@@ -863,7 +861,6 @@ private fun FieldEditor(
                     ChoiceSwitchField(field, value, switchMeta, onValueChange)
                 }
             }
-            "SELECT_ONE" -> ValueButton(selectionSummary(value, emptyList(), true)) { onOpenSelection(true, false) }
             "INTEGER", "MULTIPLY_INTEGER" -> IntegerField(value, modelField as? IntegerModelField, onValueChange)
             "STRING" -> OutlinedTextField(
                 value = value,
@@ -872,14 +869,12 @@ private fun FieldEditor(
                 label = { Text(field.name) },
                 singleLine = true,
             )
-            "LIST" -> ListField(value, onValueChange)
             "TEXT", "READ_TEXT" -> ReadOnlyValue(decodeJsonString(value))
             "URL_TEXT" -> UrlValue(decodeJsonString(value))
-            "SELECT" -> ValueButton(selectionSummary(value, emptyList(), false)) { onOpenSelection(false, false) }
+            "SELECT" -> ValueButton(selectionSummary(value)) { onOpenSelection(false) }
             "SELECT_AND_COUNT" -> ValueButton(mapSummary(value, if (isTaskOrder) "顺序" else "次数")) {
-                onOpenSelection(false, true)
+                onOpenSelection(true)
             }
-            "SELECT_AND_COUNT_ONE" -> ValueButton(singleCountSummary(value)) { onOpenSelection(true, true) }
             "FRIEND_SELECTION", "FRIEND_SELECTION_COUNT" -> ValueButton(friendSummary(value, field.type)) {
                 onOpenFriendSelection()
             }
@@ -1038,28 +1033,6 @@ private fun IntegerField(value: String, field: IntegerModelField?, onValueChange
 }
 
 @Composable
-private fun ListField(value: String, onValueChange: (String) -> Unit) {
-    var display by rememberSaveable {
-        mutableStateOf(listDisplayValue(value))
-    }
-    LaunchedEffect(value) {
-        if (serializeListValue(display) != value) {
-            display = listDisplayValue(value)
-        }
-    }
-    OutlinedTextField(
-        value = display,
-        onValueChange = { text ->
-            display = text
-            onValueChange(serializeListValue(text))
-        },
-        modifier = Modifier.fillMaxWidth(),
-        minLines = 3,
-        label = { Text("每行一项") },
-    )
-}
-
-@Composable
 private fun TimeField(field: FieldEditorUiModel, value: String, onValueChange: (String) -> Unit) {
     val meta = field.editorMeta as? TimeFieldMeta
     TimeRuleEditor(
@@ -1168,14 +1141,13 @@ private fun SelectionEditorDialog(
                                 option = option,
                                 selected = option.id in values,
                                 count = values[option.id],
-                                single = request.single,
                                 withCount = request.withCount,
                                 isOrder = isTaskOrder,
                                 onChange = { selected, count ->
-                                    values = when {
-                                        !selected -> values - option.id
-                                        request.single -> mapOf(option.id to count)
-                                        else -> values + (option.id to count)
+                                    values = if (selected) {
+                                        values + (option.id to count)
+                                    } else {
+                                        values - option.id
                                     }
                                 },
                             )
@@ -1200,7 +1172,6 @@ private fun SelectionOptionRow(
     option: FieldOptionUiModel,
     selected: Boolean,
     count: Int?,
-    single: Boolean,
     withCount: Boolean,
     isOrder: Boolean,
     onChange: (Boolean, Int) -> Unit,
@@ -1208,17 +1179,10 @@ private fun SelectionOptionRow(
     ListItem(
         supportingContent = { if (option.name != option.id) Text(option.id) },
         leadingContent = {
-            if (single) {
-                RadioButton(
-                    selected = selected,
-                    onClick = { onChange(!selected, count ?: 1) },
-                )
-            } else {
-                Checkbox(
-                    checked = selected,
-                    onCheckedChange = { checked -> onChange(checked, count ?: 1) },
-                )
-            }
+            Checkbox(
+                checked = selected,
+                onCheckedChange = { checked -> onChange(checked, count ?: 1) },
+            )
         },
         trailingContent = if (withCount && selected) {
             {
@@ -2030,38 +1994,27 @@ private fun AccountSettingsUiState.findField(modelCode: String?, fieldCode: Stri
 }
 
 private fun selectionRequestFor(field: FieldEditorUiModel): SelectionRequest? = when (field.type) {
-    "SELECT_ONE" -> SelectionRequest(field, single = true, withCount = false)
-    "SELECT" -> SelectionRequest(field, single = false, withCount = false)
-    "SELECT_AND_COUNT" -> SelectionRequest(field, single = false, withCount = true)
-    "SELECT_AND_COUNT_ONE" -> SelectionRequest(field, single = true, withCount = true)
+    "SELECT" -> SelectionRequest(field, withCount = false)
+    "SELECT_AND_COUNT" -> SelectionRequest(field, withCount = true)
     else -> null
 }
 
 private fun parseSelectionValues(value: String, request: SelectionRequest): Map<String, Int> {
     if (!request.withCount) {
-        if (request.single) {
-            val selectedId = decodeJsonString(value)
-            return selectedId.takeIf(String::isNotBlank)?.let { mapOf(it to 1) }.orEmpty()
-        }
         val node = JsonUtil.toNode(value)
         return if (node?.isArray == true) node.associate { it.asText() to 1 } else emptyMap()
     }
     val node = JsonUtil.toNode(value)
     if (node?.isObject != true) return emptyMap()
-    return if (request.single) {
-        val key = node.get("key")?.asText().orEmpty()
-        if (key.isBlank()) emptyMap() else mapOf(key to (node.get("value")?.asInt() ?: 1))
-    } else {
-        node.properties().associate { it.key to it.value.asInt() }
-    }
+    return node.properties().associate { it.key to it.value.asInt() }
 }
 
-private fun serializeSelectionValues(values: Map<String, Int>, request: SelectionRequest): String = when {
-    request.single && request.withCount -> values.entries.firstOrNull()?.let { JsonUtil.formatJson(KVMap(it.key, it.value), false) }.orEmpty()
-    request.single -> values.keys.firstOrNull()?.let { JsonUtil.formatJson(it, false) }.orEmpty()
-    request.withCount -> JsonUtil.formatJson(LinkedHashMap(values), false)
-    else -> JsonUtil.formatJson(values.keys.toList(), false)
-}
+private fun serializeSelectionValues(values: Map<String, Int>, request: SelectionRequest): String =
+    if (request.withCount) {
+        JsonUtil.formatJson(LinkedHashMap(values), false)
+    } else {
+        JsonUtil.formatJson(values.keys.toList(), false)
+    }
 
 private fun parseFriendDraft(value: String, countEnabled: Boolean): FriendSelectionCountSpec = runCatching {
     if (countEnabled) {
@@ -2071,11 +2024,7 @@ private fun parseFriendDraft(value: String, countEnabled: Boolean): FriendSelect
     }
 }.getOrElse { FriendSelectionCountSpec() }
 
-private fun selectionSummary(value: String, options: List<FieldOptionUiModel>, single: Boolean): String {
-    if (single) {
-        val selectedId = decodeJsonString(value)
-        return options.firstOrNull { it.id == selectedId }?.name ?: selectedId.ifBlank { "未选择" }
-    }
+private fun selectionSummary(value: String): String {
     val count = JsonUtil.toNode(value)?.takeIf { it.isArray }?.size() ?: 0
     return if (count == 0) "未选择" else "已选择 $count 项"
 }
@@ -2083,12 +2032,6 @@ private fun selectionSummary(value: String, options: List<FieldOptionUiModel>, s
 private fun mapSummary(value: String, countLabel: String = "次数"): String {
     val count = JsonUtil.toNode(value)?.takeIf { it.isObject }?.size() ?: 0
     return if (count == 0) "未选择" else "已选择 $count 项并设置$countLabel"
-}
-
-private fun singleCountSummary(value: String): String {
-    val node = JsonUtil.toNode(value)?.takeIf { it.isObject } ?: return "未选择"
-    val key = node.get("key")?.asText().orEmpty()
-    return if (key.isBlank()) "未选择" else "$key · ${node.get("value")?.asInt() ?: 0} 次"
 }
 
 private fun friendSummary(value: String, type: String): String {
@@ -2137,15 +2080,3 @@ private fun decodeJsonString(value: String): String {
     val node = JsonUtil.toNode(value)
     return if (node?.isTextual == true) node.asText() else value
 }
-
-private fun listDisplayValue(value: String): String =
-    JsonUtil.toNode(value)
-        ?.takeIf { it.isArray }
-        ?.map { it.asText() }
-        ?.joinToString("\n")
-        ?: value
-
-private fun serializeListValue(value: String): String = JsonUtil.formatJson(
-    value.lines().map(String::trim).filter(String::isNotEmpty),
-    false,
-)

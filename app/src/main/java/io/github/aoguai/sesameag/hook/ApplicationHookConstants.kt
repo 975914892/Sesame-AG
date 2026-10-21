@@ -97,7 +97,6 @@ object ApplicationHookConstants {
         ENTER,
         REFRESH,
         EXIT,
-        AUTO_EXIT,
     }
 
     data class OfflineEvent(
@@ -301,10 +300,6 @@ object ApplicationHookConstants {
 
     @JvmStatic
     fun exitOffline() {
-        exitOfflineInternal(OfflineEventType.EXIT)
-    }
-
-    private fun exitOfflineInternal(type: OfflineEventType) {
         if (!offline) return
 
         val now = nowProvider()
@@ -323,7 +318,7 @@ object ApplicationHookConstants {
 
         addOfflineEvent(
             OfflineEvent(
-                type = type,
+                type = OfflineEventType.EXIT,
                 atMs = now,
                 cooldownMs = 0L,
                 untilMs = 0L,
@@ -332,44 +327,17 @@ object ApplicationHookConstants {
             ),
         )
 
-        record(TAG, "exitOffline: type=$type durationMs=$durationMs reason=${enterReason ?: "null"} detail=${enterDetail ?: "null"}")
+        record(TAG, "exitOffline: type=EXIT durationMs=$durationMs reason=${enterReason ?: "null"} detail=${enterDetail ?: "null"}")
 
         AccountSessionCoordinator.refreshWorkflowState(
             ApplicationHook.appContext,
-            when (type) {
-                OfflineEventType.EXIT -> "offline_exit"
-                OfflineEventType.AUTO_EXIT -> "offline_auto_exit"
-                else -> "offline_exit"
-            },
+            "offline_exit",
         )
-        ModuleStatusReporter.requestUpdate(
-            when (type) {
-                OfflineEventType.EXIT -> "offline_exit"
-                OfflineEventType.AUTO_EXIT -> "offline_auto_exit"
-                else -> "offline_exit"
-            },
-        )
+        ModuleStatusReporter.requestUpdate("offline_exit")
     }
-
-    private const val ENABLE_OFFLINE_AUTO_EXIT = false
 
     @JvmStatic
-    fun shouldBlockRpc(): Boolean {
-        if (!offline) return false
-
-        if (!ENABLE_OFFLINE_AUTO_EXIT) {
-            return true
-        }
-
-        val untilMs = offlineUntilMs
-        if (untilMs <= 0L) return true
-
-        val now = nowProvider()
-        if (now < untilMs) return true
-
-        exitOfflineInternal(OfflineEventType.AUTO_EXIT)
-        return false
-    }
+    fun shouldBlockRpc(): Boolean = offline
 
     enum class TriggerPriority(
         val weight: Int,
