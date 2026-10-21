@@ -6,7 +6,9 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.UserDataStoreManager
+import kotlinx.coroutines.CancellationException
 import java.io.File
+import java.nio.channels.ClosedByInterruptException
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.channels.FileLockInterruptionException
@@ -517,7 +519,16 @@ object AccountSlotRegistry {
                         result.value
                     }
                 }
-            }.onFailure(::logRegistryUnavailable).getOrNull()
+            }.onFailure { error ->
+                when (error) {
+                    is CancellationException -> throw error
+                    is FileLockInterruptionException, is ClosedByInterruptException -> {
+                        Thread.currentThread().interrupt()
+                        throw CancellationException("账号槽位访问已取消").apply { initCause(error) }
+                    }
+                    else -> logRegistryUnavailable(error)
+                }
+            }.getOrNull()
         }
 
     private fun logRegistryUnavailable(error: Throwable) {

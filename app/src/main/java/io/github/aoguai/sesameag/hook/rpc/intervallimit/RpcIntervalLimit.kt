@@ -76,7 +76,7 @@ object RpcIntervalLimit {
                 GlobalThreadPools.sleepCompat(sleep)
             }
 
-            intervalLimit.time = now
+            intervalLimit.time = System.currentTimeMillis()
         }
     }
 

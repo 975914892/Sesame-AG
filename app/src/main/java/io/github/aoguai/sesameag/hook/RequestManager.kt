@@ -11,6 +11,7 @@ import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.NetworkUtils
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -124,11 +125,18 @@ object RequestManager {
         // 3. 执行请求
         val result = try {
             block(bridge)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw CancellationException("RPC 执行已取消").apply { initCause(e) }
         } catch (e: Throwable) {
             Log.printStackTrace(TAG, "RPC 执行异常: $methodLog", e)
             null // 异常视为 null，触发失败逻辑
         }
 
+        // 在途请求可能触发本轮取消，先退出任务，再判断账号与业务结果。
+        TaskExecutionReport.current()?.ensureCurrent()
         // 4. 结果校验与状态维护
         if (!RpcDailyCircuit.isCurrent(identity)) {
             return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("账号会话已变化", methodLog))

@@ -652,13 +652,6 @@ class GreenFinance : ModelTask() {
                 logInfo("$flowName[任务列表已处理完成：${snapshot.completedTasks}/${snapshot.totalTasks}]")
             }
 
-            override fun onQueryFailed(response: JSONObject) {
-                Log.runtime(
-                    "$tag.doTask.taskQuery",
-                    response.optString("resultDesc").ifBlank { response.toString() }
-                )
-            }
-
             override fun logInfo(message: String) {
                 Log.greenFinance(message)
             }

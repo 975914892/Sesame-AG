@@ -16,6 +16,7 @@ import io.github.aoguai.sesameag.util.RandomUtil
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
+import kotlinx.coroutines.CancellationException
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.util.concurrent.ConcurrentHashMap
@@ -687,6 +688,11 @@ class AriverRpcBridge : RpcBridge {
                         }
                         captureSucceeded = true
                         return rpcEntity
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw e
                     } catch (e: Exception) {
                         Log.error(
                             TAG,
@@ -702,6 +708,11 @@ class AriverRpcBridge : RpcBridge {
                 } catch (t: Throwable) {
                     rpcEntity.settingsRefresh?.failed = true
                     if (hardBlocked) return rpcEntity
+                    if (t is CancellationException) throw t
+                    if (t is InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw t
+                    }
                     Log.error(
                         TAG,
                         "rpc request | id: ${rpcEntity.hashCode()} | method: ${rpcEntity.requestMethod} err:",

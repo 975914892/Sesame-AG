@@ -51,7 +51,6 @@ import org.json.JSONObject
  * 使用方式：
  * 继承此类并实现抽象方法：getName(), getFields(), check(), run()
  *
- * @author Sesame-AG
  */
 abstract class ModelTask : Model() {
     /** 任务协程作用域 */

@@ -28,8 +28,10 @@ internal class TaskExecutionReport(
     var executionJob: Job? = current()?.executionJob
 
     fun ensureCurrent(userId: String? = null) {
-        if (executionJob?.isActive == false ||
-            !AccountSessionCoordinator.isCurrentSession(identity.userId, identity.sessionEpoch) ||
+        if (Thread.currentThread().isInterrupted || executionJob?.isActive == false) {
+            throw CancellationException("任务已取消")
+        }
+        if (!AccountSessionCoordinator.isCurrentSession(identity.userId, identity.sessionEpoch) ||
             (userId != null && identity.userId != userId)
         ) throw CancellationException("任务账号会话已失效")
     }

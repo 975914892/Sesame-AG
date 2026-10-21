@@ -491,10 +491,6 @@ class YouthPrivilege : ModelTask() {
             Log.youthPrivilege("青春特权任务服务端已无待处理项#${snapshot.totalTasks}")
         }
 
-        override fun onQueryFailed(response: JSONObject) {
-            Log.error(TAG, "青春特权任务查询失败:$response")
-        }
-
         override fun logInfo(message: String) {
             Log.youthPrivilege(message)
         }
@@ -638,7 +634,6 @@ class YouthPrivilege : ModelTask() {
             )
             return TaskFlowActionResult.success(refreshAfterAction = true, progressChanged = false)
         }
-        override fun onQueryFailed(response: JSONObject) { Log.error(TAG, "青春每月权益查询失败 raw=$response") }
         override fun logInfo(message: String) { Log.youthPrivilege(message) }
         override fun logError(message: String) { Log.error(TAG, message) }
     }

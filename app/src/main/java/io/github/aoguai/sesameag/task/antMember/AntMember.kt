@@ -664,7 +664,6 @@ class AntMember : ModelTask() {
             continueCurrentRoundOnFailure = true,
         )
 
-        override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "$flowName 查询失败:$response")
         override fun logInfo(message: String) = Log.member(message)
         override fun logError(message: String) = Log.error(TAG, message)
     }
@@ -1937,10 +1936,6 @@ class AntMember : ModelTask() {
                     result.deferredUntil?.let { scheduleMemberTaskContinuation("memberGameEntrance", it) }
                 }
 
-                override fun onQueryFailed(response: JSONObject) {
-                    Log.error(TAG, "会员游戏乐园浏览任务查询失败:$response")
-                }
-
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }).run()
@@ -2332,7 +2327,7 @@ class AntMember : ModelTask() {
             }
             Log.error(
                 "$TAG.processCurrentMemberTaskListCompat",
-                "会员任务[$stopScene]响应失败: " +
+                "$flowName[任务查询失败] scene=$stopScene reason=" +
                     stopObject.optString("resultDesc").ifBlank {
                         stopObject.optString("errorMsg").ifBlank { response.optString("_rawResponse", response.toString()) }
                     }
@@ -2468,7 +2463,6 @@ class AntMember : ModelTask() {
                     return TaskFlowActionResult.success(refreshAfterAction = true)
                 }
 
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "会员阶段奖励查询失败:$response")
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }, roundSleepMs = 300L).run()
@@ -4075,7 +4069,7 @@ class AntMember : ModelTask() {
                 .ifBlank { response.toString() }
             Log.error(
                 "$TAG.collectInsuredTaskCenterRewards.queryTaskListV2",
-                "保障金🏥[任务中心]#查询失败:${config.taskCenterId}/${config.sceneCode}#$reason raw=${response.optString("_rawResponse")}"
+                "$flowName[任务查询失败] taskCenterId=${config.taskCenterId} sceneCode=${config.sceneCode} reason=$reason raw=${response.optString("_rawResponse")}"
             )
         }
 
@@ -5584,7 +5578,7 @@ class AntMember : ModelTask() {
 
         override fun onQueryFailed(response: JSONObject) {
             queryFailed = true
-            Log.error(TAG, "黄金票🎫[${source}任务查询失败] raw=$response")
+            Log.error(TAG, "$flowName[任务查询失败] source=$source raw=$response")
         }
 
         override fun logInfo(message: String) {
@@ -5923,7 +5917,6 @@ class AntMember : ModelTask() {
                     Log.member("会员游戏宝箱🎁领取已受理，回查剩余宝箱")
                     return TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, "回查外部游戏宝箱", refreshAfterAction = true)
                 }
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "外部游戏宝箱查询失败:$response")
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }).run()
@@ -6026,7 +6019,6 @@ class AntMember : ModelTask() {
             result.deferredUntil?.let { scheduleMemberTaskContinuation("memberExternalGameCenter", it) }
         }
 
-        override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "外部游戏任务查询失败:$response")
         override fun logInfo(message: String) = Log.member(message)
         override fun logError(message: String) = Log.error(TAG, message)
     }
@@ -6479,7 +6471,7 @@ class AntMember : ModelTask() {
                 .ifBlank { response.optString("resultView") }
                 .ifBlank { response.optString("resultDesc") }
                 .ifBlank { response.optString("_rawResponse", response.toString()) }
-            Log.error("$TAG.enableGameCenter.tasks", "游戏中心🎮[任务列表查询失败]#$msg")
+            Log.error("$TAG.enableGameCenter.tasks", "$flowName[任务查询失败] reason=$msg")
         }
 
         override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
@@ -6950,7 +6942,7 @@ class AntMember : ModelTask() {
                 .ifBlank { response.optString("resultView") }
                 .ifBlank { response.optString("resultDesc") }
                 .ifBlank { response.optString("_rawResponse", response.toString()) }
-            Log.error("$TAG.enableGameCenter.p2eTasks", "游戏中心🎮[赚现金任务列表查询失败]#$msg")
+            Log.error("$TAG.enableGameCenter.p2eTasks", "$flowName[任务查询失败] reason=$msg")
         }
 
         override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {

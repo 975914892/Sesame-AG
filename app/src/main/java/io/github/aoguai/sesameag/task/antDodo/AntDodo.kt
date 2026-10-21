@@ -663,10 +663,6 @@ class AntDodo : ModelTask() {
             }
         }
 
-        override fun onQueryFailed(response: JSONObject) {
-            Log.error(TAG, "神奇物种任务列表查询失败 raw=$response")
-        }
-
         override fun logInfo(message: String) {
             Log.dodo(message)
         }

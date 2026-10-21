@@ -238,7 +238,7 @@ private class YebExpGoldTaskFlowAdapter(private val member: AntMember) : TaskFlo
     }
 
     override fun onQueryFailed(response: JSONObject) {
-        logError("查询失败 rpc=$queryRpc raw=$response")
+        logError("$flowName[任务查询失败] rpc=$queryRpc raw=$response")
     }
 
     override fun logInfo(message: String) = Log.member(message)

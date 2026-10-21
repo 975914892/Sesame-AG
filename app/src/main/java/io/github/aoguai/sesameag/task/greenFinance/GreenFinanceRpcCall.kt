@@ -7,7 +7,6 @@ import org.json.JSONArray
 /**
  * 绿色经营RPC调用
  *
- * @author xiong
  */
 object GreenFinanceRpcCall {
 
