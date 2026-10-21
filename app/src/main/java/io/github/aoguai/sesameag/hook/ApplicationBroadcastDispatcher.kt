@@ -2,6 +2,7 @@ package io.github.aoguai.sesameag.hook
 
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.IntentCompat
 import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.MapperEntity
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
@@ -96,7 +97,7 @@ internal object ApplicationBroadcastDispatcher {
         val safeIntent = Intent(intent)
         ApplicationHookConstants.submitEntry("broadcast_restart") {
             val targetUserId = safeIntent.getStringExtra("userId")
-            val receiver = safeIntent.getParcelableExtra<android.os.ResultReceiver>("configReloadResult")
+            val receiver = IntentCompat.getParcelableExtra(safeIntent, "configReloadResult", android.os.ResultReceiver::class.java)
             val reply: (String) -> Unit = { message ->
                 runCatching { receiver?.send(0, android.os.Bundle().apply { putString("message", message) }) }
                     .onFailure { record(TAG, "配置重载回执发送失败: ${it.message}") }

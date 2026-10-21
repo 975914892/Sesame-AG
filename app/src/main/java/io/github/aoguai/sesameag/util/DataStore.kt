@@ -10,7 +10,6 @@ import com.fasterxml.jackson.module.kotlin.readValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.io.File
 import java.io.IOException
@@ -313,8 +312,6 @@ object DataStore {
                     }
 
                     if (shouldReload) {
-                        // 稍微延迟一下，等待文件写入完成
-                        delay(100)
                         loadFromDisk()
                     }
 

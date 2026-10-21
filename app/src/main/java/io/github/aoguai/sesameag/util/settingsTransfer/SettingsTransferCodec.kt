@@ -65,7 +65,9 @@ object SettingsTransferCodec {
             }
             else -> {
                 val mapper = JsonUtil.copyMapper()
-                    .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                    .apply {
+                        setConfig(deserializationConfig.without(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS))
+                    }
                     .disable(com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_FLOAT_AS_INT)
                     .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
                 requireNotNull(mapper.readValue<Any>(configValue, mapper.typeFactory.constructType(field.valueType))) {

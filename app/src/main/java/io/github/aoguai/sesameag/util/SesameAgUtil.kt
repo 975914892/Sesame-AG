@@ -3,29 +3,28 @@ package io.github.aoguai.sesameag.util
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 
 object SesameAgUtil {
     // 定义一言API的URL
 
-    private const val HIROHITO_API_URL1 = "https://international.v1.hitokoto.cn/"
-    private const val HIROHITO_API_URL2 = "https://v1.hitokoto.cn/"
+    private const val HITOKOTO_INTERNATIONAL_API_URL = "https://international.v1.hitokoto.cn/"
+    private const val HITOKOTO_API_URL = "https://v1.hitokoto.cn/"
 
     /**
      * 从指定 URL 获取一言
      */
     private fun fetchHitokotoFromUrl(url: String): Pair<String, String>? {
+        var connection: HttpURLConnection? = null
         return try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            connection = URL(url).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
 
-            val response = BufferedReader(InputStreamReader(connection.inputStream)).use { reader ->
+            val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
                 reader.readText()
             }
 
@@ -36,6 +35,8 @@ object SesameAgUtil {
             if (hitokoto.isNotEmpty()) Pair(hitokoto, from) else null
         } catch (e: Exception) {
             null
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -46,7 +47,7 @@ object SesameAgUtil {
     suspend fun getOneWord(): String = withContext(Dispatchers.IO) {
         return@withContext try {
             // 先尝试国内版 API，失败则尝试国际版 API
-            val result = fetchHitokotoFromUrl(HIROHITO_API_URL2) ?: fetchHitokotoFromUrl(HIROHITO_API_URL1)
+            val result = fetchHitokotoFromUrl(HITOKOTO_API_URL) ?: fetchHitokotoFromUrl(HITOKOTO_INTERNATIONAL_API_URL)
             
             result?.let { (hitokoto, from) ->
                 "$hitokoto\n\n                    -----Re: $from"

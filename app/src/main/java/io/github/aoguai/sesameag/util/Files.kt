@@ -30,7 +30,7 @@ object Files {
     fun <T> withAccountLock(userId: String, action: () -> T): T = accountStorageLock.withLock {
         require(userId.isNotBlank()) { "账号为空" }
         io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
-        val held = lockedAccounts.get()
+        val held = checkNotNull(lockedAccounts.get())
         if (userId in held) return@withLock action()
         RandomAccessFile(File(getUserConfigDir(userId), ".account.lock"), "rw").use { file ->
             file.channel.lock().use {
@@ -758,8 +758,10 @@ object Files {
                 return true
             }
             retryCount--
-            Log.record(TAG, "删除失败，重试中: ${file.absolutePath}")
-            CoroutineUtils.sleepCompat(500)
+            if (retryCount > 0) {
+                Log.record(TAG, "删除失败，重试中: ${file.absolutePath}")
+                CoroutineUtils.sleepCompat(500)
+            }
         }
         Log.error(TAG, "删除失败: ${file.absolutePath}")
         return false

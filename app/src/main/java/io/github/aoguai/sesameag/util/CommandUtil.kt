@@ -223,8 +223,6 @@ object CommandUtil {
                     startCommandService(appContext, intent)
                     if (attempt > 0) {
                         delay(BIND_RETRY_DELAY_MS)
-                    } else {
-                        delay(300)
                     }
 
                     val bindResult = appContext.bindService(

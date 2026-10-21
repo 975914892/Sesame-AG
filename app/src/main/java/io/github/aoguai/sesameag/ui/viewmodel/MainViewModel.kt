@@ -39,7 +39,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -611,10 +610,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun fetchOneWord() {
         viewModelScope.launch {
             _isOneWordLoading.value = true
-            val startTime = System.currentTimeMillis()
             val result = withContext(Dispatchers.IO) { SesameAgUtil.getOneWord() }
-            val elapsedTime = System.currentTimeMillis() - startTime
-            if (elapsedTime < 2500) delay(500 - elapsedTime)
             _oneWord.value = result
             _isOneWordLoading.value = false
         }

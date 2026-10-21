@@ -4,10 +4,6 @@ import io.github.aoguai.sesameag.util.Log.record
 import java.text.Collator
 import java.util.Locale
 
-/**
- * @author Constanline
- * @since 2023/08/03
- */
 class HanziToPinyin protected constructor(private val mHasChinaCollator: Boolean) {
     class Token {
         constructor()
