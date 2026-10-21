@@ -335,8 +335,8 @@ jobs:
 
             function receivedMessage() {
               const details = isBug
-                ? '已检测到指定栏目和附件链接，内容仍需维护者确认。'
-                : '已检测到必填栏目，建议内容和是否受理仍需维护者确认。';
+                ? '已检测到指定栏目和附件链接，内容仍需维护团队确认。'
+                : '已检测到必填栏目，建议内容和是否受理仍需维护团队确认。';
               return `您好 @${author}，已收到${scope ? `「${scope}${kind}」` : kind}。${details}`;
             }
 
