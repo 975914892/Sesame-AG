@@ -1282,6 +1282,7 @@ class ApplicationHook {
                 Config.load(userId)
                 LocaleSettingsApplier.apply(appContext)
                 Logback.reloadFileLogging(enableCaptureAppender = true)
+                RpcTrafficCapture.refreshCaptureState()
                 val activeUserSnapshot = AccountSessionCoordinator.ensureActiveUserSnapshot(userId, activeClassLoader)
                 if (admission.requiresConfirmation) {
                     when (val confirmation = AccountSlotRegistry.confirmRuntimeUser(userId)) {
@@ -1505,6 +1506,7 @@ class ApplicationHook {
                     stopRunning()
                     clearIntervalLimit()
                     Config.unload()
+                    RpcTrafficCapture.refreshCaptureState()
                     UserMap.setCurrentUserId(null)
                     UserMap.unload()
                 }
@@ -1591,6 +1593,7 @@ class ApplicationHook {
                 val userId = HookUtil.getUserId(activeClassLoader) ?: return false
                 Config.load(userId)
                 LocaleSettingsApplier.apply(appContext)
+                RpcTrafficCapture.refreshCaptureState()
             }
             val legalAccepted = Config.isLegalAcceptedForCurrentVersion()
             if (legalAccepted && WorkflowRootGuard.isExecutionAllowed()) {

@@ -1,6 +1,8 @@
 package io.github.aoguai.sesameag.hook.rpc.capture
 
+import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.data.General
+import io.github.libxposed.api.XposedInterface
 import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.HookSender
 import io.github.aoguai.sesameag.hook.RuntimeIdentityGuard
@@ -23,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import android.os.FileObserver
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -43,6 +46,7 @@ object RpcTrafficCapture {
     private const val H5_NETWORK_CLASS = "com.alipay.mobile.common.transport.h5.H5NetworkManager"
     private const val H5_REQUEST_CLASS = "com.alipay.mobile.common.transport.h5.H5HttpUrlRequest"
     private const val XRIVER_REQUEST_CLASS = "com.alibaba.xriver.android.proxy.CRVRequestProxy"
+    private const val MTOP_REQUEST_CLASS = "com.alibaba.ariver.jsapi.mtop.MtopBridgeExtention"
 
     private enum class TrafficSource(val title: String) {
         ARIVER_RPC("Host RPC"),
@@ -146,8 +150,8 @@ object RpcTrafficCapture {
     private val ariverRequestHookInstalled = AtomicBoolean(false)
     private val mtopRequestHookInstalled = AtomicBoolean(false)
     private val h5HookInstalled = AtomicBoolean(false)
-    // false 仅表示正在安装；失败时移除，不把安装占位当作成功。
-    private val miniHttpMethodInstallations = ConcurrentHashMap<Method, Boolean>()
+    private val captureHooks = ConcurrentHashMap<Method, XposedInterface.HookHandle>()
+    // false 仅表示类入口正在安装，不把安装占位当作成功。
     private val miniHttpClassInstallations = ConcurrentHashMap<Class<*>, Boolean>()
     private val reportedHttpClasses = ConcurrentHashMap.newKeySet<Class<*>>()
     private val reportedHttpCallSites = linkedSetOf<String>()
@@ -183,13 +187,21 @@ object RpcTrafficCapture {
     private var sessionStarted = false
 
     @Volatile
-    private var captureEnabledProvider: () -> Boolean = { BaseModel.debugMode.value == true }
+    private var captureEnabledProvider: () -> Boolean = { Config.isLoaded() && BaseModel.debugMode.value == true }
 
     @Volatile
     private var captureEnabledCache: CaptureEnabledCache? = null
 
     @Volatile
     private var captureSessionCache: CaptureSessionCache? = null
+
+    private var captureClassLoader: ClassLoader? = null
+    private val captureConfigObservers = mutableMapOf<String, FileObserver>()
+    private val captureConfigRefresh = Runnable {
+        runCatching { refreshCaptureState() }.onFailure {
+            Log.error(TAG, "同步抓包开关失败: ${it.stackTraceToString()}")
+        }
+    }
 
     private val structuredReferenceKeys = setOf(
         "taskType", "sceneCode", "taskStatus", "taskProgress", "taskRequire", "taskId", "taskGroupId",
@@ -204,43 +216,108 @@ object RpcTrafficCapture {
         "params", "fetchedData", "fetchedData.params"
     )
 
+    @Synchronized
     fun install(
         classLoader: ClassLoader,
-        enabledProvider: () -> Boolean = { BaseModel.debugMode.value == true },
+        enabledProvider: () -> Boolean = { Config.isLoaded() && BaseModel.debugMode.value == true },
     ): Boolean {
+        captureClassLoader = classLoader
         captureEnabledProvider = enabledProvider
-        val miniHttpInstalled = runCatching { installMiniHttpHooks(classLoader) }.onFailure {
-            runCatching { Log.runtime(TAG, "安装小程序 HTTP 抓包失败: ${it.message}") }
-        }.getOrDefault(false)
-        synchronized(installLock) {
-            var installedAny = miniHttpInstalled
-            val ariverRequestInstalled = installAriverRequestHook(classLoader)
-            val mtopRequestInstalled = installMtopRequestHook(classLoader)
-            if (ariverRequestInstalled || mtopRequestInstalled) {
-                installedAny = true
-                installAriverResponseHook(classLoader)
-            }
-            if (installH5Hook(classLoader)) {
-                installedAny = true
-            }
-            if (installedAny) {
-                if (RuntimeIdentityGuard.isMainProcess() && isCaptureEnabled()) {
-                    activeSessionId()
-                }
-                Log.runtime(TAG, "已安装抓包 Hook")
-            } else {
-                Log.runtime(TAG, "未找到可安装的抓包 Hook")
-            }
-            return installedAny
-        }
+        return refreshCaptureState()
     }
 
-    /**
-     * Lite processes do not initialize the task runtime. Read the existing capture switch directly
-     * from persistent configuration so they can remain capture-only.
-     */
+    @Synchronized
+    fun refreshCaptureState(): Boolean {
+        val classLoader = captureClassLoader ?: return false
+        captureEnabledCache = null
+        if (!isCaptureEnabled()) {
+            synchronized(installLock) {
+                captureHooks.entries.toList().forEach { (method, handle) ->
+                    runCatching { handle.unhook() }.onSuccess {
+                        captureHooks.remove(method, handle)
+                    }.onFailure {
+                        Log.error(TAG, "卸载抓包 Hook 失败: $method ${it.stackTraceToString()}")
+                    }
+                }
+                ariverRequestHookInstalled.set(false)
+                mtopRequestHookInstalled.set(false)
+                h5HookInstalled.set(false)
+                miniHttpClassInstallations.clear()
+            }
+            if (RuntimeIdentityGuard.isMainProcess()) {
+                resetCaptureSession()
+            } else {
+                synchronized(sessionLock) {
+                    clearPendingAriverRequests()
+                    sessionId = null
+                    sessionStarted = false
+                    captureSessionCache = null
+                    reportedHttpClasses.clear()
+                    synchronized(reportedHttpCallSites) { reportedHttpCallSites.clear() }
+                }
+            }
+            return false
+        }
+        // 类解析可能触发宿主的类加载回调，不持有安装锁等待 ClassLoader。
+        val miniHttpInstalled = runCatching { installMiniHttpHooks(classLoader) }.onFailure {
+            Log.runtime(TAG, "安装小程序 HTTP 抓包失败: ${it.message}")
+        }.getOrDefault(false)
+        val ariverInstalled = installAriverRequestHook(classLoader)
+        val mtopInstalled = runCatching {
+            installMtopRequestHook(Class.forName(MTOP_REQUEST_CLASS, false, classLoader))
+        }.onFailure {
+            if (it is ClassNotFoundException) {
+                Log.runtime(TAG, "Mtop 抓包入口尚未加载，等待类加载后安装: $MTOP_REQUEST_CLASS")
+            } else {
+                Log.error(TAG, "解析 Mtop 抓包入口失败: ${it.stackTraceToString()}")
+            }
+        }.getOrDefault(false)
+        if (ariverInstalled || mtopInstalled) installAriverResponseHook(classLoader)
+        val h5Installed = installH5Hook(classLoader)
+        val installed = miniHttpInstalled || ariverInstalled || mtopInstalled || h5Installed
+        if (installed && RuntimeIdentityGuard.isMainProcess() && isCaptureEnabled()) activeSessionId()
+        return installed
+    }
+
+    private fun installCaptureHook(method: Method, hooker: XposedInterface.Hooker): Boolean =
+        synchronized(installLock) {
+            if (!isCaptureEnabled()) return@synchronized false
+            if (!captureHooks.containsKey(method)) {
+                captureHooks[method] = ApplicationHook.requireXposedInterface().hook(method).intercept(hooker)
+            }
+            true
+        }
+
+    /** Lite 进程只读取配置并观察抓包开关，不初始化业务任务。 */
     fun installForCaptureOnlyProcess(classLoader: ClassLoader): Boolean =
         install(classLoader, ::isCaptureEnabledInPersistentConfig)
+
+    @Suppress("DEPRECATION")
+    private fun observeCaptureConfig(configDir: File, userDir: File?) {
+        val directories = listOfNotNull(configDir, userDir).filter { it.isDirectory }.associateBy { it.absolutePath }
+        synchronized(captureConfigObservers) {
+            val obsolete = captureConfigObservers.keys.filter { it !in directories }
+            obsolete.forEach { captureConfigObservers.remove(it)?.stopWatching() }
+            directories.forEach { (name, directory) ->
+                if (captureConfigObservers.containsKey(name)) return@forEach
+                val observer = object : FileObserver(
+                    name, FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.MOVED_FROM or
+                        FileObserver.CREATE or FileObserver.DELETE or FileObserver.DELETE_SELF or FileObserver.MOVE_SELF,
+                ) {
+                    override fun onEvent(event: Int, path: String?) {
+                        if (path == null || path == "DataStore.json" || path == "config_v2.json" ||
+                            path == Files.getDefaultConfigV2File().name || File(directory, path).isDirectory
+                        ) {
+                            pendingCleanupHandler.removeCallbacks(captureConfigRefresh)
+                            pendingCleanupHandler.post(captureConfigRefresh)
+                        }
+                    }
+                }
+                observer.startWatching()
+                captureConfigObservers[name] = observer
+            }
+        }
+    }
 
     fun newRequestId(): String = UUID.randomUUID().toString()
 
@@ -427,6 +504,7 @@ object RpcTrafficCapture {
     }
 
     private fun installMiniHttpHooks(classLoader: ClassLoader): Boolean {
+        if (!isCaptureEnabled()) return false
         var listenerInstalled = false
         var requestInstalled = false
         var responseInstalled = false
@@ -443,30 +521,28 @@ object RpcTrafficCapture {
                 loaderClass.declaredMethods.filter { method ->
                     method.name == "loadClass" && method.parameterTypes.firstOrNull() == String::class.java
                 }.forEach methodLoop@ { method ->
-                    val previous = miniHttpMethodInstallations.putIfAbsent(method, false)
-                    if (previous != null) {
-                        listenerInstalled = listenerInstalled || previous
+                    if (captureHooks.containsKey(method)) {
+                        listenerInstalled = true
                         return@methodLoop
                     }
                     runCatching {
                         method.isAccessible = true
-                        ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                        if (!installCaptureHook(method) intercept@ { chain ->
                             val result = chain.proceed()
                             if (result is Class<*> &&
                                 (result.name == MINI_REQUEST_CLASS || result.name == MINI_RESPONSE_CLASS ||
-                                    result.name == H5_NETWORK_CLASS || result.name == XRIVER_REQUEST_CLASS)
+                                    result.name == H5_NETWORK_CLASS || result.name == XRIVER_REQUEST_CLASS ||
+                                    result.name == MTOP_REQUEST_CLASS)
                             ) {
                                 runCatching { installMiniHttpClass(result) }.onFailure {
                                     runCatching { Log.runtime(TAG, "延迟安装小程序 HTTP 抓包失败: ${it.stackTraceToString()}") }
                                 }
                             }
                             result
-                        }
-                        miniHttpMethodInstallations[method] = true
+                        }) return@runCatching
                         listenerInstalled = true
                         Log.runtime(TAG, "已安装小程序 HTTP 类加载监听: $method")
                     }.onFailure {
-                        miniHttpMethodInstallations.remove(method, false)
                         runCatching { Log.runtime(TAG, "安装小程序 HTTP 类加载监听失败: $method ${it.stackTraceToString()}") }
                     }
                 }
@@ -493,10 +569,11 @@ object RpcTrafficCapture {
                 "network=$networkInstalled, xriver=$xriverInstalled, process=${currentProcessName()}, " +
                 "loader=${classLoader.javaClass.name}@${System.identityHashCode(classLoader)}",
         )
-        return requestInstalled || responseInstalled || networkInstalled || xriverInstalled
+        return listenerInstalled || requestInstalled || responseInstalled || networkInstalled || xriverInstalled
     }
 
     private fun installMiniHttpClass(targetClass: Class<*>): Boolean {
+        if (targetClass.name == MTOP_REQUEST_CLASS) return installMtopRequestHook(targetClass)
         reportMiniHttpClass(targetClass)
         if (targetClass.name == H5_NETWORK_CLASS) return installH5NetworkHook(targetClass)
         if (targetClass.name == XRIVER_REQUEST_CLASS) return installXriverHttpHooks(targetClass)
@@ -505,7 +582,10 @@ object RpcTrafficCapture {
             MINI_RESPONSE_CLASS -> false
             else -> return false
         }
-        miniHttpClassInstallations.putIfAbsent(targetClass, false)?.let { return it }
+        synchronized(installLock) {
+            if (!isCaptureEnabled()) return false
+            miniHttpClassInstallations.putIfAbsent(targetClass, false)?.let { return it }
+        }
         val methodName = if (isRequest) "processAsyncRequest" else "onHandleResponse"
         val loaderIdentity = targetClass.classLoader?.let {
             "${it.javaClass.name}@${System.identityHashCode(it)}"
@@ -523,13 +603,13 @@ object RpcTrafficCapture {
             }
             if (methods.isEmpty()) error("${targetClass.name}#$methodName 未找到可安装方法")
             methods.values.forEach { method ->
-                if (miniHttpMethodInstallations.putIfAbsent(method, false) != null) return@forEach
+                if (captureHooks.containsKey(method)) return@forEach
                 runCatching {
                     val callbackIndex = if (isRequest) method.parameterTypes.indexOfFirst {
                         it.name == "com.alibaba.ariver.engine.api.bridge.extension.BridgeCallback"
                     } else -1
                     method.isAccessible = true
-                    ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                    if (!installCaptureHook(method) intercept@ { chain ->
                         val callback = chain.args.getOrNull(callbackIndex)
                         var linkedCallback: Any? = null
                         val pending = runCatching capture@ {
@@ -644,22 +724,22 @@ object RpcTrafficCapture {
                             }
                         }
                         result
-                    }
-                    miniHttpMethodInstallations[method] = true
+                    }) return@runCatching
                     Log.runtime(
                         TAG,
                         "已安装小程序 HTTP ${if (isRequest) "请求" else "响应"}抓包: $method; " +
                             "process=${currentProcessName()}, loader=$loaderIdentity",
                     )
                 }.onFailure {
-                    miniHttpMethodInstallations.remove(method, false)
                     runCatching { Log.runtime(TAG, "安装小程序 HTTP 抓包失败: $method; loader=$loaderIdentity ${it.stackTraceToString()}") }
                 }
             }
-            if (methods.values.all { miniHttpMethodInstallations[it] == true }) {
-                miniHttpClassInstallations[targetClass] = true
+            synchronized(installLock) {
+                if (isCaptureEnabled() && methods.values.all { captureHooks.containsKey(it) }) {
+                    miniHttpClassInstallations[targetClass] = true
+                }
             }
-            methods.values.any { miniHttpMethodInstallations[it] == true }
+            methods.values.any { captureHooks.containsKey(it) }
         } catch (error: Throwable) {
             runCatching { Log.runtime(TAG, "安装 ${targetClass.name}#$methodName 失败: loader=$loaderIdentity ${error.stackTraceToString()}") }
             false
@@ -669,7 +749,10 @@ object RpcTrafficCapture {
     }
 
     private fun installXriverHttpHooks(targetClass: Class<*>): Boolean {
-        miniHttpClassInstallations.putIfAbsent(targetClass, false)?.let { return it }
+        synchronized(installLock) {
+            if (!isCaptureEnabled()) return false
+            miniHttpClassInstallations.putIfAbsent(targetClass, false)?.let { return it }
+        }
         return try {
             val loader = targetClass.classLoader
             val methods = listOf(
@@ -692,10 +775,10 @@ object RpcTrafficCapture {
                 require(Modifier.isStatic(method.modifiers) && method.returnType == expectedReturnType) {
                     "XRiver HTTP 签名不符: $method"
                 }
-                if (miniHttpMethodInstallations.putIfAbsent(method, false) != null) return@forEach
+                if (captureHooks.containsKey(method)) return@forEach
                 runCatching {
                     method.isAccessible = true
-                    ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                    if (!installCaptureHook(method) intercept@ { chain ->
                         val startedAt = SystemClock.elapsedRealtime()
                         var callSession: String? = null
                         val event = runCatching capture@ {
@@ -745,17 +828,17 @@ object RpcTrafficCapture {
                             runCatching { Log.runtime(TAG, "记录 XRiver HTTP 返回值失败: ${it.stackTraceToString()}") }
                         }
                         result
-                    }
-                    miniHttpMethodInstallations[method] = true
+                    }) return@runCatching
                     Log.runtime(TAG, "已安装 XRiver HTTP 抓包: $method; loader=$loader, process=${currentProcessName()}")
                 }.onFailure {
-                    miniHttpMethodInstallations.remove(method, false)
                     runCatching { Log.runtime(TAG, "安装 XRiver HTTP 抓包失败: $method ${it.stackTraceToString()}") }
                 }
             }
-            val installed = methods.all { miniHttpMethodInstallations[it] == true }
-            if (installed) miniHttpClassInstallations[targetClass] = true
-            installed
+            synchronized(installLock) {
+                val installed = isCaptureEnabled() && methods.all { captureHooks.containsKey(it) }
+                if (installed) miniHttpClassInstallations[targetClass] = true
+                installed
+            }
         } catch (error: Throwable) {
             runCatching { Log.runtime(TAG, "安装 XRiver HTTP 抓包失败: ${targetClass.name} ${error.stackTraceToString()}") }
             false
@@ -820,7 +903,10 @@ object RpcTrafficCapture {
     }
 
     private fun installH5NetworkHook(targetClass: Class<*>): Boolean {
-        miniHttpClassInstallations.putIfAbsent(targetClass, false)?.let { return it }
+        synchronized(installLock) {
+            if (!isCaptureEnabled()) return false
+            miniHttpClassInstallations.putIfAbsent(targetClass, false)?.let { return it }
+        }
         return try {
             val methods = linkedMapOf<List<Class<*>>, Method>()
             var owner: Class<*>? = targetClass
@@ -833,10 +919,10 @@ object RpcTrafficCapture {
             }
             if (methods.isEmpty()) error("${targetClass.name}#enqueue 未找到 Request -> Future 签名")
             methods.values.forEach { method ->
-                if (miniHttpMethodInstallations.putIfAbsent(method, false) != null) return@forEach
+                if (captureHooks.containsKey(method)) return@forEach
                 runCatching {
                     method.isAccessible = true
-                    ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                    if (!installCaptureHook(method) intercept@ { chain ->
                         val requestObject = chain.args.getOrNull(0)
                         val pending = runCatching capture@ {
                             if (requestObject == null || !isCaptureEnabled()) return@capture null
@@ -889,17 +975,17 @@ object RpcTrafficCapture {
                             runCatching { Log.runtime(TAG, "关联 HTTP Future 失败: ${it.stackTraceToString()}") }
                         }
                         result
-                    }
-                    miniHttpMethodInstallations[method] = true
+                    }) return@runCatching
                     Log.runtime(TAG, "已安装公共 HTTP 请求抓包: $method; loader=${targetClass.classLoader}")
                 }.onFailure {
-                    miniHttpMethodInstallations.remove(method, false)
                     runCatching { Log.runtime(TAG, "安装公共 HTTP 请求抓包失败: $method ${it.stackTraceToString()}") }
                 }
             }
-            val installed = methods.values.all { miniHttpMethodInstallations[it] == true }
-            if (installed) miniHttpClassInstallations[targetClass] = true
-            installed
+            synchronized(installLock) {
+                val installed = isCaptureEnabled() && methods.values.all { captureHooks.containsKey(it) }
+                if (installed) miniHttpClassInstallations[targetClass] = true
+                installed
+            }
         } catch (error: Throwable) {
             runCatching { Log.runtime(TAG, "读取公共 HTTP 接口失败: ${error.stackTraceToString()}") }
             false
@@ -922,10 +1008,10 @@ object RpcTrafficCapture {
         }
         if (methods.isEmpty()) error("${futureClass.name} 没有可观察的 Future.get/cancel")
         methods.values.forEach { method ->
-            if (miniHttpMethodInstallations.putIfAbsent(method, false) != null) return@forEach
+            if (captureHooks.containsKey(method)) return@forEach
             runCatching {
                 method.isAccessible = true
-                ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                if (!installCaptureHook(method) intercept@ { chain ->
                     val future = chain.getThisObject() ?: return@intercept chain.proceed()
                     val observed = runCatching {
                         synchronized(pendingLock) {
@@ -1007,11 +1093,9 @@ object RpcTrafficCapture {
                         calls.remove(future)
                         if (calls.isEmpty()) responseHookCalls.remove()
                     }
-                }
-                miniHttpMethodInstallations[method] = true
+                }) return@runCatching
                 Log.runtime(TAG, "已安装 HTTP Future 观察: $method; loader=${futureClass.classLoader}")
             }.onFailure {
-                miniHttpMethodInstallations.remove(method, false)
                 runCatching { Log.runtime(TAG, "安装 HTTP Future 观察失败: $method ${it.stackTraceToString()}") }
             }
         }
@@ -1101,10 +1185,10 @@ object RpcTrafficCapture {
                     contracts.any { it.isAssignableFrom(method.returnType) })
         }
         methods.forEach { method ->
-            if (miniHttpMethodInstallations.putIfAbsent(method, false) != null) return@forEach
+            if (captureHooks.containsKey(method)) return@forEach
             runCatching {
                 method.isAccessible = true
-                ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                if (!installCaptureHook(method) intercept@ { chain ->
                     val owner = chain.getThisObject() ?: return@intercept chain.proceed()
                     val pending = runCatching { peekPendingAriverRequest(owner) }.getOrNull()
                         ?: return@intercept chain.proceed()
@@ -1137,11 +1221,9 @@ object RpcTrafficCapture {
                         calls.remove(pending)
                         if (calls.isEmpty()) bodyAccessorCalls.remove()
                     }
-                }
-                miniHttpMethodInstallations[method] = true
+                }) return@runCatching
                 Log.runtime(TAG, "已安装 HTTP 实体/取流观察: $method; loader=${bodyClass.classLoader}")
             }.onFailure {
-                miniHttpMethodInstallations.remove(method, false)
                 runCatching { Log.runtime(TAG, "安装 HTTP 实体/取流观察失败: $method ${it.stackTraceToString()}") }
             }
         }
@@ -1161,12 +1243,11 @@ object RpcTrafficCapture {
             }
         }
         methods.forEach { method ->
-            val installation = synchronized(miniHttpMethodInstallations) {
-                if (miniHttpMethodInstallations[method] == true) return@forEach
-                miniHttpMethodInstallations[method] = false
+            val installation = synchronized(installLock) {
+                if (captureHooks.containsKey(method)) return@forEach
                 runCatching {
                     method.isAccessible = true
-                    ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                    if (!installCaptureHook(method) intercept@ { chain ->
                         val stream = chain.getThisObject() ?: return@intercept chain.proceed()
                         val body = runCatching {
                             // 包括继承的方法；未关联的流直接执行宿主调用，不读取配置或流内容。
@@ -1264,19 +1345,16 @@ object RpcTrafficCapture {
                             calls.remove(body.pending)
                             if (calls.isEmpty()) responseHookCalls.remove()
                         }
-                    }
-                    miniHttpMethodInstallations[method] = true
-                }.onFailure {
-                    miniHttpMethodInstallations.remove(method, false)
+                    }) return@runCatching
                 }
             }
             installation.onSuccess {
-                runCatching { Log.runtime(TAG, "已安装 HTTP 流观察: $method; loader=${streamClass.classLoader}") }
+                if (captureHooks.containsKey(method)) runCatching { Log.runtime(TAG, "已安装 HTTP 流观察: $method; loader=${streamClass.classLoader}") }
             }.onFailure {
                 runCatching { Log.runtime(TAG, "安装 HTTP 流观察失败: $method ${it.stackTraceToString()}") }
             }
         }
-        return methods.any { it.name == "read" } && methods.all { miniHttpMethodInstallations[it] == true }
+        return methods.any { it.name == "read" } && methods.all { captureHooks.containsKey(it) }
     }
 
     private fun recordHttpBody(
@@ -1495,7 +1573,7 @@ object RpcTrafficCapture {
             )
             val rpcMethod = findMethod(bridgeClass, "rpc", 16, String::class.java)
                 ?: error("RpcBridgeExtension#rpc 未找到")
-            ApplicationHook.requireXposedInterface().hook(rpcMethod).intercept { chain ->
+            if (!installCaptureHook(rpcMethod) intercept@ { chain ->
                 val args = chain.args
                 val methodName = args.getOrNull(0) as? String
                 val callback = args.getOrNull(15)
@@ -1544,7 +1622,7 @@ object RpcTrafficCapture {
                     tryRecordAriverResponseFromField(callback)
                 }
                 result
-            }
+            }) return@runCatching false
             ariverRequestHookInstalled.set(true)
             Log.runtime(TAG, "已安装 RpcBridgeExtension#rpc 抓包")
             true
@@ -1553,16 +1631,14 @@ object RpcTrafficCapture {
         }.getOrDefault(false)
     }
 
-    private fun installMtopRequestHook(classLoader: ClassLoader): Boolean {
-        if (mtopRequestHookInstalled.get()) {
-            return true
+    private fun installMtopRequestHook(bridgeClass: Class<*>): Boolean {
+        synchronized(installLock) {
+            if (!isCaptureEnabled()) return false
+            if (mtopRequestHookInstalled.get()) return true
+            miniHttpClassInstallations.putIfAbsent(bridgeClass, false)?.let { return it }
         }
         return runCatching {
-            val bridgeClass = Class.forName(
-                "com.alibaba.ariver.jsapi.mtop.MtopBridgeExtention",
-                false,
-                classLoader,
-            )
+            val classLoader = bridgeClass.classLoader
             val jsonClass = Class.forName(General.JSON_OBJECT_NAME, false, classLoader)
             val callbackClass = Class.forName(
                 "com.alibaba.ariver.engine.api.bridge.extension.BridgeCallback",
@@ -1579,7 +1655,7 @@ object RpcTrafficCapture {
                 ?: error("MtopBridgeExtention#sendMtop 未找到可关联的请求签名")
             val payloadIndex = mtopMethod.parameterTypes.indexOfFirst(jsonClass::isAssignableFrom)
             val callbackIndex = mtopMethod.parameterTypes.indexOfFirst(callbackClass::isAssignableFrom)
-            ApplicationHook.requireXposedInterface().hook(mtopMethod).intercept { chain ->
+            if (!installCaptureHook(mtopMethod) intercept@ { chain ->
                 val args = chain.args
                 val callback = args.getOrNull(callbackIndex)
                 val requestPayload = args.getOrNull(payloadIndex)?.toString()
@@ -1622,13 +1698,19 @@ object RpcTrafficCapture {
                 }
                 callback?.let(::tryRecordAriverResponseFromField)
                 result
-            }
+            }) return@runCatching false
             mtopRequestHookInstalled.set(true)
             Log.runtime(TAG, "已安装 MtopBridgeExtention#sendMtop 抓包")
             true
         }.onFailure {
-            Log.runtime(TAG, "安装 MtopBridgeExtention#sendMtop 抓包失败: ${it.message}")
-        }.getOrDefault(false)
+            Log.error(TAG, "安装 MtopBridgeExtention#sendMtop 抓包失败: ${it.stackTraceToString()}")
+        }.getOrDefault(false).also { installed ->
+            if (installed) {
+                miniHttpClassInstallations[bridgeClass] = true
+            } else {
+                miniHttpClassInstallations.remove(bridgeClass, false)
+            }
+        }
     }
 
     private fun installAriverResponseHook(classLoader: ClassLoader): Boolean = runCatching {
@@ -1655,10 +1737,10 @@ object RpcTrafficCapture {
             owner = owner.superclass
         }
         methods.values.forEach { method ->
-            if (miniHttpMethodInstallations.putIfAbsent(method, false) != null) return@forEach
+            if (captureHooks.containsKey(method)) return@forEach
             runCatching {
                 method.isAccessible = true
-                ApplicationHook.requireXposedInterface().hook(method).intercept { chain ->
+                if (!installCaptureHook(method) intercept@ { chain ->
                     val callback = chain.getThisObject()
                     val calls = responseHookCalls.get() ?: IdentityHashMap<Any, Boolean>().also(responseHookCalls::set)
                     val outermost = callback != null && calls.put(callback, true) == null
@@ -1709,15 +1791,13 @@ object RpcTrafficCapture {
                         if (outermost) calls.remove(callback)
                         if (calls.isEmpty()) responseHookCalls.remove()
                     }
-                }
-                miniHttpMethodInstallations[method] = true
+                }) return@runCatching
                 Log.runtime(TAG, "已安装 BridgeCallback 响应抓包: $method; loader=${callbackClass.classLoader}")
             }.onFailure {
-                miniHttpMethodInstallations.remove(method, false)
                 runCatching { Log.runtime(TAG, "安装 BridgeCallback 响应抓包失败: $method ${it.stackTraceToString()}") }
             }
         }
-        methods.isNotEmpty() && methods.values.all { miniHttpMethodInstallations[it] == true }
+        methods.isNotEmpty() && methods.values.all { captureHooks.containsKey(it) }
     }.onFailure {
         runCatching { Log.runtime(TAG, "读取 BridgeCallback 接口失败: ${callbackClass.name} ${it.stackTraceToString()}") }
     }.getOrDefault(false)
@@ -1735,7 +1815,7 @@ object RpcTrafficCapture {
             val rpcCallMethod = findMethod(rpcUtilClass, "rpcCall", 13, String::class.java)
                 ?: findMethod(rpcUtilClass, "rpcCall", 12, String::class.java)
                 ?: error("H5RpcUtil#rpcCall 未找到")
-            ApplicationHook.requireXposedInterface().hook(rpcCallMethod).intercept { chain ->
+            if (!installCaptureHook(rpcCallMethod) intercept@ { chain ->
                 val args = chain.args
                 val methodName = args.getOrNull(0) as? String
                 val captureEnabled = isCaptureEnabled() && !methodName.isNullOrBlank()
@@ -1776,7 +1856,7 @@ object RpcTrafficCapture {
                     }
                 }
                 result
-            }
+            }) return@runCatching false
             h5HookInstalled.set(true)
             Log.runtime(TAG, "已安装 H5RpcUtil#rpcCall 抓包")
             true
@@ -2055,7 +2135,7 @@ object RpcTrafficCapture {
                         put("refs", JSONObject())
                         put("payload", JSONObject().apply {
                             put("httpInterfaces", JSONArray(httpClassDeclarations.values.toList()))
-                            put("httpHooks", JSONArray(miniHttpMethodInstallations.entries.filter { it.value }.map { it.key.toString() }))
+                            put("httpHooks", JSONArray(captureHooks.keys.map { it.toString() }))
                         })
                     }.toString(),
                 )
@@ -2301,6 +2381,7 @@ object RpcTrafficCapture {
             val userConfigFile = activeUserId
                 ?.let { userId -> File(File(configDir, userId), "config_v2.json") }
                 ?.takeIf { it.isFile }
+            observeCaptureConfig(configDir, activeUserId?.let { File(configDir, it) })
             val configFile = userConfigFile ?: Files.getDefaultConfigV2File().takeIf { it.isFile }
             val fingerprint = listOf(
                 dataStoreFile.lastModified(),
