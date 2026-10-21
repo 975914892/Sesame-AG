@@ -10,8 +10,6 @@ import org.json.JSONObject
 /**
  * @file ReadingDada.kt
  * @brief 阅读答题功能模块
- * @author
- * @since 2023/08/22
  */
 object ReadingDada {
     private const val TAG = "ReadingDada"

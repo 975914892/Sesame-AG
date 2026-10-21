@@ -10,8 +10,6 @@ import java.util.UUID
  * @class AntStallRpcCall
  * @brief 蚂蚁小铺 (Ant Stall) RPC 调用类
  * @details 处理蚂蚁小铺相关的网络请求，包括店铺管理、任务、好友互动等
- * @author
- * @since 2023/08/22
  */
 object AntStallRpcCall {
 
