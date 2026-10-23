@@ -117,7 +117,7 @@ class ExchangeFetchSession private constructor(
         active = null
     }
 
-    fun pageTurnDelay(baseMillis: Long = 1000L) {
+    fun pageTurnDelay(baseMillis: Long = 850L) {
         if (replayIndex >= records.size) {
             checkCurrent()
             ExchangeFetchPacing.pageTurnDelay(baseMillis = baseMillis)

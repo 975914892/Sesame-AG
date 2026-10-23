@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
@@ -70,7 +72,7 @@ object GreenLife {
                 val attemptResult = tryForestMarket(sourceType)
                 if (attemptResult.collected) {
                     collected = true
-                    CoroutineUtils.sleepCompat(300)
+                    CoroutineUtils.sleepCompat(RandomUtil.nextLong(255, 301))
                     continue
                 }
                 if (collected || !attemptResult.shouldContinue) return collected

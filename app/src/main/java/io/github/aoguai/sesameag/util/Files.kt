@@ -19,8 +19,6 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.io.IOException
 import java.nio.file.StandardCopyOption
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 import java.text.SimpleDateFormat
 import java.util.Date
 import org.json.JSONArray
@@ -28,20 +26,17 @@ import org.json.JSONObject
 
 object Files {
     private val TAG = Files::class.java.simpleName
-    private val accountStorageLock = ReentrantLock()
     private val lockedAccounts = ThreadLocal.withInitial { mutableSetOf<String>() }
 
     /** 同一进程可重入，跨进程覆盖账号数据的整个读改写过程。 */
     fun <T> withAccountLock(userId: String, action: () -> T): T = StoreAccess.transaction {
-        accountStorageLock.withLock {
-            require(userId.isNotBlank()) { "账号为空" }
-            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
-            val held = checkNotNull(lockedAccounts.get())
-            if (userId in held) return@withLock action()
-            held.add(userId)
-            try { recoverAccountTransaction(userId); action() }
-            finally { held.remove(userId) }
-        }
+        require(userId.isNotBlank()) { "账号为空" }
+        io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
+        val held = checkNotNull(lockedAccounts.get())
+        if (userId in held) return@transaction action()
+        held.add(userId)
+        try { recoverAccountTransaction(userId); action() }
+        finally { held.remove(userId) }
     }
 
     /** 备份先落盘；未提交的多文件变更在下次账号读取前恢复。 */

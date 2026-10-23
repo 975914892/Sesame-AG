@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antSesameCredit
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import android.annotation.SuppressLint
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.Status.Companion.hasFlagToday
@@ -70,8 +72,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -99,7 +101,7 @@ class AntSesameCredit : ModelTask() {
     internal var sesameGrainExchange: BooleanModelField? = null
     private var sesameGrainExchangeList: SelectModelField? = null
 
-    private val sesameWorkflowMutex = Mutex()
+    private val sesameWorkflowQueue = SerialTaskQueue()
     private val sesameCreditTaskBlacklistModule = "芝麻信用"
     private val sesameAlchemyTaskBlacklistModule = "芝麻炼金"
     private val sesamePushModelTaskSnapshots = linkedMapOf<String, SesamePushModelTaskSnapshot>()
@@ -372,7 +374,7 @@ class AntSesameCredit : ModelTask() {
 
     override fun runJava() {
         runBlocking(TaskExecutionReport.current()?.context ?: EmptyCoroutineContext) {
-            sesameWorkflowMutex.withLock {
+            sesameWorkflowQueue.submit {
             try {
                 Log.sesame("执行开始-${getName()}")
                 requestLocationSuspend()
@@ -437,7 +439,7 @@ class AntSesameCredit : ModelTask() {
             ownerUserId = payload.optString("owner_user_id"),
             sessionEpoch = payload.optLong("session_epoch"),
             source = "$PERSISTENT_CONFIRMATION_KIND:$source",
-            workflowMutex = sesameWorkflowMutex,
+            workflowQueue = sesameWorkflowQueue,
             afterExecution = { if (needsConfirmation) scheduleSesameConfirmation(payload) },
         ) {
             val eligible = isEnable() &&
@@ -1040,7 +1042,7 @@ class AntSesameCredit : ModelTask() {
         CoroutineUtils.run {
             val adapter = SesameCreditTaskFlowAdapter()
             try {
-                val result = TaskFlowEngine(adapter, roundSleepMs = 1000L).run()
+                val result = TaskFlowEngine(adapter, roundSleepMs = 850L).run()
                 val finishedAllRounds = result.completed || adapter.canMarkTodayDone()
                 Log.sesame("芝麻信用💳[任务总计]#轮次:${result.rounds}, 报名:${adapter.joinedActionCount}个, 完成动作已提交:${adapter.completedActionCount}个, 跳过:${adapter.skippedTaskCount}个")
 
@@ -2765,7 +2767,7 @@ class AntSesameCredit : ModelTask() {
 
     internal suspend fun processAlchemyTaskListsUntilStable(executionState: TaskFlowExecutionState): Int {
         val adapter = SesameAlchemyTaskFlowAdapter(executionState)
-        val result = TaskFlowEngine(adapter, roundSleepMs = 1000L, executionState = executionState).run()
+        val result = TaskFlowEngine(adapter, roundSleepMs = 850L, executionState = executionState).run()
         if (adapter.interrupted || result.stopped || ApplicationHookConstants.isOffline()) {
             Log.sesame("芝麻炼金⚗️[任务流中断]#轮次=${result.rounds}")
         }
@@ -3249,7 +3251,7 @@ class AntSesameCredit : ModelTask() {
     private suspend fun doZhimaTreeTasks(): Unit =
         CoroutineUtils.run {
             val adapter = ZhimaTreeTaskFlowAdapter()
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 800L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 680L).run()
             if (adapter.hasHandledReceiveTask && runResult.completed && adapter.canMarkTodayDone()) {
                 setFlagToday(StatusFlags.FLAG_SESAME_ZHIMA_TREE_TASK_HANDLED_TODAY)
                 Log.sesame("芝麻树🌳[今日任务奖励已确认处理完成]")
@@ -5081,7 +5083,7 @@ class AntSesameCredit : ModelTask() {
                         ),
                     )
                     collectedRounds++
-                    Thread.sleep(1200)
+                    Thread.sleep(RandomUtil.nextLong(1020, 1201))
                 }
             } catch (e: Exception) {
                 Log.printStackTrace(TAG, "queryAndCollect err", e)

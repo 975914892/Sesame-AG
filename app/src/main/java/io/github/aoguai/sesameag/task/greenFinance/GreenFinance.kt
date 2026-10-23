@@ -461,7 +461,7 @@ class GreenFinance : ModelTask() {
             try {
                 TaskFlowEngine(
                     GreenFinanceTaskFlowAdapter(appletId, tag, name),
-                    roundSleepMs = 500L
+                    roundSleepMs = 425L
                 ).run()
             } catch (th: Throwable) {
                 Log.runtime(tag, "doTask err:")

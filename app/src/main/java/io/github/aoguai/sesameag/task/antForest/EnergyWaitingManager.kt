@@ -27,8 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -193,7 +192,6 @@ object EnergyWaitingManager {
     // 蹲点任务存储
     private val waitingTasks = ConcurrentHashMap<String, WaitingTask>()
     private val waitingJobs = ConcurrentHashMap<String, Job>()
-    private val waitingJobStartLock = Any()
     private val bubbleCooldownTombstones = ConcurrentHashMap<String, Long>()
     private val loggedFrontLaunchDisabledWaitingTasks = ConcurrentHashMap.newKeySet<String>()
 
@@ -208,8 +206,8 @@ object EnergyWaitingManager {
                 CoroutineName("PreciseEnergyWaitingManager"),
         )
 
-    // 互斥锁，防止并发操作
-    private val taskMutex = Mutex()
+    // 完整处理任务集合的一次变更后再接收下一项。
+    private val taskQueue = SerialTaskQueue()
 
     // 最后执行时间，用于间隔控制
     private val lastExecuteTime = AtomicLong(0)
@@ -579,11 +577,11 @@ object EnergyWaitingManager {
         source: String,
     ) {
         managerScope.launch {
-            taskMutex.withLock {
-                if (waitingTasks.containsKey(task.taskId)) return@withLock
+            taskQueue.submit {
+                if (waitingTasks.containsKey(task.taskId)) return@submit
                 if (!isWithinWaitingExecutionWindow(task)) {
                     consumePersistentWaitingTask(task.taskId, "恢复队列执行时已超过两分钟窗口 source=$source")
-                    return@withLock
+                    return@submit
                 }
                 waitingTasks[task.taskId] = task
                 EnergyWaitingPersistence.saveTasks(waitingTasks)
@@ -655,7 +653,7 @@ object EnergyWaitingManager {
         userHomeObj: JSONObject? = null,
     ) {
         managerScope.launch {
-            taskMutex.withLock {
+            taskQueue.submit {
                 val currentTime = System.currentTimeMillis()
                 val taskId = "${userId}_$bubbleId"
                 cleanupExpiredBubbleCooldowns(currentTime)
@@ -667,7 +665,7 @@ object EnergyWaitingManager {
                     )
                     removeWaitingTask(taskId)
                     EnergyWaitingPersistence.saveTasks(waitingTasks)
-                    return@withLock
+                    return@submit
                 }
 
                 // 检查是否已存在相同的任务
@@ -676,7 +674,7 @@ object EnergyWaitingManager {
                     // 如果已存在且时间相同，跳过添加
                     if (existingTask.produceTime == produceTime) {
                         Log.forest("蹲点任务[$taskId][userId=$userId,bubbleId=$bubbleId,from=$fromTag]已存在且时间相同，跳过重复添加")
-                        return@withLock
+                        return@submit
                     }
                     // 如果时间不同，记录更新信息
                     Log.forest(
@@ -707,7 +705,7 @@ object EnergyWaitingManager {
                         // 移除无效的蹲点任务
                         removeWaitingTask(taskId)
                         EnergyWaitingPersistence.saveTasks(waitingTasks)
-                        return@withLock
+                        return@submit
                     }
                 } else if (isSelf) {
                     // 自己的账号：不获取保护时间，直接设置为0
@@ -729,7 +727,7 @@ object EnergyWaitingManager {
                         "能量球[$bubbleId][taskId=$taskId][user=$userName]等待时间过长(${waitTime / 1000 / 60}分钟 > ${MAX_WAIT_TIME_MS / 1000 / 60}分钟)，本次不加入蹲点队列，当前有效任务${waitingTasks.size}个",
                     )
                     EnergyWaitingPersistence.saveTasks(waitingTasks)
-                    return@withLock
+                    return@submit
                 }
 
                 val task =
@@ -1057,17 +1055,10 @@ object EnergyWaitingManager {
                     }
                 }
             }
-        val jobAccepted =
-            synchronized(waitingJobStartLock) {
-                val existingJob = waitingJobs[task.taskId]
-                if (existingJob != null && !existingJob.isCompleted) {
-                    Log.forest("精确蹲点任务[${task.taskId}]已在运行，复用现有协程")
-                    false
-                } else {
-                    waitingJobs[task.taskId] = job
-                    true
-                }
-            }
+        val acceptedJob = waitingJobs.compute(task.taskId) { _, existing ->
+            if (existing != null && !existing.isCompleted) existing else job
+        }
+        val jobAccepted = acceptedJob === job
         if (jobAccepted) {
             persistentScheduleId?.let { scheduleId ->
                 job.invokeOnCompletion { error ->
@@ -1090,6 +1081,7 @@ object EnergyWaitingManager {
                 }
             }
         } else {
+            Log.forest("精确蹲点任务[${task.taskId}]已在运行，复用现有协程")
             job.cancel()
         }
     }
@@ -1135,24 +1127,24 @@ object EnergyWaitingManager {
      */
     @SuppressLint("SimpleDateFormat")
     private suspend fun executePreciseWaitingTask(task: WaitingTask) {
-        taskMutex.withLock {
+        taskQueue.submit {
             try {
                 // 检查任务是否仍然有效
                 if (!waitingTasks.containsKey(task.taskId)) {
                     Log.forest("精确蹲点任务[${task.taskId}]已被移除，跳过执行")
-                    return@withLock
+                    return@submit
                 }
                 if (!isWithinWaitingExecutionWindow(task)) {
                     discardExpiredWaitingTask(task, "执行前已超过两分钟执行窗口")
-                    return@withLock
+                    return@submit
                 }
                 if (isBubbleInCooldown(task.userId, task.bubbleId)) {
                     discardExpiredWaitingTask(task, "目标气泡仍在冷却墓碑内")
-                    return@withLock
+                    return@submit
                 }
                 if (!isWaitingCollectionAllowed()) {
                     logWaitingCollectionPaused("precise", task)
-                    return@withLock
+                    return@submit
                 }
 
                 // 随机间隔控制：防止频繁请求，使用随机间隔更自然
@@ -1190,7 +1182,7 @@ object EnergyWaitingManager {
                 val isProtectionEnd = if (task.isSelf()) true else protectionEndTime <= actualTime
                 if (energyTimeRemain > 300) { // 如果还有超过5分钟才成熟，直接跳过
                     Log.forest("⚠️ 能量距离成熟还有${energyTimeRemain}秒，时机过早，跳过本次收取")
-                    return@withLock
+                    return@submit
                 }
                 // 判断是否需要详细日志（未成熟或刚成熟2分钟内）
                 val needDetailLog = !isEnergyMature || (!task.isSelf() && !isProtectionEnd) || energyTimeRemain > -120
@@ -1247,13 +1239,13 @@ object EnergyWaitingManager {
                         }
                     } else if (additionalWait > 1800000L) {
                         Log.error(TAG, "⚠️ 等待时间过长(${additionalWait / 60000}分钟)，跳过收取")
-                        return@withLock
+                        return@submit
                     }
                 }
 
                 if (!isWithinWaitingExecutionWindow(task)) {
                     discardExpiredWaitingTask(task, "收取前最终检查超过两分钟执行窗口")
-                    return@withLock
+                    return@submit
                 }
 
                 // 执行收取
@@ -1265,7 +1257,7 @@ object EnergyWaitingManager {
                         "⏸ 蹲点收取[${task.getUserTypeTag()}${task.userName}]暂停：${result.message.ifBlank { WAITING_PAUSED_COLLECT_DISABLED }}",
                     )
                     syncPersistentWaitingSchedules()
-                    return@withLock
+                    return@submit
                 }
 
                 // 更新用户模式数据
@@ -1431,7 +1423,7 @@ object EnergyWaitingManager {
 
         managerScope.launch {
             // 获取锁，确保线程安全
-            taskMutex.withLock {
+            taskQueue.submit {
                 val now = System.currentTimeMillis()
 
                 val expiredTasks =
@@ -1512,7 +1504,7 @@ object EnergyWaitingManager {
             return
         }
         managerScope.launch {
-            taskMutex.withLock {
+            taskQueue.submit {
                 val now = System.currentTimeMillis()
                 val expiredTasks = waitingTasks.values.filter { task -> !isWithinWaitingExecutionWindow(task, now) }
                 discardExpiredWaitingTasks(expiredTasks, "到期任务触发 source=$source")
@@ -1604,14 +1596,14 @@ object EnergyWaitingManager {
      */
     private fun revalidateAllWaitingTasks() {
         managerScope.launch {
-            taskMutex.withLock {
+            taskQueue.submit {
                 if (waitingTasks.isEmpty()) {
                     Log.forest("无需验证：当前无蹲点任务")
-                    return@withLock
+                    return@submit
                 }
                 if (!isWaitingCollectionAllowed()) {
                     Log.forest("森林蹲点复核暂停：收集能量未开启，跳过好友主页验证")
-                    return@withLock
+                    return@submit
                 }
 
                 val tasksToRevalidate = waitingTasks.values.toList()
@@ -1779,23 +1771,23 @@ object EnergyWaitingManager {
                         loadedTasks,
                         verifyRemoteHome = verifyRemoteHome,
                     ) { task ->
-                        taskMutex.withLock {
+                        taskQueue.submit {
                             try {
                                 if (!isRunSessionCurrent(ownerUserId, sessionEpoch)) {
-                                    return@withLock false
+                                    return@submit false
                                 }
                                 if (!isWithinWaitingExecutionWindow(task)) {
                                     Log.forest("任务[${task.taskId}]恢复前已超过两分钟执行窗口，跳过")
-                                    return@withLock false
+                                    return@submit false
                                 }
                                 if (isBubbleInCooldown(task.userId, task.bubbleId)) {
                                     Log.forest("任务[${task.taskId}]命中冷却墓碑，跳过恢复")
-                                    return@withLock false
+                                    return@submit false
                                 }
                                 // 检查任务是否已经存在（避免重复添加）
                                 if (waitingTasks.containsKey(task.taskId)) {
                                     Log.forest("任务[${task.taskId}]已存在，跳过重复添加")
-                                    return@withLock false
+                                    return@submit false
                                 }
 
                                 // 添加任务到内存

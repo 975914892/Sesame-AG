@@ -327,7 +327,7 @@ object FarmGame {
             }
             override fun logInfo(message: String) = Log.farm(message)
             override fun logError(message: String) = Log.error(TAG, message)
-        }, roundSleepMs = 300L).run()
+        }, roundSleepMs = 255L).run()
         return when {
             !result.completed -> GameTaskHandlingResult.UNCONFIRMED
             result.progressChanged -> GameTaskHandlingResult.CONFIRMED_PROGRESS

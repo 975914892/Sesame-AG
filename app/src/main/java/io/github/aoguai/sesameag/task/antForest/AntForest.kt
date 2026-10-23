@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
 
 import android.annotation.SuppressLint
@@ -68,7 +70,6 @@ import io.github.aoguai.sesameag.task.exchange.ExchangeSafety
 import io.github.aoguai.sesameag.task.antForest.ForestUtil.hasBombCard
 import io.github.aoguai.sesameag.task.antForest.ForestUtil.hasShield
 import io.github.aoguai.sesameag.task.youthPrivilege.YouthPrivilege
-import io.github.aoguai.sesameag.ui.ObjReference
 import io.github.aoguai.sesameag.util.Average
 import io.github.aoguai.sesameag.util.FriendGuard
 import io.github.aoguai.sesameag.util.GlobalThreadPools
@@ -93,7 +94,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.sync.Mutex
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -119,15 +120,15 @@ import kotlin.math.min
 class AntForest : ModelTask(), EnergyCollectCallback {
     private val taskCount = AtomicInteger(0)
     private val forestTaskBlacklistModule = "蚂蚁森林"
-    internal val plantTaskMutex = Mutex()
-    internal val forestReadMutex = Mutex()
+    internal val plantTaskQueue = SerialTaskQueue()
+    internal val forestReadQueue = SerialTaskQueue()
 
     internal fun triggerPersistentReadTask(payloadJson: String, scheduleId: String, source: String): Boolean {
         val payload = JSONObject(payloadJson)
         var nextRunAt: Long? = null
         return executePersistentChild(
             scheduleId = scheduleId, ownerUserId = payload.optString("owner_user_id"),
-            sessionEpoch = payload.optLong("session_epoch"), source = source, workflowMutex = forestReadMutex,
+            sessionEpoch = payload.optLong("session_epoch"), source = source, workflowQueue = forestReadQueue,
             afterExecution = { nextRunAt?.let { scheduleForestRead(it) } },
         ) {
             if (!isEnable() || forestRead?.value != true ||
@@ -151,7 +152,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             ownerUserId = payload.optString("owner_user_id"),
             sessionEpoch = payload.optLong("session_epoch"),
             source = source,
-            workflowMutex = plantTaskMutex,
+            workflowQueue = plantTaskQueue,
         ) {
             if (!isEnable() || receiveForestTaskAward?.value != true) return@executePersistentChild TaskExecutionOutcome.SKIPPED
             val result = runMemberPlantTasks(payload)
@@ -223,8 +224,9 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     private var robMultiplierCardPropName: String = ""
 
     private val delayTimeMath = Average(5)
-    private val collectEnergyLockLimit = ObjReference(0L)
-    private val doubleCardLockObj = Any()
+    private val collectEnergyQueue = SerialTaskQueue()
+    private var lastCollectEnergyTime = 0L
+    private val propQueue = SerialTaskQueue()
 
     // 并发控制信号量，限制同时处理的好友数量，避免过多并发导致性能问题
     private var concurrencyLimiter = Semaphore(FRIEND_PROCESS_CONCURRENCY)
@@ -369,11 +371,11 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     )
     private val random = Random()
 
-    private var cachedBagObject: JSONObject? = null
-    private var lastQueryPropListTime: Long = 0
+    @Volatile private var propBagCache: Pair<Long, JSONObject>? = null
+    private val propQueryQueue = SerialTaskQueue()
     private var lastUsePropCheckTime: Long = 0
     private var roundPropCheckState: PropCheckRoundState? = null
-    private val forestGameCenterRecentAppRecords = linkedMapOf<String, Long>()
+    private val forestGameCenterRecentAppRecords = java.util.concurrent.atomic.AtomicReference<Map<String, Long>>(emptyMap())
 
     private data class PropCheckRoundState(
         val latestHome: JSONObject?,
@@ -956,15 +958,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         )
         val friendHomeIntervalLimit = MinIntervalLimit(
             createSafeIntervalLimit(queryInterval!!.value, 10, 10000, "好友主页查询间隔"),
-            FRIEND_HOME_MIN_INTERVAL_MS
+            FRIEND_HOME_MIN_INTERVAL_MS,
+            2000
         )
 
         // 添加RPC间隔限制
         addIntervalLimit("alipay.antforest.forest.h5.queryHomePage", queryHomeIntervalLimit)
         addIntervalLimit("alipay.antforest.forest.h5.queryFriendHomePage", friendHomeIntervalLimit)
-        addIntervalLimit("alipay.antmember.forest.h5.collectEnergy", 300)
-        addIntervalLimit("alipay.antmember.forest.h5.queryEnergyRanking", 300)
-        addIntervalLimit("alipay.antforest.forest.h5.fillUserRobFlag", 500)
+        addIntervalLimit("alipay.antmember.forest.h5.collectEnergy", FixedOrRangeIntervalLimit("255-300", 255, 300))
+        addIntervalLimit("alipay.antmember.forest.h5.queryEnergyRanking", FixedOrRangeIntervalLimit("255-300", 255, 300))
+        addIntervalLimit("alipay.antforest.forest.h5.fillUserRobFlag", FixedOrRangeIntervalLimit("425-500", 425, 500))
 
         // 设置其他参数
         tryCountInt = tryCount!!.value
@@ -1105,7 +1108,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             selfId = UserMap.currentUid
             lastUsePropCheckTime = 0
             invalidatePropBagCache()
-            forestGameCenterRecentAppRecords.clear()
+            forestGameCenterRecentAppRecords.set(emptyMap())
             GreenLife.resetForestMarketRound()
             if (showBagList?.value == true) showBag()
             initRebornWeeklyState()
@@ -1192,7 +1195,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
         roundPropCheckState = null
         lastUsePropCheckTime = 0L
         wateringExecutedThisRound = false
-        forestGameCenterRecentAppRecords.clear()
+        forestGameCenterRecentAppRecords.set(emptyMap())
         GreenLife.resetForestMarketRound()
     }
 
@@ -1277,7 +1280,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 hasMore = false
             }
             if (hasMore) {
-                GlobalThreadPools.sleepCompat(2000L) // 防止请求过快被限制
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1700, 2001)) // 防止请求过快被限制
                 currentObj = querySelfHome() // 获取下一页数据
             }
         } while (hasMore)
@@ -1322,7 +1325,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         continue
                     }
                 }
-                GlobalThreadPools.sleepCompat(500L)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
             } catch (e: JSONException) {
                 Log.forest("浇水金球JSON解析错误: " + e.message)
             } catch (e: RuntimeException) {
@@ -1447,7 +1450,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 } catch (e: Exception) {
                     Log.printStackTrace(TAG, "领取道具时发生错误: " + e.message, e)
                 }
-                GlobalThreadPools.sleepCompat(1000L)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
             }
         } catch (e: JSONException) {
             Log.printStackTrace(TAG, "givenProps JSON解析错误: " + e.message, e)
@@ -2021,7 +2024,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         break
                     }
                     exchangedAny = true
-                    GlobalThreadPools.sleepCompat(1000L)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                 }
             }
         } catch (t: Throwable) {
@@ -2084,7 +2087,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     if (exchangedCount >= safeMaxCount) {
                         break
                     }
-                    GlobalThreadPools.sleepCompat(1000L)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                 }
             }
             when {
@@ -2122,11 +2125,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun notifyMain() {
-        if (taskCount.decrementAndGet() < 1) {
-            synchronized(this@AntForest) {
-                (this@AntForest as Object).notifyAll()
-            }
-        }
+        taskCount.decrementAndGet()
     }
 
     /**
@@ -3378,7 +3377,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                             Log.printStackTrace(t)
                             break
                         } finally {
-                            GlobalThreadPools.sleepCompat(500L)
+                            GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
                         }
                     }
                 }
@@ -3447,7 +3446,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         Log.printStackTrace(t)
                         break
                     } finally {
-                        GlobalThreadPools.sleepCompat(500)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
                     }
                 }
             }
@@ -3523,32 +3522,25 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                 val needRetry = collectEnergyEntity.needRetry
                 val tryCount = collectEnergyEntity.addTryCount()
                 var collected = 0
-                val startTime: Long
-
-                synchronized(collectEnergyLockLimit) {
-                    val sleep: Long
-                    if (needDouble) {
-                        collectEnergyEntity.unsetNeedDouble()
-                        val interval = doubleCollectIntervalEntity!!.interval
-                        sleep =
-                            (interval ?: 1000) - System.currentTimeMillis() + collectEnergyLockLimit.get()!!
-                    } else if (needRetry) {
-                        collectEnergyEntity.unsetNeedRetry()
-                        sleep =
-                            retryIntervalInt!! - System.currentTimeMillis() + collectEnergyLockLimit.get()!!
-                    } else {
-                        val interval = collectIntervalEntity!!.interval
-                        sleep =
-                            (interval ?: 1000) - System.currentTimeMillis() + collectEnergyLockLimit.get()!!
+                val startTime = collectEnergyQueue.execute {
+                    val interval = when {
+                        needDouble -> {
+                            collectEnergyEntity.unsetNeedDouble()
+                            doubleCollectIntervalEntity!!.interval ?: 1000
+                        }
+                        needRetry -> {
+                            collectEnergyEntity.unsetNeedRetry()
+                            retryIntervalInt!!
+                        }
+                        else -> collectIntervalEntity!!.interval ?: 1000
                     }
-                    if (sleep > 0) {
-                        GlobalThreadPools.sleepCompat(sleep)
-                    }
-                    startTime = System.currentTimeMillis()
-                    collectEnergyLockLimit.setForce(startTime)
+                    val sleep = interval - (System.currentTimeMillis() - lastCollectEnergyTime)
+                    if (sleep > 0) GlobalThreadPools.sleepCompat(sleep)
+                    val startedAt = System.currentTimeMillis()
+                    lastCollectEnergyTime = startedAt
+                    requestString(rpcEntity, 0, 0)
+                    startedAt
                 }
-
-                requestString(rpcEntity, 0, 0)
                 val spendTime = System.currentTimeMillis() - startTime
                 if (balanceNetworkDelay?.value == true) {
                     delayTimeMath.nextInteger((spendTime / 3).toInt())
@@ -4718,7 +4710,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
             ResChecker.checkRes(TAG, "领取森林任务奖励失败:", awardResponse) -> {
                 logForestTaskAward(taskTitle, awardCount, awardResponse, taskRights)
-                GlobalThreadPools.sleepCompat(500)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
                 true
             }
 
@@ -4846,7 +4838,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     awardResponse,
                     item.raw?.optJSONObject("taskRights")
                 )
-                GlobalThreadPools.sleepCompat(500)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
                 TaskFlowActionResult.success()
             }
 
@@ -5760,7 +5752,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
             TaskFlowEngine(
                 ForestTaskFlowAdapter(taskSources = taskSources),
-                roundSleepMs = 1500L
+                roundSleepMs = 1275L
             ).run()
         } catch (t: Throwable) {
             handleException("receiveTaskAward", t)
@@ -5809,7 +5801,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                     driveTaskCompleted = snapshot.totalTasks > 0
                 }
             }
-            val runResult = TaskFlowEngine(driveAdapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(driveAdapter, roundSleepMs = 425L).run()
 
             val gameCenterMessage = gameCenterDriveResult?.message
                 ?.takeIf { it.isNotBlank() }
@@ -6189,15 +6181,18 @@ class AntForest : ModelTask(), EnergyCollectCallback {
      * @return 最新的主页对象
      */
     internal fun usePropBeforeCollectEnergy(userId: String?, skipPropCheck: Boolean = false): JSONObject? {
+        if (skipPropCheck) {
+            Log.forest("⚡ 快速收取通道：跳过道具检查，加速蹲点收取")
+            return null
+        }
+        return propQueue.execute { usePropBeforeCollectEnergyNow(userId) }
+    }
+
+    private fun usePropBeforeCollectEnergyNow(userId: String?): JSONObject? {
         var latestHome: JSONObject? = roundPropCheckState?.latestHome
         var checkedThisCall = false
         val isFriendCollectTarget = !userId.isNullOrBlank() && userId != UserMap.currentUid
         try {
-            // 🚀 快速收取通道：跳过道具检查，直接返回
-            if (skipPropCheck) {
-                Log.forest("⚡ 快速收取通道：跳过道具检查，加速蹲点收取")
-                return null
-            }
             roundPropCheckState?.let { cachedState ->
                 if (!isFriendCollectTarget || cachedState.friendCollectChecked) {
                     Log.debug(TAG, "本轮所需道具检查已完成，复用当前状态")
@@ -6262,7 +6257,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
                         ", needEnergyBombCard=" + needEnergyBombCard + ", needBubbleBoostCard=" + needBubbleBoostCard
             )
             if (needDouble || needStealth || needShield || needEnergyBombCard || needRobMultiplierCard || needBubbleBoostCard) {
-                synchronized(doubleCardLockObj) {
+                run {
                     val bagObject = queryPropList()
                     if (bagObject == null) {
                         Log.forest("背包查询为空，跳过本轮道具检查")
@@ -6326,19 +6321,19 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     private fun executeBubbleBoostTriggerFromSchedule() {
-        synchronized(doubleCardLockObj) {
+        propQueue.execute {
             val bagObject = queryPropList()
             if (bagObject == null) {
                 Log.forest("背包查询为空，跳过定时加速卡触发")
-                return
+                return@execute
             }
 
-            val spec = bubbleBoostTime?.getTriggerSpec() ?: return
+            val spec = bubbleBoostTime?.getTriggerSpec() ?: return@execute
             val consumedIndex = getTriggerIndex(StatusFlags.FLAG_ANTFOREST_BUBBLE_BOOST_TRIGGER_INDEX)
             val decision = TimeTriggerEvaluator.evaluateNow(spec, consumedIndex = consumedIndex)
             if (!decision.allowNow) {
                 logTriggerWaiting("加速器", decision)
-                return
+                return@execute
             }
 
             consumeTriggerSlot(StatusFlags.FLAG_ANTFOREST_BUBBLE_BOOST_TRIGGER_INDEX, decision.matchedSlotIndex)
@@ -6596,17 +6591,19 @@ class AntForest : ModelTask(), EnergyCollectCallback {
     }
 
     internal fun invalidatePropBagCache() {
-        cachedBagObject = null
-        lastQueryPropListTime = 0L
+        propBagCache = null
         roundPropCheckState = null
         lastUsePropCheckTime = 0L
     }
 
-    @Synchronized
-    private fun queryPropList(forceRefresh: Boolean): JSONObject? {
+    private fun queryPropList(forceRefresh: Boolean): JSONObject? =
+        propQueryQueue.execute { queryPropListNow(forceRefresh) }
+
+    private fun queryPropListNow(forceRefresh: Boolean): JSONObject? {
         val now = System.currentTimeMillis()
-        if (!forceRefresh && cachedBagObject != null && now - lastQueryPropListTime < 5000) {
-            return cachedBagObject
+        val cache = propBagCache
+        if (!forceRefresh && cache != null && now - cache.first < 5000) {
+            return cache.second
         }
         try {
             Log.forest("刷新背包...")
@@ -6618,8 +6615,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
             }
             val bagObject = JSONObject(response)
             if (bagObject.optBoolean("success")) {
-                cachedBagObject = bagObject
-                lastQueryPropListTime = now
+                propBagCache = now to bagObject
                 return bagObject
             } else {
                 Log.forest("刷新背包失败: " + bagObject.optString("resultDesc"))
@@ -7864,19 +7860,16 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
 
     private fun currentForestGameCenterRecentAppRecords(): List<AntForestRpcCall.ForestGameCenterRecentAppRecord> {
-        return synchronized(forestGameCenterRecentAppRecords) {
-            forestGameCenterRecentAppRecords.entries
-                .sortedByDescending { it.value }
-                .take(60)
-                .map { AntForestRpcCall.ForestGameCenterRecentAppRecord(it.key, it.value) }
-        }
+        return forestGameCenterRecentAppRecords.get().entries
+            .sortedByDescending { it.value }
+            .take(60)
+            .map { AntForestRpcCall.ForestGameCenterRecentAppRecord(it.key, it.value) }
     }
 
     private fun rememberForestGameCenterApp(appId: String?) {
         val normalizedAppId = appId?.takeIf { it.isNotBlank() } ?: return
-        synchronized(forestGameCenterRecentAppRecords) {
-            forestGameCenterRecentAppRecords[normalizedAppId] = System.currentTimeMillis() / 1000
-        }
+        val usedAt = System.currentTimeMillis() / 1000
+        forestGameCenterRecentAppRecords.updateAndGet { it + (normalizedAppId to usedAt) }
     }
 
     private fun rememberForestGameCenterAppIds(source: Any?) {
@@ -8636,7 +8629,7 @@ class AntForest : ModelTask(), EnergyCollectCallback {
 
         // 访问好友主页过快容易触发风控；这里在并发和最小间隔上做保守兜底（仍可通过配置调大查询间隔）。
         private const val FRIEND_PROCESS_CONCURRENCY = 8
-        private const val FRIEND_HOME_MIN_INTERVAL_MS = 2000
+        private const val FRIEND_HOME_MIN_INTERVAL_MS = 1700
         private const val GIFT7TH_SIGN_SCENE_CODE = "ANTFOREST_GIFT7TH_SIGN_202506"
         private const val GIFT7TH_SIGN_SOURCE = "chInfo_ch_appcenter__chsub_9patch"
         private const val FOREST_SIGN_TASK_TYPE = "__FOREST_SIGN__"

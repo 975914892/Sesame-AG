@@ -386,23 +386,19 @@ object ApplicationHookConstants {
     }
 
     private const val MAX_TRIGGER_QUEUE_SIZE = 32
-    private val triggerLock = Any()
-    private var pendingTrigger: TriggerInfo? = null
-    private val triggerQueue = ArrayDeque<TriggerInfo>(MAX_TRIGGER_QUEUE_SIZE)
+    private data class TriggerState(
+        val pending: TriggerInfo? = null,
+        val queued: List<TriggerInfo> = emptyList(),
+        val lastConsumed: TriggerInfo? = null,
+    )
+    private val triggers = java.util.concurrent.atomic.AtomicReference(TriggerState())
 
-    @Volatile
-    var lastConsumedTrigger: TriggerInfo? = null
-        private set
+    val lastConsumedTrigger: TriggerInfo?
+        get() = triggers.get().lastConsumed
 
-    fun hasPendingTriggers(): Boolean =
-        synchronized(triggerLock) {
-            pendingTrigger != null || triggerQueue.isNotEmpty()
-        }
+    fun hasPendingTriggers(): Boolean = triggers.get().let { it.pending != null || it.queued.isNotEmpty() }
 
-    fun pendingTriggerCount(): Int =
-        synchronized(triggerLock) {
-            (if (pendingTrigger == null) 0 else 1) + triggerQueue.size
-        }
+    fun pendingTriggerCount(): Int = triggers.get().let { (if (it.pending == null) 0 else 1) + it.queued.size }
 
     data class TriggerQueueResult(
         val accepted: Boolean,
@@ -410,131 +406,79 @@ object ApplicationHookConstants {
         val replaced: List<TriggerInfo> = emptyList(),
     )
 
-    fun setPendingTrigger(trigger: TriggerInfo): TriggerQueueResult =
-        synchronized(triggerLock) {
-            val replaced = mutableListOf<TriggerInfo>()
-            val dedupeKey = trigger.dedupeKey
-            if (!dedupeKey.isNullOrBlank()) {
-                pendingTrigger?.takeIf { it.dedupeKey == dedupeKey }?.let {
-                    replaced.add(it)
-                    pendingTrigger = null
-                }
-                if (triggerQueue.isNotEmpty()) {
-                    val it = triggerQueue.iterator()
-                    while (it.hasNext()) {
-                        val queued = it.next()
-                        if (queued.dedupeKey == dedupeKey) {
-                            replaced.add(queued)
-                            it.remove()
-                        }
-                    }
-                }
+    fun setPendingTrigger(trigger: TriggerInfo): TriggerQueueResult {
+        while (true) {
+            val before = triggers.get()
+            val key = trigger.dedupeKey
+            val replaced = if (key.isNullOrBlank()) emptyList() else
+                (listOfNotNull(before.pending) + before.queued).filter { it.dedupeKey == key }
+            var pending = before.pending?.takeUnless { candidate -> replaced.any { it === candidate } }
+            val queued = before.queued.filterNot { candidate -> replaced.any { it === candidate } }.toMutableList()
+            val toQueue = when {
+                pending == null -> { pending = trigger; null }
+                trigger.priority.weight > pending.priority.weight -> pending.also { pending = trigger }
+                else -> trigger
             }
-
-            val displaced =
-                when (val currentPending = pendingTrigger) {
-                    null -> {
-                        pendingTrigger = trigger
-                        null
-                    }
-
-                    else -> {
-                        if (trigger.priority.weight > currentPending.priority.weight) {
-                            pendingTrigger = trigger
-                            enqueueLocked(currentPending)
-                        } else {
-                            enqueueLocked(trigger)
-                        }
-                    }
+            var displaced: TriggerInfo? = null
+            if (toQueue != null) {
+                if (queued.size >= MAX_TRIGGER_QUEUE_SIZE) {
+                    val index = queued.indexOfFirst {
+                        it.type == TriggerType.ALARM_POLL && it.priority == TriggerPriority.LOW
+                    }.takeIf { it >= 0 } ?: 0
+                    displaced = queued.removeAt(index)
                 }
-
-            record(TAG, "📥 trigger queued: ${trigger.summary()} | pending=${pendingTrigger?.summary()} | q=${triggerQueue.size}")
-            TriggerQueueResult(accepted = true, displaced = displaced, replaced = replaced)
+                queued.add(toQueue)
+            }
+            val after = before.copy(pending = pending, queued = queued.toList())
+            if (!triggers.compareAndSet(before, after)) continue
+            displaced?.let { record(TAG, "🗑️ trigger queue full, defer displaced: ${it.summary()}") }
+            record(TAG, "📥 trigger queued: ${trigger.summary()} | pending=${pending?.summary()} | q=${queued.size}")
+            return TriggerQueueResult(accepted = true, displaced = displaced, replaced = replaced)
         }
+    }
 
     fun consumePendingTrigger(): TriggerInfo? {
-        synchronized(triggerLock) {
-            val trigger = pendingTrigger?.also { pendingTrigger = null } ?: dequeueHighestPriorityLocked()
-            if (trigger != null) {
-                lastConsumedTrigger = trigger
-                record(TAG, "📤 trigger consumed: ${trigger.summary()} | remain=${pendingTriggerCount()}")
+        while (true) {
+            val before = triggers.get()
+            val trigger = before.pending ?: before.queued.maxByOrNull { it.priority.weight } ?: return null
+            val after = if (before.pending != null) {
+                before.copy(pending = null, lastConsumed = trigger)
+            } else {
+                val queued = before.queued.toMutableList()
+                queued.removeAt(queued.indexOfFirst { it === trigger })
+                before.copy(queued = queued.toList(), lastConsumed = trigger)
             }
+            if (!triggers.compareAndSet(before, after)) continue
+            record(TAG, "📤 trigger consumed: ${trigger.summary()} | remain=${(if (after.pending == null) 0 else 1) + after.queued.size}")
             return trigger
         }
     }
 
     fun clearPendingTriggers(reason: String? = null) {
-        synchronized(triggerLock) {
-            val before = pendingTriggerCount()
-            pendingTrigger = null
-            triggerQueue.clear()
-            record(TAG, "🧹 trigger cleared${if (reason.isNullOrBlank()) "" else ": $reason"} | before=$before after=0")
-        }
+        val before = triggers.getAndUpdate { it.copy(pending = null, queued = emptyList()) }
+        record(TAG, "🧹 trigger cleared${if (reason.isNullOrBlank()) "" else ": $reason"} | before=${(if (before.pending == null) 0 else 1) + before.queued.size} after=0")
     }
 
     fun removePendingTriggers(
         reason: String,
         predicate: (TriggerInfo) -> Boolean,
     ): List<TriggerInfo> {
-        val snapshot = synchronized(triggerLock) {
-            listOfNotNull(pendingTrigger) + triggerQueue.toList()
-        }
-        // 筛选可能读取账号存储，不能在队列锁内等待跨进程事务。
-        val rejected = snapshot.filter(predicate)
-        return synchronized(triggerLock) {
-            val removed = mutableListOf<TriggerInfo>()
-            val currentPending = pendingTrigger
-            if (currentPending != null && rejected.any { it === currentPending }) {
-                removed.add(currentPending)
-                pendingTrigger = null
+        val snapshot = triggers.get()
+        val rejected = (listOfNotNull(snapshot.pending) + snapshot.queued).filter(predicate)
+        while (true) {
+            val before = triggers.get()
+            val removed = (listOfNotNull(before.pending) + before.queued).filter { candidate ->
+                rejected.any { it === candidate }
             }
-            if (triggerQueue.isNotEmpty()) {
-                val it = triggerQueue.iterator()
-                while (it.hasNext()) {
-                    val trigger = it.next()
-                    if (rejected.any { candidate -> candidate === trigger }) {
-                        removed.add(trigger)
-                        it.remove()
-                    }
-                }
-            }
-            if (removed.isNotEmpty()) {
-                record(TAG, "🧹 trigger removed: $reason | count=${removed.size} remain=${pendingTriggerCount()}")
-            }
-            removed
+            if (removed.isEmpty()) return emptyList()
+            val after = before.copy(
+                pending = before.pending?.takeUnless { candidate -> removed.any { it === candidate } },
+                queued = before.queued.filterNot { candidate -> removed.any { it === candidate } },
+            )
+            if (!triggers.compareAndSet(before, after)) continue
+            record(TAG, "🧹 trigger removed: $reason | count=${removed.size} remain=${(if (after.pending == null) 0 else 1) + after.queued.size}")
+            return removed
         }
-    }
-
-    private fun enqueueLocked(trigger: TriggerInfo): TriggerInfo? {
-        var displaced: TriggerInfo? = null
-        if (triggerQueue.size >= MAX_TRIGGER_QUEUE_SIZE) {
-            // 轮询是可合并的最低优先级输入；先为唤醒和持久子任务腾出空间。
-            displaced = triggerQueue.firstOrNull {
-                it.type == TriggerType.ALARM_POLL && it.priority == TriggerPriority.LOW
-            } ?: triggerQueue.firstOrNull()
-            displaced?.let { triggerQueue.remove(it) }
-            if (displaced != null) {
-                record(TAG, "🗑️ trigger queue full, defer displaced: ${displaced.summary()}")
-            }
-        }
-        triggerQueue.addLast(trigger)
-        return displaced
-    }
-
-    private fun dequeueHighestPriorityLocked(): TriggerInfo? {
-        if (triggerQueue.isEmpty()) return null
-
-        var best: TriggerInfo? = null
-        for (t in triggerQueue) {
-            val b = best
-            if (b == null || t.priority.weight > b.priority.weight) {
-                best = t
-            }
-        }
-        if (best != null) {
-            triggerQueue.remove(best)
-        }
-        return best
     }
 
     private const val DEFAULT_ENTRY_DEBOUNCE_MS: Long = 150L

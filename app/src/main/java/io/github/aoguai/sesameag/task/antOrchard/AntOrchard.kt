@@ -45,8 +45,8 @@ import io.github.aoguai.sesameag.util.RandomUtil
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
 import io.github.aoguai.sesameag.util.maps.UserMap
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
@@ -171,7 +171,7 @@ class AntOrchard : ModelTask() {
         return modelFields
     }
 
-    private val continuationMutex = Mutex()
+    private val continuationQueue = SerialTaskQueue()
 
     private fun orchardContinuationState(action: String, level: String = ""): TaskFlowExecutionState {
         val owner = AccountSessionCoordinator.currentUserId().orEmpty()
@@ -245,7 +245,7 @@ class AntOrchard : ModelTask() {
         var homeGameNextAt: Long? = null
         return executePersistentChild(
             scheduleId = scheduleId, ownerUserId = payload.optString("owner_user_id"),
-            sessionEpoch = payload.optLong("session_epoch"), source = source, workflowMutex = continuationMutex,
+            sessionEpoch = payload.optLong("session_epoch"), source = source, workflowQueue = continuationQueue,
             afterExecution = {
                 homeGameNextAt?.let { next ->
                     scheduleOrchardContinuation("home_games", next,
@@ -298,7 +298,7 @@ class AntOrchard : ModelTask() {
         }
     }
 
-    override suspend fun runSuspend() = continuationMutex.withLock {
+    override suspend fun runSuspend() = continuationQueue.submit {
         try {
             Log.orchard("执行开始-${getName()}")
             skipManurePotCollectThisRound = false
@@ -309,12 +309,12 @@ class AntOrchard : ModelTask() {
 
             if (indexJson.optString("resultCode") != "100") {
                 Log.orchard(indexJson.optString("resultDesc", "orchardIndex 调用失败"))
-                return
+                return@submit
             }
 
             if (!indexJson.optBoolean("userOpenOrchard", false)) {
                 Log.orchard("芭芭农场🍎[未开通，本轮跳过]")
-                return
+                return@submit
             }
 
             val taobaoDataStr = indexJson.optString("taobaoData")
@@ -2915,7 +2915,7 @@ class AntOrchard : ModelTask() {
                     )
                 val str = AntOrchardRpcCall.achieveBeShareP2P(shareId)
                 val jsonObject = JSONObject(str)
-                CoroutineUtils.sleepCompat(800)
+                CoroutineUtils.sleepCompat(RandomUtil.nextLong(680, 801))
                 val name = UserMap.getMaskName(uid)
 
                 if (!ResChecker.checkRes(TAG, str)) {

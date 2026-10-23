@@ -25,8 +25,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -78,6 +77,10 @@ object CommandUtil {
             }
             io.github.aoguai.sesameag.storage.StoreAccess.useRemote()
             io.github.aoguai.sesameag.storage.StoreAccess.attachRemote()
+            // 身份确认后可能复用已有连接，不能只依赖连接回调发布主进程会话。
+            if (RuntimeIdentityGuard.isTrustedForExecution()) {
+                storageService().setCaptureSessionProvider(captureSessionProvider)
+            }
             true
         } catch (failure: Exception) {
             android.util.Log.e(TAG, "模块私有存储不可用", failure)
@@ -108,7 +111,7 @@ object CommandUtil {
     }
 
     // 连接状态管理
-    private val bindMutex = Mutex()
+    private val bindQueue = SerialTaskQueue()
     private val isBound = AtomicBoolean(false)
     private val pendingCommands = AtomicInteger(0)
     private var connectionDeferred: CompletableDeferred<Boolean>? = null
@@ -176,9 +179,10 @@ object CommandUtil {
                 // 身份确认不注册执行器监听，也不触发宿主的任务调度。
                 if (!identityOnly) {
                     commandService?.registerListener(statusListener)
-                    if (RuntimeIdentityGuard.isTrustedForExecution()) {
-                        commandService?.setCaptureSessionProvider(captureSessionProvider)
-                    }
+                }
+                // 抓包会话与执行器监听独立，身份/存储连接也需要恢复主进程提供者。
+                if (RuntimeIdentityGuard.isTrustedForExecution()) {
+                    commandService?.setCaptureSessionProvider(captureSessionProvider)
                 }
 
                 if (io.github.aoguai.sesameag.storage.StoreAccess.isRemote) {
@@ -285,12 +289,12 @@ object CommandUtil {
             return true
         }
 
-        return bindMutex.withLock {
+        return bindQueue.submit {
             if (isBound.get() && commandService?.asBinder()?.isBinderAlive == true) {
                 if (!identityOnly && identityOnlyBinding) {
                     try {
                         startCommandService(context, buildServiceIntent())
-                        commandService?.registerListener(statusListener) ?: return@withLock false
+                        commandService?.registerListener(statusListener) ?: return@submit false
                         if (RuntimeIdentityGuard.isTrustedForExecution()) {
                             commandService?.setCaptureSessionProvider(captureSessionProvider)
                         }
@@ -300,10 +304,10 @@ object CommandUtil {
                     } catch (e: Exception) {
                         Log.e(TAG, "启用命令服务执行器监听失败", e)
                         handleServiceLost()
-                        return@withLock false
+                        return@submit false
                     }
                 }
-                return@withLock true
+                return@submit true
             }
 
             // 开始连接前，状态置为 Loading
@@ -337,7 +341,7 @@ object CommandUtil {
                         } ?: false
 
                         if (success) {
-                            return@withLock true
+                            return@submit true
                         }
 
                         lastFailure = "bind_timeout"
@@ -360,7 +364,7 @@ object CommandUtil {
 
                 Log.e(TAG, "command_bind failed reason=$lastFailure $bindContext")
                 _serviceStatus.value = ServiceStatus.Error("服务绑定失败")
-                return@withLock false
+                return@submit false
             } catch (e: CancellationException) {
                 runCatching { appContext.unbindService(serviceConnection) }
                 handleServiceLost()
@@ -369,7 +373,7 @@ object CommandUtil {
                 ModuleDiagnostics.event("command_bind", "exception", "$bindContext error=${e.javaClass.simpleName}")
                 Log.e(TAG, "绑定异常 $bindContext", e)
                 _serviceStatus.value = ServiceStatus.Error(e.message ?: "未知错误")
-                return@withLock false
+                return@submit false
             }
         }
     }
@@ -463,8 +467,15 @@ object CommandUtil {
         pendingCommands.incrementAndGet()
         try {
             if (!ensureServiceBound(context, identityOnly = true)) return@withContext null
-            val session = currentCaptureSession() ?: return@withContext null
-            if (!captureRequested(session.userId) || !isExecutionAllowed(session.userId)) return@withContext null
+            val session = currentCaptureSession() ?: run {
+                Log.w(TAG, "抓包未启动：实时账号会话不可用")
+                return@withContext null
+            }
+            if (!captureRequested(session.userId)) return@withContext null
+            if (!isExecutionAllowed(session.userId)) {
+                Log.w(TAG, "抓包未启动：当前账号执行条件不满足")
+                return@withContext null
+            }
             session.userId
         } catch (e: CancellationException) {
             throw e
@@ -539,11 +550,11 @@ object CommandUtil {
         boundContext = appContext
         if (isBound.compareAndSet(true, false)) {
             try {
+                if (RuntimeIdentityGuard.isMainProcess()) {
+                    runCatching { commandService?.setCaptureSessionProvider(null) }
+                }
                 // 身份确认连接没有注册执行器监听。
                 if (!identityOnlyBinding) {
-                    if (RuntimeIdentityGuard.isMainProcess()) {
-                        runCatching { commandService?.setCaptureSessionProvider(null) }
-                    }
                     try { commandService?.unregisterListener(statusListener) } catch (_: Exception) {}
                 }
 

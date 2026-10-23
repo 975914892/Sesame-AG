@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.EcoProtection
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import android.net.Uri
 import io.github.aoguai.sesameag.data.Status.Companion.ancientTreeToday
 import io.github.aoguai.sesameag.data.Status.Companion.canAncientTreeToday
@@ -165,7 +167,7 @@ class EcoProtection : ModelTask() {
                 for (cityCode in ancientTreeCityCodeList) {
                     if (!canAncientTreeToday(cityCode)) continue
                     ancientTreeProtect(cityCode)
-                    sleepCompat(1000L)
+                    sleepCompat(RandomUtil.nextLong(850, 1001))
                 }
             } catch (th: Throwable) {
                 Log.printStackTrace(TAG, "ancientTree err:",th)
@@ -188,7 +190,7 @@ class EcoProtection : ModelTask() {
                         val districtInfo = districtBriefInfo.getJSONObject("districtInfo")
                         val districtCode = districtInfo.getString("districtCode")
                         districtDetail(districtCode)
-                        sleepCompat(1000L)
+                        sleepCompat(RandomUtil.nextLong(850, 1001))
                     }
                     ancientTreeToday(cityCode)
                 }
@@ -232,7 +234,7 @@ class EcoProtection : ModelTask() {
                                 val protectExpense = ancientTreeInfo.getInt("protectExpense")
                                 cityCode = ancientTreeInfo.getString("cityCode")
                                 if (currentEnergy < protectExpense) break
-                                sleepCompat(200)
+                                sleepCompat(RandomUtil.nextLong(170, 201))
                                 jo = JSONObject(EcoProtectionRpcCall.protect(activityId, projectId, cityCode))
                                 if (ResChecker.checkRes(TAG, jo)) {
                                     Log.forest(
@@ -248,7 +250,7 @@ class EcoProtection : ModelTask() {
                             Log.forest(jo.getString("resultDesc"))
                             Log.forest(ancientTreeDetail.toString())
                         }
-                        sleepCompat(500L)
+                        sleepCompat(RandomUtil.nextLong(425, 501))
                     }
                 }
             } catch (th: Throwable) {

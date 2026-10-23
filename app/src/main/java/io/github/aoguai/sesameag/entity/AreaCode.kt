@@ -27,8 +27,7 @@ class AreaCode(id: String, name: String) : MapperEntity() {
     companion object {
         private const val TAG = "AreaCode"
 
-        @Volatile
-        private var list: List<AreaCode>? = null
+        private val list = java.util.concurrent.atomic.AtomicReference<List<AreaCode>?>(null)
 
         /**
          * 获取区域代码列表
@@ -38,25 +37,20 @@ class AreaCode(id: String, name: String) : MapperEntity() {
         @JvmStatic
         @Throws(JSONException::class)
         fun getList(): List<AreaCode> {
-            if (list == null) {
-                synchronized(this) {
-                    if (list == null) {
-                        val cityCode = Files.readFromFile(Files.getCityCodeFile())
-                        val ja = parseCityCode(cityCode)
-                        val newList = ArrayList<AreaCode>()
-                        for (i in 0 until ja.length()) {
-                            try {
-                                val jo = ja.getJSONObject(i)
-                                newList.add(AreaCode(jo.getString("cityCode"), jo.getString("cityName")))
-                            } catch (e: JSONException) {
-                                Log.printStackTrace(TAG, e)
-                            }
-                        }
-                        list = newList
-                    }
+            list.get()?.let { return it }
+            val cityCode = Files.readFromFile(Files.getCityCodeFile())
+            val ja = parseCityCode(cityCode)
+            val newList = ArrayList<AreaCode>()
+            for (i in 0 until ja.length()) {
+                try {
+                    val jo = ja.getJSONObject(i)
+                    newList.add(AreaCode(jo.getString("cityCode"), jo.getString("cityName")))
+                } catch (e: JSONException) {
+                    Log.printStackTrace(TAG, e)
                 }
             }
-            return list ?: emptyList()
+            if (list.compareAndSet(null, newList)) return newList
+            return checkNotNull(list.get())
         }
 
         /**

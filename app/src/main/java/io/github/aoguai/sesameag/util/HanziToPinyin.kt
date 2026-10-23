@@ -667,14 +667,10 @@ class HanziToPinyin protected constructor(private val mHasChinaCollator: Boolean
          */
         private const val FIRST_UNIHAN = '㐀'
         private val COLLATOR: Collator = Collator.getInstance(Locale.CHINA)
-        private var sInstance: HanziToPinyin? = null
+        private val sInstance = HanziToPinyin(true)
         
         @JvmStatic
-        fun getInstance(): HanziToPinyin {
-            synchronized(HanziToPinyin::class.java) {
-                return sInstance ?: HanziToPinyin(true).also { sInstance = it }
-            }
-        }
+        fun getInstance(): HanziToPinyin = sInstance
     }
 }
 

@@ -14,8 +14,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 
 /**
  * 蹲点任务持久化数据类
@@ -91,7 +90,7 @@ object EnergyWaitingPersistence {
 
     // 协程作用域
     private val persistenceScope = CoroutineScope(Dispatchers.IO)
-    private val saveMutex = Mutex()
+    private val saveQueue = SerialTaskQueue()
     private val latestSaveRequestId = AtomicLong(0)
     private val lastPersistedTaskCount = AtomicInteger(-1)
 
@@ -119,9 +118,9 @@ object EnergyWaitingPersistence {
         val requestId = latestSaveRequestId.incrementAndGet()
         persistenceScope.launch {
             try {
-                saveMutex.withLock {
+                saveQueue.submit {
                     if (requestId != latestSaveRequestId.get()) {
-                        return@withLock
+                        return@submit
                     }
 
                     store.put(dataStoreKey, persistDataList)

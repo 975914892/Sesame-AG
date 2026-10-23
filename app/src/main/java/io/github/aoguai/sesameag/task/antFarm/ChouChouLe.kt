@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antFarm
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import android.net.Uri
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
@@ -276,7 +278,7 @@ class ChouChouLe {
 
                 override fun logInfo(message: String) = Log.farm(message)
                 override fun logError(message: String) = Log.error(TAG, message)
-            }, roundSleepMs = 300L).run().completed
+            }, roundSleepMs = 255L).run().completed
         } catch (t: Throwable) {
             val taskName = if (drawType == "ipDraw") "IP抽抽乐" else "日常抽抽乐"
             Log.printStackTrace("doChouchoule err:", t)
@@ -599,7 +601,7 @@ class ChouChouLe {
                     }
                     remainingTimes = afterTimes
                     if (remainingTimes > 0) {
-                        GlobalThreadPools.sleepCompat(1500L)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1275, 1501))
                     }
                 }
             }
@@ -668,7 +670,7 @@ class ChouChouLe {
                 }
                 remainingTimes = afterTimes
                 if (remainingTimes > 0) {
-                    GlobalThreadPools.sleepCompat(1500L)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1275, 1501))
                 }
             }
             return allSuccess

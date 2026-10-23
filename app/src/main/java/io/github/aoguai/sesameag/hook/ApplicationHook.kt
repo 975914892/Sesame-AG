@@ -1,6 +1,7 @@
 package io.github.aoguai.sesameag.hook
 
 import android.annotation.SuppressLint
+import java.util.concurrent.atomic.AtomicBoolean
 import android.app.Application
 import android.app.Service
 import android.content.BroadcastReceiver
@@ -105,25 +106,15 @@ class ApplicationHook {
     }
 
     private class TaskLock : AutoCloseable {
-        private val acquired: Boolean
+        private val acquired = AtomicBoolean(false)
 
         init {
-            synchronized(taskLock) {
-                if (isTaskRunning) {
-                    acquired = false
-                    throw IllegalStateException("任务已在运行中")
-                }
-                isTaskRunning = true
-                acquired = true
-            }
+            check(isTaskRunning.compareAndSet(false, true)) { "任务已在运行中" }
+            acquired.set(true)
         }
 
         override fun close() {
-            if (acquired) {
-                synchronized(taskLock) {
-                    isTaskRunning = false
-                }
-            }
+            if (acquired.compareAndSet(true, false)) isTaskRunning.set(false)
         }
     }
 
@@ -628,11 +619,7 @@ class ApplicationHook {
         @Volatile
         var appContext: Context? = null
 
-        // 任务锁
-        private val taskLock = Any()
-
-        @Volatile
-        private var isTaskRunning = false
+        private val isTaskRunning = AtomicBoolean(false)
 
         @JvmStatic
         var alipayVersion: AlipayVersion = AlipayVersion("")
@@ -940,7 +927,6 @@ class ApplicationHook {
 
         @Volatile
         var rpcBridge: RpcBridge? = null
-        private val rpcBridgeLock = Any()
 
         @Volatile
         var lastExecTime: Long = 0
@@ -1170,7 +1156,6 @@ class ApplicationHook {
         }
 
         // --- 初始化核心逻辑 ---
-        @Synchronized
         private fun initHandler(reason: String, tasksStopped: Boolean = false, onComplete: ((Boolean) -> Unit)? = null): Boolean {
             if (sessionShutdownPending) {
                 pendingInit = true
@@ -1182,12 +1167,7 @@ class ApplicationHook {
             var completed = false
             var completionDeferred = false
             try {
-                // 启动阶段可能出现 Service.onCreate 与 Launcher.onResume 并发触发 initHandler 的竞态：
-                // - onResume 线程看到 init=false -> 进入 initHandler 等锁
-                // - Service 线程完成初始化并将 init=true
-                // - onResume 获锁后会因 init=true 走 destroyHandler()，导致二次初始化与双 Toast
-                //
-                // 对于“启动类触发”(service_onCreate/onResume)且当前已就绪的场景，直接判定为重复触发并跳过。
+                // 生命周期入口已统一顺序执行；重复启动事件不再重建已就绪的实例。
                 if (init && isReadyForExec() && (reason == "onResume" || reason == "service_onCreate")) {
                     pendingInit = false
                     pendingInitReason = null
@@ -1382,10 +1362,7 @@ class ApplicationHook {
                 Notify.startRunning(service!!)
                 setWakenAtTimeAlarm()
 
-                synchronized(rpcBridgeLock) {
-                    rpcBridge = AriverRpcBridge()
-                    rpcBridge!!.load()
-                }
+                rpcBridge = AriverRpcBridge().also { it.load() }
 
                 start(userId)
                 checkBatteryPermission()
@@ -1464,7 +1441,6 @@ class ApplicationHook {
             }
         }
 
-        @Synchronized
         fun destroyHandler() {
             // 允许任意 Hook 线程请求销毁，但绝不让生命周期/主线程同步执行整套清理。
             ApplicationHookConstants.submitEntry("destroy_handler") {
@@ -1526,13 +1502,10 @@ class ApplicationHook {
                 unregisterBroadcastReceiver(appContext)
                 unregisterAppVisibilityCallbacks(appContext)
 
-                synchronized(rpcBridgeLock) {
-                    if (rpcBridge != null) {
-                        rpcBridge!!.unload()
-                        rpcBridge = null
-                    }
-                    stopAllTask()
-                }
+                val previousBridge = rpcBridge
+                rpcBridge = null
+                previousBridge?.unload()
+                stopAllTask()
 
                 WorkflowRootGuard.invalidate()
             } catch (th: Throwable) {

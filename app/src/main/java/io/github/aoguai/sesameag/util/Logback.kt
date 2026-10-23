@@ -30,12 +30,18 @@ object Logback {
     private const val DEFAULT_LOG_FILE_MAX_SIZE_MB = 7
     private const val DEFAULT_LOG_TOTAL_SIZE_CAP_MB = 256
 
+    private val outputQueue = SerialTaskQueue()
+    @Volatile
     private var isFileInitialized = false
+    @Volatile
     private var appContext: Context? = null
+    @Volatile
     private var nextMidnightMillis: Long = 0
+    @Volatile
     private var isRollingOwnerProcess = false
     private var processLogSuffix: String? = null
 
+    @Volatile
     var systemLogFile: File? = null
         private set
 
@@ -46,7 +52,9 @@ object Logback {
      * 初始化 Logcat (保证控制台一定有日志)
      * 在 Log 类的 init 块中自动调用
      */
-    fun initLogcatOnly() {
+    fun initLogcatOnly(): Unit = outputQueue.execute { initLogcatOnlyInternal() }
+
+    private fun initLogcatOnlyInternal() {
         try {
             val lc = LoggerFactory.getILoggerFactory() as LoggerContext
             lc.reset() // 清除之前的配置
@@ -79,8 +87,10 @@ object Logback {
      * 初始化文件日志 (有了 Context 之后调用)
      * 常规日志由主进程滚动；抓包日志由所有已允许的进程安全追加到同一个 capture.log。
      */
-    @Synchronized
-    fun initFileLogging(
+    fun initFileLogging(context: Context, force: Boolean = false): Unit =
+        outputQueue.execute { initFileLoggingInternal(context, force) }
+
+    private fun initFileLoggingInternal(
         context: Context,
         force: Boolean = false,
     ) {
@@ -104,7 +114,7 @@ object Logback {
         // 3. 如果是触发了跨天刷新，需重置上下文以彻底清除旧的 Appender 句柄
         if (isRebuildingExistingAppenders) {
             Log.i("SesameLog", if (force) "检测到日志配置变更，正在刷新日志重定向..." else "检测到跨天，正在刷新日志重定向...")
-            initLogcatOnly() // 内部执行 lc.reset()
+            initLogcatOnlyInternal() // 内部执行 lc.reset()
         }
 
         try {
@@ -176,32 +186,29 @@ object Logback {
         }
     }
 
-    @Synchronized
-    fun reloadFileLogging(enableCaptureAppender: Boolean = isCaptureFileAppenderEnabled) {
+    fun reloadFileLogging(enableCaptureAppender: Boolean = isCaptureFileAppenderEnabled): Unit = outputQueue.execute {
         isCaptureFileAppenderEnabled = enableCaptureAppender
-        val context = appContext ?: return
-        initFileLogging(context, force = true)
+        val context = appContext ?: return@execute
+        initFileLoggingInternal(context, force = true)
     }
 
-    @Synchronized
-    fun <T> withFileLoggingPaused(action: () -> T): T {
+    fun <T> withFileLoggingPaused(action: () -> T): T = outputQueue.execute {
         val lc = LoggerFactory.getILoggerFactory() as LoggerContext
         val initialized = isFileInitialized
         lc.loggerList.filter { it.name != LogChannel.SYSTEM.loggerName && it.name != Logger.ROOT_LOGGER_NAME }
             .forEach { it.detachAndStopAllAppenders() }
         isFileInitialized = false
-        return try { action() } finally {
-            if (initialized && PrivateStorage.isReady) appContext?.let { initFileLogging(it, force = true) }
+        try { action() } finally {
+            if (initialized && PrivateStorage.isReady) appContext?.let { initFileLoggingInternal(it, force = true) }
         }
     }
 
-    @Synchronized
-    fun clearSystemLog(): Boolean {
-        val file = systemLogFile ?: return false
+    fun clearSystemLog(): Boolean = outputQueue.execute {
+        val file = systemLogFile ?: return@execute false
         val lc = LoggerFactory.getILoggerFactory() as LoggerContext
         lc.getLogger(LogChannel.SYSTEM.loggerName).detachAndStopAllAppenders()
-        return try {
-            val children = file.parentFile?.listFiles() ?: return false
+        try {
+            val children = file.parentFile?.listFiles() ?: return@execute false
             children.map { it.deleteRecursively() }.all { it }
         } finally {
             file.parentFile?.let { directory ->
@@ -234,8 +241,7 @@ object Logback {
         return targetDir.absolutePath + File.separator
     }
 
-    @Synchronized
-    fun remoteLogger(channel: String, suffix: String?): Logger {
+    fun remoteLogger(channel: String, suffix: String?): Logger = outputQueue.execute {
         PrivateStorage.requireReady()
         val lc = LoggerFactory.getILoggerFactory() as LoggerContext
         val loggerName = if (suffix == null || channel == LogChannel.CAPTURE.loggerName) channel else "$channel-$suffix"
@@ -243,7 +249,7 @@ object Logback {
         if (!logger.iteratorForAppenders().hasNext()) {
             addFileAppender(lc, loggerName, resolveLogDir(checkNotNull(appContext)), "$loggerName.log")
         }
-        return logger
+        logger
     }
 
     private fun addPipeAppender(lc: LoggerContext, channel: String, processName: String) {

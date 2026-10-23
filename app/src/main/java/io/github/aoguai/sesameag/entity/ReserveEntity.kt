@@ -16,12 +16,12 @@ class ReserveEntity(i: String, n: String) : MapperEntity() {
     }
 
     companion object {
-        @Volatile
-        private var list: List<ReserveEntity>? = null
+        private class Snapshot(val items: List<ReserveEntity>? = null)
+        private val list = java.util.concurrent.atomic.AtomicReference(Snapshot())
 
         /**
          * 获取包含所有保留项的列表，首次调用时从 ReserveIdMapUtil 初始化。
-         * 使用双重检查锁定机制实现懒加载以提高性能。
+         * 完整构造后发布快照，读取不参与互斥。
          *
          * @return 包含所有 ReserveEntity 对象的不可变列表
          */
@@ -34,17 +34,14 @@ class ReserveEntity(i: String, n: String) : MapperEntity() {
 
         @JvmStatic
         fun getList(): List<ReserveEntity> {
-            if (list == null) {
-                synchronized(ReserveEntity::class.java) {
-                    if (list == null) {
-                        val idSet = IdMapManager.getInstance(ReserveaMap::class.java).map.entries
-                        list = idSet.map { (key, value) -> 
-                            ReserveEntity(key, value) 
-                        }
-                    }
+            while (true) {
+                val current = list.get()
+                current.items?.let { return it }
+                val items = IdMapManager.getInstance(ReserveaMap::class.java).map.entries.map { (key, value) ->
+                    ReserveEntity(key, value)
                 }
+                if (list.compareAndSet(current, Snapshot(items))) return items
             }
-            return list ?: emptyList()
         }
 
         /**
@@ -55,14 +52,16 @@ class ReserveEntity(i: String, n: String) : MapperEntity() {
          */
         @JvmStatic
         fun invalidate() {
-            synchronized(ReserveEntity::class.java) { list = null }
+            list.set(Snapshot())
         }
 
         @JvmStatic
         fun remove(id: String) {
-            getList()
-            synchronized(ReserveEntity::class.java) {
-                list = list?.filter { it.id != id }
+            while (true) {
+                getList()
+                val current = list.get()
+                val items = current.items ?: continue
+                if (list.compareAndSet(current, Snapshot(items.filter { it.id != id }))) return
             }
         }
     }

@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -167,7 +168,7 @@ object RpcTrafficCapture {
     // false 仅表示类入口正在安装，不把安装占位当作成功。
     private val miniHttpClassInstallations = ConcurrentHashMap<Class<*>, Boolean>()
     private val reportedHttpClasses = ConcurrentHashMap.newKeySet<Class<*>>()
-    private val reportedHttpCallSites = linkedSetOf<String>()
+    private val reportedHttpCallSites = AtomicReference<Set<String>>(emptySet())
     private val httpClassDeclarations = ConcurrentHashMap<Class<*>, String>()
     private val responseHookCalls = ThreadLocal<IdentityHashMap<Any, Boolean>>()
     private val bodyAccessorCalls = ThreadLocal<IdentityHashMap<PendingHostRequest, Boolean>>()
@@ -284,7 +285,7 @@ object RpcTrafficCapture {
                     sessionStarted = false
                     captureSessionCache = null
                     reportedHttpClasses.clear()
-                    synchronized(reportedHttpCallSites) { reportedHttpCallSites.clear() }
+                    reportedHttpCallSites.set(emptySet())
                 }
             }
             return false
@@ -866,13 +867,14 @@ object RpcTrafficCapture {
         activeSessionId()
         val loader = method.declaringClass.classLoader
         val observer = "observer=$method; loader=${loader?.javaClass?.name}@${System.identityHashCode(loader)}"
-        if (synchronized(reportedHttpCallSites) { reportedHttpCallSites.size >= 32 }) return observer
+        if (reportedHttpCallSites.get().size >= 32) return observer
         val trace = Throwable().stackTrace.drop(1).joinToString("\n")
         val declaration = "$observer\n$trace"
-        val first = synchronized(reportedHttpCallSites) {
-            reportedHttpCallSites.size < 32 && reportedHttpCallSites.add(declaration)
+        while (true) {
+            val reported = reportedHttpCallSites.get()
+            if (reported.size >= 32 || declaration in reported) return observer
+            if (reportedHttpCallSites.compareAndSet(reported, reported + declaration)) break
         }
-        if (!first) return observer
         runCatching { Log.runtime(TAG, "HTTP 响应观察入口: $declaration") }
         // 随本次响应保存调用位置，避免仅有 runtime 的首个样本而漏掉其他实际入口。
         return declaration
@@ -2109,7 +2111,7 @@ object RpcTrafficCapture {
             eventSequence.set(0L)
             captureSessionCache = null
             reportedHttpClasses.clear()
-            synchronized(reportedHttpCallSites) { reportedHttpCallSites.clear() }
+            reportedHttpCallSites.set(emptySet())
             runCatching { Files.child(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME).delete() }
         }
     }
@@ -2125,7 +2127,7 @@ object RpcTrafficCapture {
             if (sessionId != resolved) {
                 clearPendingAriverRequests()
                 reportedHttpClasses.clear()
-                synchronized(reportedHttpCallSites) { reportedHttpCallSites.clear() }
+                reportedHttpCallSites.set(emptySet())
                 sessionId = resolved
                 sessionStarted = false
                 eventSequence.set(0L)

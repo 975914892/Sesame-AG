@@ -389,13 +389,13 @@ interface TaskFlowAdapter {
 /** 统一任务执行流程：执行、领奖、刷新和确认进展；不负责注册持久任务调度。 */
 class TaskFlowEngine(
     private val adapter: TaskFlowAdapter,
-    private val roundSleepMs: Long = 1000L,
+    private val roundSleepMs: Long = 850L,
     private val executionState: TaskFlowExecutionState = TaskFlowExecutionState(),
 ) {
     private companion object {
         const val MAX_DYNAMIC_ROUND_LIMIT = 64
         const val DYNAMIC_ROUND_LIMIT_EXTRA = 6
-        const val ROUND_SLEEP_JITTER_MS = 1500L
+        const val ROUND_SLEEP_JITTER_MS = 1275L
     }
 
     fun run(): TaskFlowRunResult = try {

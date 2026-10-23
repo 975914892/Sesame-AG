@@ -1046,7 +1046,7 @@ class AntOcean : ModelTask() {
 
     private fun runAiFishTaskFlow(): TaskFlowRunResult? =
         try {
-            TaskFlowEngine(AiFishTaskFlowAdapter(), roundSleepMs = 500L).run()
+            TaskFlowEngine(AiFishTaskFlowAdapter(), roundSleepMs = 425L).run()
         } catch (t: Throwable) {
             Log.runtime(TAG, "runAiFishTaskFlow err:")
             Log.printStackTrace(TAG, t)
@@ -2156,7 +2156,7 @@ class AntOcean : ModelTask() {
             val adapter = OceanTaskFlowAdapter()
             val result = TaskFlowEngine(
                 adapter = adapter,
-                roundSleepMs = 500L,
+                roundSleepMs = 425L,
                 executionState = oceanTaskExecutionState,
             ).run()
             if (!result.stopped && !result.interrupted && adapter.canMarkTasksDoneForToday()) {
@@ -3550,8 +3550,8 @@ class AntOcean : ModelTask() {
                     if (ResChecker.checkRes(TAG, exchangeResultObj)) {
                         // 输出日志信息
                         Log.ocean("神奇海洋🏖️[万能拼图]制作${exchangeNum}张,剩余${exchangedPieceNum}张碎片")
-                        // 制作完成后休眠1秒钟
-                        delay(1000)
+                        // 连续兑换之间随机停顿
+                        delay(RandomUtil.nextLong(850, 1001))
                     }
                 } else {
                     // 如果未成功获取道具列表，停止循环

@@ -26,7 +26,7 @@ object StoreAccess {
     private val localDepth = ThreadLocal.withInitial { 0 }
     private val remoteSession = ThreadLocal<IStoreTransaction?>()
     private val remoteClient = ThreadLocal<IBinder?>()
-    private val remoteLock = java.util.concurrent.locks.ReentrantLock(true)
+    private val afterActions = ThreadLocal<MutableList<() -> Unit>?>()
     data class Change(val collection: Int, val owner: String, val name: String)
     private val localChanges = ThreadLocal.withInitial { linkedSetOf<Change>() }
     private val callbacks = CopyOnWriteArraySet<(Change) -> Unit>()
@@ -58,46 +58,59 @@ object StoreAccess {
 
     private fun publish(changes: Set<Change>) {
         changes.forEach(::dispatchLocal)
-        synchronized(listeners) {
+        val targets = synchronized(listeners) {
             val count = listeners.beginBroadcast()
-            try {
-                for (index in 0 until count) changes.forEach { change ->
-                    runCatching { listeners.getBroadcastItem(index).onChanged(change.collection, change.owner, change.name) }
-                }
-            } finally { listeners.finishBroadcast() }
+            try { List(count) { index -> listeners.getBroadcastItem(index) } }
+            finally { listeners.finishBroadcast() }
         }
+        targets.forEach { target -> changes.forEach { change ->
+            runCatching { target.onChanged(change.collection, change.owner, change.name) }
+        } }
     }
 
     fun <T> transaction(block: () -> T): T {
-        if (remote) {
-            if (remoteSession.get() != null) return block()
-            remoteLock.lockInterruptibly()
-            try {
+        if (remoteSession.get() != null || (localDepth.get() ?: 0) > 0) return block()
+        val actions = mutableListOf<() -> Unit>()
+        afterActions.set(actions)
+        try {
+            if (remote) {
                 val client = Binder()
                 remoteClient.set(client)
-                val session = CommandUtil.storageService().beginStoreTransaction(client)
-                    ?: throw IOException("模块存储尚未就绪，请在模块中完成数据迁移")
-                remoteSession.set(session)
-                try { return block() } finally {
-                    remoteSession.remove()
-                    session.close()
-                }
-            } finally { remoteClient.remove(); remoteLock.unlock() }
+                try {
+                    val session = CommandUtil.storageService().beginStoreTransaction(client)
+                        ?: throw IOException("模块存储尚未就绪，请在模块中完成数据迁移")
+                    remoteSession.set(session)
+                    try { return block() } finally {
+                        remoteSession.remove()
+                        session.close()
+                    }
+                } finally { remoteClient.remove() }
+            }
+            PrivateStorage.requireReady()
+            if (!permit.tryAcquire(5L, java.util.concurrent.TimeUnit.SECONDS)) {
+                throw IOException("模块存储正忙，请稍后重试")
+            }
+            localDepth.set(1)
+            checkNotNull(localChanges.get()).clear()
+            try { return block() } finally {
+                val changes = checkNotNull(localChanges.get()).toSet()
+                localDepth.remove()
+                localChanges.remove()
+                permit.release()
+                if (changes.isNotEmpty()) publish(changes)
+            }
+        } finally {
+            afterActions.remove()
+            actions.forEach { action -> runCatching(action).onFailure {
+                android.util.Log.e("PrivateStorage", "Post-transaction action failed", it)
+            } }
         }
-        PrivateStorage.requireReady()
-        if ((localDepth.get() ?: 0) > 0) return block()
-        if (!permit.tryAcquire(5L, java.util.concurrent.TimeUnit.SECONDS)) {
-            throw IOException("模块存储正忙，请稍后重试")
-        }
-        localDepth.set(1)
-        checkNotNull(localChanges.get()).clear()
-        try { return block() } finally {
-            val changes = checkNotNull(localChanges.get()).toSet()
-            localDepth.remove()
-            localChanges.remove()
-            permit.release()
-            if (changes.isNotEmpty()) publish(changes)
-        }
+    }
+
+    /** 调度和通知在最外层事务结束后执行，避免回调重新申请正在占用的事务。 */
+    internal fun afterTransaction(action: () -> Unit) {
+        val actions = afterActions.get()
+        if (actions == null) action() else actions.add(action)
     }
 
     internal fun stat(file: StoreFile): Bundle = transaction {
@@ -254,12 +267,14 @@ object StoreAccess {
         }
         override fun close() { check(Binder.getCallingUid() == uid); release() }
         override fun binderDied() = release()
-        @Synchronized private fun release() {
-            if (closed) return
-            closed = true
-            client.unlinkToDeath(this, 0)
-            permit.release()
-            if (changes.isNotEmpty()) publish(changes.toSet())
+        private fun release() {
+            val pending = synchronized(this) {
+                if (closed) return
+                closed = true
+                changes.toSet()
+            }
+            try { client.unlinkToDeath(this, 0) } finally { permit.release() }
+            if (pending.isNotEmpty()) publish(pending)
         }
     }
 
@@ -274,7 +289,9 @@ object StoreAccess {
     }
 
     internal fun installSnapshot(snapshot: File) {
-        permit.acquire()
+        if (!permit.tryAcquire(5L, java.util.concurrent.TimeUnit.SECONDS)) {
+            throw IOException("模块存储正忙，未开始恢复，请稍后重试")
+        }
         val root = PrivateStorage.root
         val previous = File(PrivateStorage.context.noBackupFilesDir, "store-restore-previous")
         var installed = false

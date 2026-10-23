@@ -15,7 +15,6 @@ import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.UserDataStoreManager
-import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.net.HttpRetryException
 import java.util.Calendar
@@ -23,7 +22,7 @@ import java.util.concurrent.TimeUnit
 
 internal const val FOREST_READ_CHILD_KIND = "forest_read"
 
-internal suspend fun AntForest.runForestReadWorkflow() = forestReadMutex.withLock {
+internal suspend fun AntForest.runForestReadWorkflow() = forestReadQueue.submit {
     val result = ForestRead.run()
     result.deferredUntil?.let { scheduleForestRead(it) }
 }

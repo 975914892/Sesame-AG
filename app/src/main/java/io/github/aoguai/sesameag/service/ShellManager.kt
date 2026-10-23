@@ -8,8 +8,7 @@ import com.niki.cmd.model.bean.ShellResult
 import io.github.aoguai.sesameag.service.patch.SafeRootShell
 import io.github.aoguai.sesameag.util.Log
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import rikka.shizuku.Shizuku
 
 class ShellManager(context: Context) {
@@ -29,7 +28,7 @@ class ShellManager(context: Context) {
     private var selectedShell: Shell? = null
     @Volatile
     private var lastNotifiedType: String? = null
-    private val selectionMutex = Mutex()
+    private val selectionQueue = SerialTaskQueue()
 
     /**
      * 获取当前使用的 Shell 名称
@@ -49,9 +48,9 @@ class ShellManager(context: Context) {
     }
 
     private suspend fun selectExecutor(notifyUnavailable: Boolean = true) {
-        selectionMutex.withLock {
+        selectionQueue.submit {
             val current = selectedShell
-            if (current?.isAvailable() == true) return
+            if (current?.isAvailable() == true) return@submit
             selectedShell = null
 
             Log.d(TAG, "正在寻找可用的 Root 或 Shizuku Shell...")
@@ -76,7 +75,7 @@ class ShellManager(context: Context) {
                         selectedShell = shell
                         notifyChange() // 🔥 通知：选中了新 Shell
                         Log.i(TAG, "✅ 成功选中 Shell: ${shell.javaClass.simpleName}")
-                        return
+                        return@submit
                     }
                 } catch (e: CancellationException) {
                     throw e

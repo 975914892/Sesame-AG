@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antDodo
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
 
 import org.json.JSONException
@@ -291,7 +293,7 @@ class AntDodo : ModelTask() {
                 }
                 rewards[key] = (result.optJSONObject("data")?.opt("energyGram") as? Number)?.toInt() ?: -1
                 store.put(pendingKey, rewards)
-                GlobalThreadPools.sleepCompat(500L)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
             }
             val refreshed = JSONObject(AntDodoRpcCall.homePage())
             if (!ResChecker.checkRes(TAG, "神奇物种刮卡状态查询失败：", refreshed)) return false
@@ -429,7 +431,7 @@ class AntDodo : ModelTask() {
     private fun receiveTaskAward(executionState: TaskFlowExecutionState = TaskFlowExecutionState()) {
         try {
             taskListRefreshNeeded = false
-            TaskFlowEngine(DodoTaskFlowAdapter(), roundSleepMs = 500L, executionState = executionState).run()
+            TaskFlowEngine(DodoTaskFlowAdapter(), roundSleepMs = 425L, executionState = executionState).run()
         } catch (e: JSONException) {
             Log.error(TAG, "JSON解析错误: ${e.message}")
             Log.printStackTrace(TAG, e)
@@ -936,7 +938,7 @@ class AntDodo : ModelTask() {
                         }
                         useResult?.let { scratchAnimalCards(it) }
                         logPropRefreshState(propType, propName, consumeTarget, animal)
-                        GlobalThreadPools.sleepCompat(300)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(255, 301))
                         continue@th
                     }
                     if (replenishDodoPropIfMissing(
@@ -1365,7 +1367,7 @@ class AntDodo : ModelTask() {
                     val animal = animalForUser.getJSONObject("animal")
                     for (j in 1 until count) {
                         sendCard(animal, targetUser)
-                        GlobalThreadPools.sleepCompat(500L)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(425, 501))
                     }
                 }
             } else {

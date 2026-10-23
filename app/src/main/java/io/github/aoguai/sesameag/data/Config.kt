@@ -124,23 +124,21 @@ class Config private constructor() {
          */
         @JvmStatic
         fun isModify(userId: String?): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                if (!isLoadedFor(userId)) return@transaction true
-                INSTANCE.sanitizeFriendSelectionFields(userId)
-                val configV2File = if (userId.isNullOrEmpty()) {
-                    Files.getDefaultConfigV2File()
-                } else {
-                    Files.getConfigV2File(userId)
-                }
-
-                if (!configV2File.exists()) {
-                    return@transaction true
-                }
-
-                val json = Files.readFromFile(configV2File) ?: return@transaction true
-                val formatted = JsonUtil.formatJson(INSTANCE) ?: return@transaction true
-                return@transaction formatted != json
+            if (!isLoadedFor(userId)) return@transaction true
+            INSTANCE.sanitizeFriendSelectionFields(userId)
+            val configV2File = if (userId.isNullOrEmpty()) {
+                Files.getDefaultConfigV2File()
+            } else {
+                Files.getConfigV2File(userId)
             }
+
+            if (!configV2File.exists()) {
+                return@transaction true
+            }
+
+            val json = Files.readFromFile(configV2File) ?: return@transaction true
+            val formatted = JsonUtil.formatJson(INSTANCE) ?: return@transaction true
+            return@transaction formatted != json
         }
 
         /**
@@ -209,16 +207,14 @@ class Config private constructor() {
         @JvmStatic
         fun isLoaded(): Boolean = INSTANCE.isInit
 
-        @Synchronized
-        fun isLoadedFor(userId: String?): Boolean =
+        fun isLoadedFor(userId: String?): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             INSTANCE.isInit && INSTANCE.loadedUserId == userId?.trim()?.takeIf { it.isNotEmpty() }
+        }
 
         fun <T> withLoadedAccount(userId: String?, action: () -> T): T =
             io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-                synchronized(this) {
-                    check(isLoadedFor(userId)) { "账号配置已变化，请重新打开目标账号后重试" }
-                    action()
-                }
+                check(isLoadedFor(userId)) { "账号配置已变化，请重新打开目标账号后重试" }
+                action()
             }
 
         @JvmStatic
@@ -231,12 +227,10 @@ class Config private constructor() {
 
         @JvmStatic
         fun sanitizeFriendSelectionFieldsForUser(userId: String?): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                val safeUserId = userId?.trim().orEmpty()
-                if (safeUserId.isEmpty() || INSTANCE.loadedUserId != safeUserId) return@transaction false
-                INSTANCE.sanitizeFriendSelectionFields(userId)
-                return@transaction true
-            }
+            val safeUserId = userId?.trim().orEmpty()
+            if (safeUserId.isEmpty() || INSTANCE.loadedUserId != safeUserId) return@transaction false
+            INSTANCE.sanitizeFriendSelectionFields(userId)
+            return@transaction true
         }
 
         @JvmStatic
@@ -248,43 +242,39 @@ class Config private constructor() {
 
         @JvmStatic
         fun saveLegalAcceptedForCurrentVersion(userId: String?, accepted: Boolean): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                val targetFile = if (userId.isNullOrEmpty()) {
-                    Files.getDefaultConfigV2File()
-                } else {
-                    Files.getConfigV2File(userId)
-                }
+            val targetFile = if (userId.isNullOrEmpty()) {
+                Files.getDefaultConfigV2File()
+            } else {
+                Files.getConfigV2File(userId)
+            }
 
-                val baseJson = readBaseConfigJsonForLegalWrite(userId, targetFile) ?: return@transaction false
-                val mapper = JsonUtil.copyMapper()
-                val rootNode = (mapper.readTree(baseJson) as? ObjectNode) ?: mapper.createObjectNode()
-                rootNode.put(LEGAL_ACCEPTED_APP_VERSION_FIELD, if (accepted) BuildConfig.VERSION_NAME else "")
-                val updatedJson = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(rootNode)
+            val baseJson = readBaseConfigJsonForLegalWrite(userId, targetFile) ?: return@transaction false
+            val mapper = JsonUtil.copyMapper()
+            val rootNode = (mapper.readTree(baseJson) as? ObjectNode) ?: mapper.createObjectNode()
+            rootNode.put(LEGAL_ACCEPTED_APP_VERSION_FIELD, if (accepted) BuildConfig.VERSION_NAME else "")
+            val updatedJson = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(rootNode)
 
-                return@transaction if (userId.isNullOrEmpty()) {
-                    Files.setDefaultConfigV2File(updatedJson)
-                } else {
-                    Files.setConfigV2File(userId, updatedJson)
-                }
+            return@transaction if (userId.isNullOrEmpty()) {
+                Files.setDefaultConfigV2File(updatedJson)
+            } else {
+                Files.setConfigV2File(userId, updatedJson)
             }
         }
 
         @JvmStatic
         fun saveLegalAcceptedForUsers(userIds: Collection<String>, accepted: Boolean): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                val normalizedUserIds = userIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-                val defaultSaved = saveLegalAcceptedForCurrentVersion(null, accepted)
-                val userResults = normalizedUserIds.map { userId ->
-                    userId to saveLegalAcceptedForCurrentVersion(userId, accepted)
-                }
-                val failedUsers = userResults.filterNot { it.second }.map { it.first }
-                if (!defaultSaved || failedUsers.isNotEmpty()) {
-                    Log.runtime(TAG, "协议确认保存失败: defaultSaved=$defaultSaved failedUsers=$failedUsers")
-                    return@transaction false
-                }
-                Log.runtime(TAG, "协议确认已保存: users=$normalizedUserIds defaultSaved=$defaultSaved")
-                return@transaction true
+            val normalizedUserIds = userIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            val defaultSaved = saveLegalAcceptedForCurrentVersion(null, accepted)
+            val userResults = normalizedUserIds.map { userId ->
+                userId to saveLegalAcceptedForCurrentVersion(userId, accepted)
             }
+            val failedUsers = userResults.filterNot { it.second }.map { it.first }
+            if (!defaultSaved || failedUsers.isNotEmpty()) {
+                Log.runtime(TAG, "协议确认保存失败: defaultSaved=$defaultSaved failedUsers=$failedUsers")
+                return@transaction false
+            }
+            Log.runtime(TAG, "协议确认已保存: users=$normalizedUserIds defaultSaved=$defaultSaved")
+            return@transaction true
         }
 
         /**
@@ -295,11 +285,9 @@ class Config private constructor() {
          */
         @JvmStatic
         fun load(userId: String?): Config = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                val target = userId?.trim()?.takeIf { it.isNotEmpty() }
-                return@transaction if (target == null) loadAccount(null)
-                else Files.withAccountLock(target) { loadAccount(target) }
-            }
+            val target = userId?.trim()?.takeIf { it.isNotEmpty() }
+            return@transaction if (target == null) loadAccount(null)
+            else Files.withAccountLock(target) { loadAccount(target) }
         }
 
         private fun loadAccount(userId: String?): Config {
@@ -348,8 +336,7 @@ class Config private constructor() {
          * 卸载当前配置
          */
         @JvmStatic
-        @Synchronized
-        fun unload() {
+        fun unload(): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             Model.getModelConfigMap().values.forEach { model -> model.fields.values.forEach { it.reset() } }
             for (modelFields in INSTANCE.modelFieldsMap.values) {
                 for (modelField in modelFields.values) {

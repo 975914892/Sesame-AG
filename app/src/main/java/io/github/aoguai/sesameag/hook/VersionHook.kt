@@ -8,7 +8,8 @@ import io.github.aoguai.sesameag.util.Log.printStackTrace
 import io.github.aoguai.sesameag.util.Log.record
 import io.github.libxposed.api.XposedInterface
 import java.lang.reflect.Method
-import kotlin.concurrent.Volatile
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 版本号 Hook 工具类
@@ -23,24 +24,23 @@ object VersionHook {
      *
      */
     // 缓存捕获的版本信息
-    @Volatile
-    private var capturedVersion: AlipayVersion? = null
-
-    private var hookHandle: XposedInterface.HookHandle? = null
+    private val version = AtomicReference<AlipayVersion?>(null)
+    private val hookHandle = AtomicReference<XposedInterface.HookHandle?>(null)
+    private val installing = AtomicBoolean(false)
 
     /**
      * 在 loadPackage 阶段尽早安装 Hook
      *
      * @param classLoader 类加载器
      */
-    @Synchronized
     fun installHook(classLoader: ClassLoader?) {
-        if (capturedVersion != null || hookHandle != null) {
-            record(TAG, "⚠️ 版本已获取或 Hook 已安装,跳过")
-            return
-        }
-
+        if (!installing.compareAndSet(false, true)) return
         try {
+            if (version.get() != null || hookHandle.get() != null) {
+                record(TAG, "⚠️ 版本已获取或 Hook 已安装,跳过")
+                return
+            }
+
             val packageManagerClass = Class.forName("android.app.ApplicationPackageManager", false, classLoader)
             val getPackageInfoMethod = findMethod(
                 packageManagerClass,
@@ -48,7 +48,7 @@ object VersionHook {
                 String::class.java,
                 Int::class.javaPrimitiveType!!
             )
-            hookHandle = ApplicationHook.requireXposedInterface().hook(getPackageInfoMethod).intercept { chain ->
+            val handle = ApplicationHook.requireXposedInterface().hook(getPackageInfoMethod).intercept { chain ->
                 val result = chain.proceed()
                 try {
                     val packageInfo = result as? PackageInfo
@@ -69,12 +69,15 @@ object VersionHook {
                 result
             }
 
+            hookHandle.set(handle)
             record(TAG, "✅ 版本号 Hook 安装成功")
             // 安装句柄保存前，框架回调可能已完成版本采集。
-            capturedVersion?.let { completeCapture(it) }
+            version.get()?.let { completeCapture(it) }
         } catch (t: Throwable) {
             record(TAG, "❌ 安装版本号 Hook 失败")
             printStackTrace(TAG, t)
+        } finally {
+            installing.set(false)
         }
     }
 
@@ -83,17 +86,14 @@ object VersionHook {
      *
      * @return 是否首次保存版本
      */
-    @Synchronized
     internal fun completeCapture(version: AlipayVersion): Boolean {
         if (version.versionString.isBlank()) return false
-        val firstCapture = capturedVersion == null
-        if (firstCapture) {
-            capturedVersion = version
-        }
+        val firstCapture = this.version.compareAndSet(null, version)
+        val handle = hookHandle.getAndSet(null) ?: return firstCapture
         try {
-            hookHandle?.unhook()
-            hookHandle = null
+            handle.unhook()
         } catch (t: Throwable) {
+            hookHandle.compareAndSet(null, handle)
             record(TAG, "❌ 卸载版本号 Hook 失败")
             printStackTrace(TAG, t)
         }
@@ -106,7 +106,7 @@ object VersionHook {
      * @return true: 已捕获, false: 未捕获
      */
     fun hasVersion(): Boolean {
-        return capturedVersion != null
+        return version.get() != null
     }
 
     /**
@@ -115,7 +115,7 @@ object VersionHook {
      * @return 已捕获的版本信息，如果未捕获则返回 null
      */
     fun getCapturedVersion(): AlipayVersion? {
-        return capturedVersion
+        return version.get()
     }
 
     private fun findMethod(targetClass: Class<*>, name: String, vararg parameterTypes: Class<*>): Method {

@@ -56,8 +56,8 @@ import io.github.aoguai.sesameag.util.maps.UserMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
@@ -141,7 +141,7 @@ class AntStall : ModelTask() {
     private lateinit var assistFriendList: FriendSelectionModelField
     private val loggedTaskMessages = LinkedHashSet<String>()
     private val reservedInviteShopUserIds = ConcurrentHashMap.newKeySet<String>()
-    private val stallWorkflowMutex = Mutex()
+    private val stallWorkflowQueue = SerialTaskQueue()
     private var stallTasksDoneInvalidatedThisRun = false
 
     override fun getName(): String = "新村"
@@ -249,7 +249,7 @@ class AntStall : ModelTask() {
                 ownerUserId = currentOwnerUserId,
                 sessionEpoch = payloadSessionEpoch,
                 source = "stall_send_back:$source",
-                workflowMutex = stallWorkflowMutex,
+                workflowQueue = stallWorkflowQueue,
             ) {
                 runInterruptible(Dispatchers.IO) { runSendBackPersistentTask(childId, payload) }
             }
@@ -537,7 +537,7 @@ class AntStall : ModelTask() {
         }
 
     override suspend fun runSuspend() {
-        stallWorkflowMutex.withLock { super.runSuspend() }
+        stallWorkflowQueue.submit { super.runSuspend() }
     }
 
     override fun runJava() {
@@ -902,7 +902,7 @@ class AntStall : ModelTask() {
                                         ownerUserId = session.userId,
                                         sessionEpoch = session.sessionEpoch,
                                         source = "stall_memory_fallback",
-                                        workflowMutex = stallWorkflowMutex,
+                                        workflowQueue = stallWorkflowQueue,
                                         persistent = false,
                                     ) {
                                         runInterruptible(Dispatchers.IO) { runSendBackPersistentTask(taskId, payload) }
@@ -1474,7 +1474,7 @@ class AntStall : ModelTask() {
             val result =
                 TaskFlowEngine(
                     adapter = adapter,
-                    roundSleepMs = 500L,
+                    roundSleepMs = 425L,
                     executionState = executionState,
                 ).run()
             if (allowMarkDone && !result.stopped && adapter.canMarkTasksDone()) {
@@ -2056,7 +2056,7 @@ class AntStall : ModelTask() {
                 processedEventKeys.add(eventKey)
                 finishedCount++
                 if (config.usePagedSearchInfo && nextPlayingPageInfo != null && finishedCount < config.rounds) {
-                    GlobalThreadPools.sleepCompat(5000)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(4250, 5001))
                     playingPageInfo = nextPlayingPageInfo
                     pageNo++
                     advanceToNextPage = true
@@ -2927,7 +2927,7 @@ class AntStall : ModelTask() {
 
                 Log.stall("新村助力🎉成功[$name]")
                 progressed = true
-                GlobalThreadPools.sleepCompat(5000)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(4250, 5001))
             }
 
             Status.antStallAssistFriendToday()
@@ -3375,11 +3375,11 @@ class AntStall : ModelTask() {
 
                             Log.stall("蚂蚁新村🚫在[${UserMap.getMaskName(friendId)}]贴罚单")
                         } finally {
-                            GlobalThreadPools.sleepCompat(1000)
+                            GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                         }
                     }
                 } finally {
-                    GlobalThreadPools.sleepCompat(1500)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1275, 1501))
                 }
             }
         } catch (t: Throwable) {

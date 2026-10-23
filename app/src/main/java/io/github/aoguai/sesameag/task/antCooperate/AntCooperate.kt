@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antCooperate
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.CooperateEntity.Companion.getList
@@ -573,7 +575,7 @@ class AntCooperate : ModelTask() {
                             if (ResChecker.checkRes(TAG, jo)) {
                                 Log.forest("合种🚿[" + name + "]#召唤队友[" + rankInfo.getString("displayName") + "]成功")
                             }
-                            TimeUtil.sleepCompat(300)
+                            TimeUtil.sleepCompat(RandomUtil.nextLong(255, 301))
                         }
                     }
                 }

@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
 
 import io.github.aoguai.sesameag.data.Status
@@ -186,7 +188,7 @@ class ForestChouChouLe(private val charityWaterEnabled: Boolean = false) {
             Log.forest("开始处理森林寻宝, 共 ${scenes.size} 个场景")
             scenes.forEach {
                 processScene(it)
-                sleepCompat(100L)
+                sleepCompat(RandomUtil.nextLong(85, 101))
             }
         }.onFailure { Log.printStackTrace(TAG, "执行异常", it) }
     }
@@ -247,7 +249,7 @@ class ForestChouChouLe(private val charityWaterEnabled: Boolean = false) {
                     return@runCatching
                 }
 
-                val taskResult = TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 500L).run()
+                val taskResult = TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 425L).run()
                 val lotteryHandled =
                     if (taskResult.interrupted) {
                         Log.forest("${s.name} 任务流因离线中断，跳过本轮抽奖")
@@ -503,7 +505,7 @@ class ForestChouChouLe(private val charityWaterEnabled: Boolean = false) {
                     Log.forest("${s.name} 🎁 [获得: $name * $num] 剩余次数: $balance")
                 }
 
-                if (balance > 0) sleepCompat(500L)
+                if (balance > 0) sleepCompat(RandomUtil.nextLong(425, 501))
             }
             if (balance > 0) {
                 Log.error(TAG, "${s.name} 单次抽奖达到轮次上限，剩余次数: $balance")

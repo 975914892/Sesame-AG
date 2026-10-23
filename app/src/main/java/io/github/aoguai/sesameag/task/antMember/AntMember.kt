@@ -83,8 +83,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -236,7 +236,7 @@ class AntMember : ModelTask() {
         UNKNOWN
     }
 
-    internal val memberFloatingBallMutex = Mutex()
+    internal val memberFloatingBallQueue = SerialTaskQueue()
 
     private data class MemberFloatingBallTaskRef(
         val bizNo: String,
@@ -521,7 +521,7 @@ class AntMember : ModelTask() {
                 if (enableGameCenter?.value == true) {
                     deferredTasks.add(async(Dispatchers.IO) {
                         enableGameCenter()
-                        memberFloatingBallMutex.withLock { runExternalGameCenter() }
+                        memberFloatingBallQueue.submit { runExternalGameCenter() }
                     })
                 }
                 if (expressWelfare?.value == true) {
@@ -627,7 +627,7 @@ class AntMember : ModelTask() {
                     )
                     adapter to TaskFlowExecutionState()
                 }
-                val result = TaskFlowEngine(adapter, roundSleepMs = 500L, executionState = state).run()
+                val result = TaskFlowEngine(adapter, roundSleepMs = 425L, executionState = state).run()
                 // 子流程独立保留真实失败；父流程回查入口，不重复记同一错误。
                 if (!result.completed || result.failureCount > 0 || result.interrupted) {
                     return TaskFlowActionResult.defer(
@@ -769,7 +769,7 @@ class AntMember : ModelTask() {
 
     private fun refreshMemberPointExchangeOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> {
         val userId = UserMap.currentUid
-        val candidateMap = queryMemberExchangeCandidates(userId, null, 1000L, forceRefresh = forceRefresh)
+        val candidateMap = queryMemberExchangeCandidates(userId, null, 850L, forceRefresh = forceRefresh)
         val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
         candidateMap.values.forEach { memberBenefitMap.add(it.item.id, it.item.displayName()) }
         memberBenefitMap.save(userId)
@@ -1189,7 +1189,7 @@ class AntMember : ModelTask() {
             }
             val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
             Log.member("会员积分🎐兑换列表刷新..")
-            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L)
+            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 850L)
             candidateMap.values.forEach { candidate ->
                 memberBenefitMap.add(candidate.item.id, candidate.item.displayName())
                 if (!selectedIds.contains(candidate.item.id)) {
@@ -1663,7 +1663,7 @@ class AntMember : ModelTask() {
 
     internal suspend fun doAllMemberAvailableTaskCompat(): Unit = CoroutineUtils.run {
         try {
-            val floatingBallState = memberFloatingBallMutex.withLock { processMemberFloatingBallTaskCompat() }
+            val floatingBallState = memberFloatingBallQueue.submit { processMemberFloatingBallTaskCompat() }
             val processedAnyTask = floatingBallState == MemberFloatingBallTaskProcessState.PROCESSED
             if (ApplicationHookConstants.isOffline()) {
                 Log.member("会员任务[浮球]#检测到离线模式，本轮中断")
@@ -1691,7 +1691,7 @@ class AntMember : ModelTask() {
                 }
             }
 
-            val taskListState = memberFloatingBallMutex.withLock { processCurrentMemberTaskListCompat() }
+            val taskListState = memberFloatingBallQueue.submit { processCurrentMemberTaskListCompat() }
             if (floatingBallState == MemberFloatingBallTaskProcessState.RETRY_LATER ||
                 floatingBallState == MemberFloatingBallTaskProcessState.UNKNOWN ||
                 floatingBallState == MemberFloatingBallTaskProcessState.STOPPED_TODAY
@@ -1734,7 +1734,7 @@ class AntMember : ModelTask() {
     private suspend fun processCurrentMemberTaskListCompat(): CurrentMemberTaskListProcessState = CoroutineUtils.run {
         try {
             val adapter = CurrentMemberTaskFlowAdapter()
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
             return@run when {
                 adapter.queryFailed -> CurrentMemberTaskListProcessState.UNKNOWN
                 adapter.hasIncompleteQuery || adapter.hasRetryableFailure || adapter.hasBlockingFailure || runResult.stopped ->
@@ -2175,7 +2175,7 @@ class AntMember : ModelTask() {
 
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
-            }, roundSleepMs = 300L).run()
+            }, roundSleepMs = 255L).run()
         } catch (t: Throwable) {
             if (t is CancellationException || t is InterruptedException) throw t
             TaskExecutionReport.current()?.recordException()
@@ -2631,7 +2631,7 @@ class AntMember : ModelTask() {
             ownerUserId = ownerUserId,
             sessionEpoch = payload.optLong("session_epoch"),
             source = "member_floating_ball:$source",
-            workflowMutex = memberFloatingBallMutex,
+            workflowQueue = memberFloatingBallQueue,
             persistent = persistent,
         ) {
             if (!isEnable()) return@executePersistentChild TaskExecutionOutcome.SKIPPED
@@ -3545,7 +3545,7 @@ class AntMember : ModelTask() {
         var taskCount = 0
         for (config in insuredTaskCenterConfigs) {
             val adapter = InsuredTaskCenterFlowAdapter(config, entrance)
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
             taskCount += adapter.taskCount
             val configResult = when {
                 adapter.queryFailed || adapter.hasBlockingFailure -> DailyTaskProcessResult.UNKNOWN_FAILURE
@@ -5064,7 +5064,7 @@ class AntMember : ModelTask() {
                 autoTaskPredicate = ::isGoldTicketKnownWelfareAutoTask,
                 recordUnsupportedTasks = true
             )
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
             adapter.logSummary()
             GoldTicketTaskFlowHandleResult(
                 querySuccess = !adapter.queryFailed,
@@ -5100,7 +5100,7 @@ class AntMember : ModelTask() {
                 autoTaskPredicate = ::isGoldTicketKnownWelfareAutoTask,
                 recordUnsupportedTasks = false
             )
-            TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            TaskFlowEngine(adapter, roundSleepMs = 425L).run()
 
             val refreshedTodoTasks = queryGoldTicketWelfareTodoTasks()
             if (refreshedTodoTasks == null) {
@@ -5668,7 +5668,7 @@ class AntMember : ModelTask() {
                     return root
                 }
                 page++
-                GlobalThreadPools.sleepCompat(300L)
+                GlobalThreadPools.sleepCompat(kotlin.random.Random.nextLong(255L, 301L))
             }
             return JSONObject().put("success", false).put("errorMsg", "外部游戏查询已中断")
         }
@@ -5917,7 +5917,7 @@ class AntMember : ModelTask() {
 
     private fun runGameCenterP2eTaskFlow(): DailyTaskProcessResult {
         val adapter = GameCenterP2eTaskFlowAdapter()
-        val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+        val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
         if (adapter.taskCount == 0) {
             Log.member("游戏中心🎮[赚现金暂无任务模块]")
         } else if (adapter.availableTaskCount == 0) {
@@ -5933,7 +5933,7 @@ class AntMember : ModelTask() {
 
     private fun runGameCenterPlatformTaskFlow(): DailyTaskProcessResult {
         val adapter = GameCenterPlatformTaskFlowAdapter()
-        val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+        val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
         if (adapter.taskCount == 0) {
             Log.member("游戏中心🎮[暂无平台任务模块]")
         } else if (adapter.availableTaskCount == 0) {
@@ -8420,7 +8420,7 @@ class AntMember : ModelTask() {
                 failure = result
                 onFailure?.invoke(result)
             }
-            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, onFailure = report)
+            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 850L, onFailure = report)
             if (failure != null) return@runCatching ExchangeReplenishResult.RETRY_LATER
             var matchedSelected = false
             var exchangedCount = 0
@@ -9352,7 +9352,7 @@ class AntMember : ModelTask() {
         private suspend fun doMerchantMoreTask(): Unit = CoroutineUtils.run {
             try {
                 val adapter = MerchantTaskFlowAdapter()
-                TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+                TaskFlowEngine(adapter, roundSleepMs = 425L).run()
                 if (adapter.taskListObserved && adapter.taskCount == 0) {
                     Log.member("商家服务🏬[积分任务]#未查询到任务列表")
                 }

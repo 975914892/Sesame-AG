@@ -39,8 +39,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -93,13 +92,12 @@ class LogViewerViewModel(
 
     private data class LogLineRange(val start: Long, val end: Long, val endsLine: Boolean)
 
-    private val lineLock = Any()
     private val allLines = mutableListOf<LogLineRange>()
     private var displayLines by mutableStateOf<List<LogLineRange>>(emptyList(), neverEqualPolicy())
     // 只缓存按需显示的文本；历史内容留在文件中，搜索使用位置索引。
     private val lineCache = LinkedHashMap<LogLineRange, MutableState<String>>(16, 0.75f, true)
 
-    private val contentMutex = Mutex()
+    private val contentQueue = SerialTaskQueue()
     private val forceFullReload = AtomicBoolean(true)
     @Volatile
     private var readOffset = 0L
@@ -125,8 +123,8 @@ class LogViewerViewModel(
         }
 
         loadJob = viewModelScope.launch {
-            contentMutex.withLock {
-                synchronized(lineLock) { allLines.clear() }
+            contentQueue.submit {
+                allLines.clear()
                 displayLines = emptyList()
                 lineCache.clear()
                 readOffset = 0L
@@ -147,11 +145,12 @@ class LogViewerViewModel(
         val activeContext = currentCoroutineContext()
 
         try {
-            contentMutex.withLock {
+            contentQueue.submit {
                 activeContext.ensureActive()
+                if (currentFilePath != path) return@submit
                 val invalidateCache: Boolean
                 if (!file.exists() || !file.canRead()) {
-                    synchronized(lineLock) { allLines.clear() }
+                    allLines.clear()
                     pendingLineOffset = 0L
                     readOffset = 0L
                     knownContentMarker = null
@@ -169,7 +168,7 @@ class LogViewerViewModel(
                     } else if (fileLength > readOffset) {
                         appendFileRange(file, fileLength)
                     } else {
-                        return@withLock
+                        return@submit
                     }
                 }
                 activeContext.ensureActive()
@@ -184,7 +183,7 @@ class LogViewerViewModel(
     }
 
     private suspend fun loadWholeFile(file: File, fileLength: Long) {
-        synchronized(lineLock) { allLines.clear() }
+        allLines.clear()
         readOffset = 0L
         pendingLineOffset = 0L
         appendFileRange(file, fileLength)
@@ -224,19 +223,17 @@ class LogViewerViewModel(
         }
         if (lineStart < fileLength) ranges.add(LogLineRange(lineStart, fileLength, false))
         activeContext.ensureActive()
-        synchronized(lineLock) {
-            if (currentFilePath != file.path) return
-            // 重新读取上一段未结束的行，也重新解码其可能未写完整的 UTF-8 字符。
-            if (allLines.lastOrNull()?.start == startOffset) allLines.removeAt(allLines.lastIndex)
-            allLines.addAll(ranges)
-            pendingLineOffset = lineStart
-            readOffset = fileLength
-        }
+        if (currentFilePath != file.path) return
+        // 重新读取上一段未结束的行，也重新解码其可能未写完整的 UTF-8 字符。
+        if (allLines.lastOrNull()?.start == startOffset) allLines.removeAt(allLines.lastIndex)
+        allLines.addAll(ranges)
+        pendingLineOffset = lineStart
+        readOffset = fileLength
         knownContentMarker = contentMarker(file, fileLength)
     }
 
     private suspend fun refreshList() = withContext(Dispatchers.IO) {
-        contentMutex.withLock {
+        contentQueue.submit {
             refreshListLocked()
         }
     }
@@ -245,7 +242,7 @@ class LogViewerViewModel(
         val activeContext = currentCoroutineContext()
         val path = currentFilePath ?: return
         val query = _uiState.value.searchQuery.trim()
-        val sourceLines = synchronized(lineLock) { allLines.toList() }
+        val sourceLines = allLines.toList()
         val resultLines = if (query.isEmpty() || sourceLines.isEmpty()) {
             sourceLines
         } else {
@@ -485,7 +482,7 @@ class LogViewerViewModel(
         searchJob = null
         updateJob = null
         fileUpdateChannel.tryReceive()
-        synchronized(lineLock) { allLines.clear() }
+        allLines.clear()
         displayLines = emptyList()
         lineCache.clear()
         readOffset = 0L

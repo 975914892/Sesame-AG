@@ -3,15 +3,13 @@ package io.github.aoguai.sesameag.hook
 import android.content.Intent
 import io.github.aoguai.sesameag.util.Log
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicLong
 
 object ApplicationHookUtils {
     private const val TAG = "ApplicationHook"
 
-    @Volatile
-    private var lastReLoginBroadcastAt: Long = 0L
-
-    @Volatile
-    private var lastReLoginBroadcastSkipLogAt: Long = 0L
+    private val lastReLoginBroadcastAt = AtomicLong(0L)
+    private val lastReLoginBroadcastSkipLogAt = AtomicLong(0L)
 
     private const val RELOGIN_BROADCAST_MIN_INTERVAL_MS = 10_000L
 
@@ -29,19 +27,17 @@ object ApplicationHookUtils {
     fun reLoginByBroadcast() {
         try {
             val now = System.currentTimeMillis()
-            val shouldSend = synchronized(this) {
-                if (now - lastReLoginBroadcastAt < RELOGIN_BROADCAST_MIN_INTERVAL_MS) {
-                    false
-                } else {
-                    lastReLoginBroadcastAt = now
-                    true
-                }
+            val previous = lastReLoginBroadcastAt.getAndUpdate { last ->
+                if (now - last >= RELOGIN_BROADCAST_MIN_INTERVAL_MS) now else last
             }
+            val shouldSend = now - previous >= RELOGIN_BROADCAST_MIN_INTERVAL_MS
 
             if (!shouldSend) {
                 val nowSkip = System.currentTimeMillis()
-                if (nowSkip - lastReLoginBroadcastSkipLogAt >= RELOGIN_BROADCAST_MIN_INTERVAL_MS) {
-                    lastReLoginBroadcastSkipLogAt = nowSkip
+                val previousSkip = lastReLoginBroadcastSkipLogAt.getAndUpdate { last ->
+                    if (nowSkip - last >= RELOGIN_BROADCAST_MIN_INTERVAL_MS) nowSkip else last
+                }
+                if (nowSkip - previousSkip >= RELOGIN_BROADCAST_MIN_INTERVAL_MS) {
                     Log.runtime(TAG, "reLogin 广播发送过于频繁，已跳过")
                 }
                 return

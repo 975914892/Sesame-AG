@@ -135,7 +135,7 @@ class MyBankWelfare : ModelTask() {
                 handleSign()
             }
             if (myBankWelfareTask?.value == true) {
-                TaskFlowEngine(MyBankWelfareTaskFlowAdapter(), roundSleepMs = 800L).run()
+                TaskFlowEngine(MyBankWelfareTaskFlowAdapter(), roundSleepMs = 680L).run()
             }
             if (myBankWelfareExchange?.value == true) {
                 myBankWelfareExchange()

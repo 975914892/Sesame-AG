@@ -446,7 +446,7 @@ class AccountSettingsViewModel(
     }
 
     private fun loadAccount(): AccountSettingsUiState = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-        synchronized(Config) { loadAccountLocked() }
+        loadAccountLocked()
     }
 
     private fun loadAccountLocked(): AccountSettingsUiState {

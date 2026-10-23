@@ -73,6 +73,7 @@ import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 import kotlin.math.max
 import kotlin.math.min
@@ -301,10 +302,7 @@ class AntSports : ModelTask() {
     private var cachedOriginDailyStep: Int = -1
     private var cachedTargetDailyStep: Int = -1
     private var syncStepHookLogged: Boolean = false
-    private val syncStepLock = Any()
-
-    @Volatile
-    private var syncStepInProgress: Boolean = false
+    private val syncStepInProgress = AtomicBoolean(false)
 
     // 配置字段
     internal lateinit var walk: BooleanModelField
@@ -1158,35 +1156,29 @@ class AntSports : ModelTask() {
     }
 
     private fun tryBeginSyncStepTask(): Boolean {
-        synchronized(syncStepLock) {
-            if (syncStepInProgress ||
-                hasChildTask(SYNC_STEP_CHILD_TASK_ID) ||
-                Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE)
-            ) {
-                return false
-            }
-            syncStepInProgress = true
-            return true
+        if (!syncStepInProgress.compareAndSet(false, true)) return false
+        try {
+            if (!hasChildTask(SYNC_STEP_CHILD_TASK_ID) &&
+                !Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE)
+            ) return true
+        } catch (t: Throwable) {
+            syncStepInProgress.set(false)
+            throw t
         }
+        syncStepInProgress.set(false)
+        return false
     }
 
     private fun finishSyncStepTask() {
-        synchronized(syncStepLock) {
-            syncStepInProgress = false
-        }
+        syncStepInProgress.set(false)
     }
 
     private fun markSyncStepDone() {
-        synchronized(syncStepLock) {
-            Status.setFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE)
-        }
+        Status.setFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE)
     }
 
-    private fun canOverrideDailyStepByHook(): Boolean {
-        synchronized(syncStepLock) {
-            return !Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE)
-        }
-    }
+    private fun canOverrideDailyStepByHook(): Boolean =
+        !Status.hasFlagToday(StatusFlags.FLAG_ANTSPORTS_SYNC_STEP_DONE)
 
     internal fun isEnergyOnlyModeNow(): Boolean {
         TaskCommon.update()
@@ -5454,7 +5446,7 @@ class AntSports : ModelTask() {
             return
         }
 
-        if (syncStepInProgress) {
+        if (syncStepInProgress.get()) {
             Log.sports("走路挑战赛线上赛[等待同步步数完成，跳过本轮]")
             return
         }
@@ -6058,7 +6050,7 @@ class AntSports : ModelTask() {
                     }
                 }
 
-                GlobalThreadPools.sleepCompat(1000)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
             }
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "collectClubBubbleRewardsFromRoom 异常:", t)
@@ -6997,7 +6989,7 @@ class AntSports : ModelTask() {
                     for (task in pendingTasks) {
                         val ok = handleSingleTask(task)
                         if (!ok) currentBatchError++
-                        GlobalThreadPools.sleepCompat(3000)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(2550, 3001))
                     }
 
                     errorCount += currentBatchError
@@ -7009,7 +7001,7 @@ class AntSports : ModelTask() {
                         )
                     }
                     Log.sports("当前批次执行完毕，准备下一次刷新检查")
-                    GlobalThreadPools.sleepCompat(TASK_LOOP_DELAY)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                 } catch (t: Throwable) {
                     if (t is CancellationException || t is InterruptedException) throw t
                     errorCount++
@@ -7545,7 +7537,7 @@ class AntSports : ModelTask() {
                             )
                         }
 
-                        GlobalThreadPools.sleepCompat(1000)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                     }
                 }
             } catch (t: Throwable) {
@@ -8495,7 +8487,7 @@ class AntSports : ModelTask() {
                         chooseAvailableMap(source = source)
                         break
                     }
-                    GlobalThreadPools.sleepCompat(888)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(755, 889))
                 }
                 Log.sports("自动走路任务完成 ✓")
             } catch (t: Throwable) {
@@ -8959,7 +8951,7 @@ class AntSports : ModelTask() {
                     if (isBuildDataMapFinished(buildData)) {
                         neverlandPickAllBubble(source)
                     }
-                    GlobalThreadPools.sleepCompat(1000)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                 }
                 handleFinishedMapAfterBuildLimit(branchId, mapId, currentMapName, source)
                 Log.sports("自动建造任务完成 ✓")

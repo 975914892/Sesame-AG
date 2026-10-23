@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.goldenBean
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.task.antOrchard.AntOrchard
@@ -135,6 +137,7 @@ internal suspend fun GoldenBeanTreasure.runGoldenBeanTreasure() {
 }
 
 private const val GOLDEN_BEAN_MALL_PENDING = "goldenBeanMallPending"
+private val goldenBeanMallQueues = java.util.concurrent.ConcurrentHashMap<String, io.github.aoguai.sesameag.util.SerialTaskQueue>()
 
 internal fun GoldenBeanTreasure.runGoldenBeanMall() {
     val store = UserDataStoreManager.getCurrentInstance() ?: return
@@ -147,17 +150,17 @@ internal fun GoldenBeanTreasure.runGoldenBeanMall() {
         check(!ApplicationHookConstants.isOffline() && !Thread.currentThread().isInterrupted &&
             TimeUtil.isSameDay(startedAt, System.currentTimeMillis())) { "金豆商城本轮已中断或跨天" }
     }
-    synchronized(store) {
+    goldenBeanMallQueues.computeIfAbsent(store.uid) { io.github.aoguai.sesameag.util.SerialTaskQueue() }.execute {
         checkCurrent()
         val saved = store.get(GOLDEN_BEAN_MALL_PENDING, String::class.java)
         val pending = saved?.takeIf { it.isNotBlank() }?.let(::JSONObject) ?: JSONObject()
-        if (pending.length() > 0 && !confirmGoldenBeanMallExchange(store, pending, checkCurrent)) return
-        if (goldenBeanMallExchange.value != true) return
+        if (pending.length() > 0 && !confirmGoldenBeanMallExchange(store, pending, checkCurrent)) return@execute
+        if (goldenBeanMallExchange.value != true) return@execute
         GoldenBeanTreasureSupport.queryMallItems()
         val selected = goldenBeanMallExchangeList.value?.toMap().orEmpty()
         if (selected.isEmpty()) {
             Log.goldenBean("金豆商城未选择商品，仅更新兑换候选")
-            return
+            return@execute
         }
         var confirmed = 0
         for ((selectedId, configuredCount) in selected) {
@@ -217,7 +220,7 @@ internal fun GoldenBeanTreasure.runGoldenBeanMall() {
                 checkCurrent()
                 if (response == null) {
                     Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城兑换响应为空，保留待确认:$selectedId")
-                    return
+                    return@execute
                 }
                 val acknowledged = GoldenBeanTreasureSupport.isSuccess(response)
                 val failure = if (acknowledged) null else GoldenBeanTreasureSupport.actionResult(
@@ -234,13 +237,13 @@ internal fun GoldenBeanTreasure.runGoldenBeanMall() {
                 request.put("acknowledged", acknowledged).put("orderNo", response.optString("orderNo"))
                 store.put(GOLDEN_BEAN_MALL_PENDING, request.toString(), requirePersistence = true)
                 if (!acknowledged) Log.error(GOLDEN_BEAN_BLACKLIST_MODULE, "金豆商城兑换未确认成功，保留订单回查:$response")
-                if (!confirmGoldenBeanMallExchange(store, request, checkCurrent)) return
+                if (!confirmGoldenBeanMallExchange(store, request, checkCurrent)) return@execute
                 confirmed++
-                CoroutineUtils.sleepCompat(executeIntervalInt.toLong().coerceAtLeast(500L))
+                CoroutineUtils.sleepCompat(executeIntervalInt.toLong().coerceAtLeast(RandomUtil.nextLong(425, 501)))
             }
             if (confirmed >= GOLDEN_BEAN_CONVERGENCE_LIMIT) {
                 Log.goldenBean("金豆商城本轮已确认${confirmed}笔，剩余配置留待后续调度")
-                return
+                return@execute
             }
         }
     }
@@ -289,7 +292,7 @@ private data class GoldenBeanEntryRun(
     fun runTaskFlow(executeInterval: Int) =
         TaskFlowEngine(
             adapter,
-            roundSleepMs = executeInterval.toLong().coerceAtLeast(500L),
+            roundSleepMs = executeInterval.toLong().coerceAtLeast(425L),
             executionState = executionState,
         ).run()
 }

@@ -1445,7 +1445,7 @@ data object AntFarmFamily {
                                     purchasedCount++
                                     currentBalance = confirmation.balanceCent ?: (currentBalance - price)
                                 }
-                                GlobalThreadPools.sleepCompat(2000)
+                                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1700, 2001))
                             } else {
                                 scanCompleted = false
                                 Log.error(TAG, "[家庭装扮] 未拥有家具[$spuName]缺少skuId，今日不落完成标识")

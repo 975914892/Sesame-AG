@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.data
 
+import io.github.aoguai.sesameag.storage.StoreAccess
+
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import io.github.aoguai.sesameag.util.Files
@@ -95,10 +97,9 @@ object Statistics {
      * @param i      增加的数量（g）
      */
     @JvmStatic
-    @Synchronized
-    fun addData(userId: String?, dt: DataType, i: Int) {
-        if (i == 0) return
-        if (!ensureLoaded(userId)) return
+    fun addData(userId: String?, dt: DataType, i: Int): Unit = StoreAccess.transaction {
+        if (i == 0) return@transaction
+        if (!ensureLoaded(userId)) return@transaction
 
         when (dt) {
             DataType.COLLECTED -> {
@@ -124,7 +125,6 @@ object Statistics {
      * 获取指定时间和数据类型的统计值
      */
     @JvmStatic
-    @Synchronized
     fun getData(userId: String?, tt: TimeType, dt: DataType): Int {
         if (!ensureLoaded(userId)) return 0
 
@@ -146,7 +146,6 @@ object Statistics {
      * 获取统计文本信息
      */
     @JvmStatic
-    @Synchronized
     fun getText(userId: String?): String {
         if (!ensureLoaded(userId)) return ""
         return "今年  收: " + getData(userId, TimeType.YEAR, DataType.COLLECTED) +
@@ -164,19 +163,18 @@ object Statistics {
      * 加载统计数据
      */
     @JvmStatic
-    @Synchronized
-    fun load(userId: String?): Statistics {
+    fun load(userId: String?): Statistics = StoreAccess.transaction {
         loadedUserId = userId
         if (userId.isNullOrEmpty()) {
             resetToDefault()
-            return this
+            return@transaction this
         }
 
         try {
             val statisticsFile = getStatisticsFile(userId)
             if (statisticsFile == null) {
                 resetToDefault()
-                return this
+                return@transaction this
             }
 
             if (statisticsFile.exists() && statisticsFile.length() > 0) {
@@ -208,7 +206,7 @@ object Statistics {
             throw t
         }
 
-        return this
+        return@transaction this
     }
 
     /**
@@ -251,8 +249,7 @@ object Statistics {
      * 卸载当前统计数据（仅清空内存，不删除文件）
      */
     @JvmStatic
-    @Synchronized
-    fun unload() {
+    fun unload(): Unit = StoreAccess.transaction {
         loadedUserId = null
         year = TimeStatistics()
         month = TimeStatistics()
@@ -263,8 +260,7 @@ object Statistics {
      * 保存统计数据
      */
     @JvmStatic
-    @Synchronized
-    fun save(userId: String?) {
+    fun save(userId: String?): Unit = StoreAccess.transaction {
         save(userId, Calendar.getInstance())
     }
 
@@ -272,10 +268,9 @@ object Statistics {
      * 保存统计数据并更新日期
      */
     @JvmStatic
-    @Synchronized
-    fun save(userId: String?, nowDate: Calendar) {
-        if (!ensureLoaded(userId)) return
-        val uid = userId ?: return
+    fun save(userId: String?, nowDate: Calendar): Unit = StoreAccess.transaction {
+        if (!ensureLoaded(userId)) return@transaction
+        val uid = userId ?: return@transaction
 
         val reset = updateDay(nowDate)
         if (reset) {

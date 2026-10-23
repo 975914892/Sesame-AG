@@ -58,9 +58,11 @@ object Notify {
     @Volatile
     private var globalStatusTtlMs: Long = 0L
     private var lastExecText: String = ""
-    private val runningTaskLock = Any()
-    private val runningTaskNames = LinkedHashSet<String>()
-    private val runningTaskDisplayOrder = LinkedHashMap<String, Int>()
+    private data class RunningTasks(
+        val names: List<String> = emptyList(),
+        val displayOrder: Map<String, Int> = emptyMap(),
+    )
+    private val runningTasks = java.util.concurrent.atomic.AtomicReference(RunningTasks())
 
     private const val STARTUP_TITLE = "模块启动中"
     private const val RUNNING_TITLE = "模块运行中"
@@ -120,57 +122,43 @@ object Notify {
     }
 
     private fun clearRunningTasks() {
-        synchronized(runningTaskLock) {
-            runningTaskNames.clear()
-        }
+        runningTasks.updateAndGet { it.copy(names = emptyList()) }
     }
 
     private fun clearRunningTaskDisplayOrder() {
-        synchronized(runningTaskLock) {
-            runningTaskDisplayOrder.clear()
-        }
+        runningTasks.updateAndGet { it.copy(displayOrder = emptyMap()) }
     }
 
     private fun addRunningTask(taskName: String?) {
         val normalizedName = normalizeTaskName(taskName) ?: return
-        synchronized(runningTaskLock) {
-            runningTaskNames.remove(normalizedName)
-            runningTaskNames.add(normalizedName)
-        }
+        runningTasks.updateAndGet { it.copy(names = it.names.filterNot { name -> name == normalizedName } + normalizedName) }
     }
 
     private fun removeRunningTask(taskName: String?) {
         val normalizedName = normalizeTaskName(taskName) ?: return
-        synchronized(runningTaskLock) {
-            runningTaskNames.remove(normalizedName)
-        }
+        runningTasks.updateAndGet { it.copy(names = it.names.filterNot { name -> name == normalizedName }) }
     }
 
     private fun snapshotRunningTasks(): List<String> {
-        return synchronized(runningTaskLock) {
-            val tasks = runningTaskNames.toList()
-            if (tasks.size <= 1 || runningTaskDisplayOrder.isEmpty()) {
-                return@synchronized tasks
-            }
-            val insertionOrder = tasks.withIndex().associate { it.value to it.index }
-            tasks.sortedWith(
-                compareBy<String>(
-                    { runningTaskDisplayOrder[it] ?: Int.MAX_VALUE },
-                    { insertionOrder[it] ?: Int.MAX_VALUE }
-                )
-            )
-        }
+        val state = runningTasks.get()
+        if (state.names.size <= 1 || state.displayOrder.isEmpty()) return state.names
+        val insertionOrder = state.names.withIndex().associate { it.value to it.index }
+        return state.names.sortedWith(
+            compareBy<String>(
+                { state.displayOrder[it] ?: Int.MAX_VALUE },
+                { insertionOrder[it] ?: Int.MAX_VALUE },
+            ),
+        )
     }
 
     @JvmStatic
     fun updateRunningTaskOrder(taskNames: List<String?>) {
-        synchronized(runningTaskLock) {
-            runningTaskDisplayOrder.clear()
-            taskNames.forEachIndexed { index, taskName ->
-                val normalizedName = normalizeTaskName(taskName) ?: return@forEachIndexed
-                runningTaskDisplayOrder.putIfAbsent(normalizedName, index)
-            }
+        val order = LinkedHashMap<String, Int>()
+        taskNames.forEachIndexed { index, taskName ->
+            val name = normalizeTaskName(taskName) ?: return@forEachIndexed
+            order.putIfAbsent(name, index)
         }
+        runningTasks.updateAndGet { it.copy(displayOrder = order) }
     }
 
     @JvmStatic

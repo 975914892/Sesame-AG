@@ -32,8 +32,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import org.json.JSONObject
 
 object ScheduledTaskRouter {
@@ -54,9 +53,9 @@ object ScheduledTaskRouter {
     }
 
     private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val deliveryMutex = Mutex()
+    private val deliveries = SerialTaskQueue()
 
-    suspend fun fireDueFromModule(context: Context, source: String): Int = deliveryMutex.withLock {
+    suspend fun fireDueFromModule(context: Context, source: String): Int = deliveries.submit {
         val now = System.currentTimeMillis()
         val due = runInterruptible {
             PersistentScheduleRegistry.listFresh().filter {
@@ -84,7 +83,7 @@ object ScheduledTaskRouter {
                     }
                 }
             }
-            if (deliverable.isEmpty()) return@withLock due.size
+            if (deliverable.isEmpty()) return@submit due.size
             val identity = runInterruptible { AccountSessionCoordinator.currentOrPersistedSessionIdentity() }
             val readiness = runInterruptible { HookReadyChecker.probe(context, identity?.userId.orEmpty()) }
             var launchAttempted = runInterruptible {

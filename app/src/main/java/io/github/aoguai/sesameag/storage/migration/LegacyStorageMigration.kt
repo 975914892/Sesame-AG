@@ -7,8 +7,7 @@ import io.github.aoguai.sesameag.storage.PrivateStorage
 import io.github.aoguai.sesameag.storage.StoreAccess
 import io.github.aoguai.sesameag.util.CommandUtil
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -20,7 +19,7 @@ import io.github.aoguai.sesameag.storage.StorageBackup
 
 /** Remove this package and the startup/foreground entry when legacy upgrades are retired. */
 object LegacyStorageMigration {
-    private val mutex = Mutex()
+    private val operations = SerialTaskQueue()
     private fun work(context: Context) = File(context.noBackupFilesDir, "migration")
     fun hasCleanup(context: Context) = File(work(context), "cleanup.json").isFile
 
@@ -119,8 +118,8 @@ object LegacyStorageMigration {
     }
 
     suspend fun inspect(context: Context) = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            if (PrivateStorage.isReady || !PrivateStorage.state.value.needsInspection) return@withLock
+        operations.submit {
+            if (PrivateStorage.isReady || !PrivateStorage.state.value.needsInspection) return@submit
             PrivateStorage.update(PrivateStorage.State(busy = true, message = "正在检查原有数据"))
             try {
                 connect(context).use { reader ->
@@ -149,7 +148,7 @@ object LegacyStorageMigration {
     suspend fun backup(context: Context, uri: Uri) = transfer(context, uri)
 
     suspend fun restore(context: Context, uri: Uri) = withContext(Dispatchers.IO) {
-        mutex.withLock {
+        operations.submit {
             check(!PrivateStorage.isReady)
             val snapshot = StorageBackup.read(context, uri)
             try {
@@ -171,8 +170,8 @@ object LegacyStorageMigration {
     }
 
     private suspend fun transfer(context: Context, backupUri: Uri?) = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            if (PrivateStorage.isReady) return@withLock
+        operations.submit {
+            if (PrivateStorage.isReady) return@submit
             PrivateStorage.update(PrivateStorage.State(busy = true, message = if (backupUri == null) "正在迁移配置与日志" else "正在导出原有数据备份"))
             val staging = File(work(context), "pending")
             try {
@@ -246,8 +245,8 @@ object LegacyStorageMigration {
     }
 
     suspend fun cleanup(context: Context) = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            if (!hasCleanup(context)) return@withLock
+        operations.submit {
+            if (!hasCleanup(context)) return@submit
             try {
                 PrivateStorage.requireReady()
                 val status = CommandUtil.awaitServiceStatus(context) as? CommandUtil.ServiceStatus.Active

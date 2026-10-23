@@ -22,6 +22,7 @@ import java.lang.reflect.Proxy
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 private fun truncateForLog(
     value: String?,
@@ -129,11 +130,11 @@ class AriverRpcBridge : RpcBridge {
     private val nullResponseLogIntervalMs = NULL_RESPONSE_LOG_INTERVAL_MS
 
     private data class ErrorSummaryWindowStat(
-        var windowStartMs: Long,
-        var count: Int,
+        val windowStartMs: Long,
+        val count: Int,
     )
 
-    private val errorSummaryWindowStats = ConcurrentHashMap<String, ErrorSummaryWindowStat>()
+    private val errorSummaryWindowStats = ConcurrentHashMap<String, AtomicReference<ErrorSummaryWindowStat>>()
     private val errorSummaryWindowMs = ERROR_SUMMARY_WINDOW_MS
     private val lastErrorNotifyAtMs = AtomicLong(0)
     private val errorNotifyIntervalMs = ERROR_NOTIFY_INTERVAL_MS
@@ -346,17 +347,8 @@ class AriverRpcBridge : RpcBridge {
         val identity = rpcEntity.requestIdentity ?: RpcDailyCircuit.captureIdentity().also {
             rpcEntity.requestIdentity = it
         }
-        if (!RpcDailyCircuit.isCurrent(identity)) {
+        if (!RpcDailyCircuit.isSameSession(identity)) {
             rpcEntity.settingsRefresh?.failed = true
-            return null
-        }
-        if (rpcEntity.settingsRefresh == null && RpcDailyCircuit.isBlockedToday(identity.userId, rpcEntity.requestMethod)) {
-            rpcEntity.setResponseObject(null, RpcFallbackJsonFactory.buildDailyRiskStop(rpcEntity.requestMethod))
-            rpcEntity.setError()
-            return rpcEntity
-        }
-        if (!WorkflowRootGuard.isExecutionAllowed()) {
-            Log.record(TAG, "必需权限或使用协议未就绪，已拒绝 RPC 请求")
             return null
         }
         // 方法开始时，将成员变量赋值给局部变量，以避免在方法执行期间因其他线程的unload()调用而导致成员变量变为null
@@ -439,25 +431,34 @@ class AriverRpcBridge : RpcBridge {
                             count,
                         )
                     }
-                    RpcIntervalLimit.enterIntervalLimit(requestMethod)
-                    if (!RpcDailyCircuit.isCurrent(identity)) {
+                    val parsedRequest = localParseObjectMethod.invoke(null, rpcEntity.rpcFullRequestData)
+                    val sent = RpcIntervalLimit.dispatch(requestMethod) {
+                    if (!RpcDailyCircuit.isSameSession(identity)) {
                         rpcEntity.settingsRefresh?.failed = true
-                        return null
+                        return@dispatch false
                     }
                     if (rpcEntity.settingsRefresh == null && RpcDailyCircuit.isBlockedToday(identity.userId, requestMethod)) {
                         captureNote = "blocked_by_daily_risk_stop"
                         rpcEntity.setResponseObject(null, RpcFallbackJsonFactory.buildDailyRiskStop(requestMethod))
                         rpcEntity.setError()
-                        return rpcEntity
+                        return@dispatch false
                     }
                     if (io.github.aoguai.sesameag.hook.ApplicationHookConstants.shouldBlockRpc()) {
                         rpcEntity.settingsRefresh?.failed = true
                         captureNote = "blocked_by_offline"
-                        return null
+                        return@dispatch false
                     }
                     if (!WorkflowRootGuard.isExecutionAllowed()) {
+                        Log.record(TAG, "必需权限或使用协议未就绪，已拒绝 RPC 请求")
+                        rpcEntity.settingsRefresh?.failed = true
                         captureNote = "blocked_by_execution_prerequisites"
-                        return null
+                        return@dispatch false
+                    }
+                    // 权限查询跨进程返回后，仍须确认请求没有跨账号或被取消。
+                    if (!RpcDailyCircuit.isSameSession(identity) ||
+                        io.github.aoguai.sesameag.hook.ApplicationHookConstants.shouldBlockRpc()) {
+                        rpcEntity.settingsRefresh?.failed = true
+                        return@dispatch false
                     }
                     val finalLocalBridgeCallbackClazzArray = localBridgeCallbackClazzArray
                     rpcEntity.settingsRefresh?.recordMethod(requestMethod)
@@ -467,7 +468,7 @@ class AriverRpcBridge : RpcBridge {
                         false,
                         false,
                         "json",
-                        localParseObjectMethod.invoke(null, rpcEntity.rpcFullRequestData),
+                        parsedRequest,
                         "",
                         null,
                         true,
@@ -578,6 +579,9 @@ class AriverRpcBridge : RpcBridge {
                             }
                         },
                     )
+                    true
+                    }
+                    if (!sent) return if (captureNote == "blocked_by_daily_risk_stop") rpcEntity else null
 
                     if (!rpcEntity.hasResult) {
                         rpcEntity.settingsRefresh?.failed = true
@@ -782,37 +786,18 @@ class AriverRpcBridge : RpcBridge {
     ) {
         val key = "$methodName|$errorCode"
         val now = System.currentTimeMillis()
-        val stat =
-            errorSummaryWindowStats.computeIfAbsent(key) {
-                ErrorSummaryWindowStat(windowStartMs = now, count = 0)
-            }
-
-        var summaryLog: String? = null
-        var shouldLogDetail = false
-        synchronized(stat) {
-            if (now - stat.windowStartMs >= errorSummaryWindowMs) {
-                summaryLog =
-                    buildString {
-                        append("RPC错误汇总 | 方法: ")
-                        append(methodName)
-                        append(" | 错误: ")
-                        append(errorCode)
-                        append("/")
-                        append(errorMessage)
-                        append(" | 次数: ")
-                        append(stat.count)
-                        append(" | 窗口: ")
-                        append(errorSummaryWindowMs)
-                        append("ms")
-                    }
-                stat.windowStartMs = now
-                stat.count = 0
-                shouldLogDetail = true
-            } else if (stat.count == 0) {
-                shouldLogDetail = true
-            }
-            stat.count++
+        val stat = errorSummaryWindowStats.computeIfAbsent(key) {
+            AtomicReference(ErrorSummaryWindowStat(windowStartMs = now, count = 0))
+        }.getAndUpdate { previous ->
+            if (now - previous.windowStartMs >= errorSummaryWindowMs) {
+                ErrorSummaryWindowStat(now, 1)
+            } else previous.copy(count = previous.count + 1)
         }
+        val expired = now - stat.windowStartMs >= errorSummaryWindowMs
+        val shouldLogDetail = expired || stat.count == 0
+        val summaryLog = if (expired) {
+            "RPC错误汇总 | 方法: $methodName | 错误: $errorCode/$errorMessage | 次数: ${stat.count} | 窗口: ${errorSummaryWindowMs}ms"
+        } else null
         summaryLog?.let { Log.error(TAG, it) }
         if (shouldLogDetail) {
             Log.error(TAG, "RPC错误 | 方法: $methodName | 错误: $errorCode/$errorMessage")

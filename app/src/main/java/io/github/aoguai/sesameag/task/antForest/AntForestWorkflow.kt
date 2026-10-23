@@ -4,7 +4,6 @@ import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.TimeCounter
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONObject
-import kotlinx.coroutines.sync.withLock
 
 private val FOREST_TAG: String = AntForest::class.java.simpleName
 
@@ -180,7 +179,7 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
 
     if (receiveForestTaskAward?.value == true) {
         receiveTaskAward()
-        plantTaskMutex.withLock {
+        plantTaskQueue.submit {
             waterMemberPlant()
             runMemberPlantTasks()
         }

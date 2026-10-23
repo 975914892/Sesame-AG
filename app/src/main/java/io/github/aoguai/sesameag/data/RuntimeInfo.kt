@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.data
 
+import io.github.aoguai.sesameag.storage.StoreAccess
 import org.json.JSONException
 import org.json.JSONObject
 import io.github.aoguai.sesameag.util.Files
@@ -10,10 +11,7 @@ import io.github.aoguai.sesameag.util.maps.UserMap
  * RuntimeInfo 用于存储和管理运行时的配置信息。
  * 该类提供了获取、保存、更新运行时信息的功能，并基于用户 ID 区分不同的配置。
  */
-class RuntimeInfo private constructor() {
-    
-    // 当前用户 ID
-    private val userId: String
+class RuntimeInfo private constructor(private val userId: String) {
     
     // 存储所有运行时信息的 JSON 对象
     private val joAll: JSONObject
@@ -30,7 +28,6 @@ class RuntimeInfo private constructor() {
     }
 
     init {
-        userId = UserMap.currentUid ?: ""
         val file = Files.runtimeInfoFile(userId)
         val content = if (file != null) {
             Files.readFromFile(file)
@@ -64,10 +61,10 @@ class RuntimeInfo private constructor() {
     /**
      * 将运行时信息保存到文件中。
      */
-    @Synchronized
     private fun save() {
         val file = Files.runtimeInfoFile(userId) ?: return
-        Files.write2File(joAll.toString(), file)
+        val content = synchronized(joAll) { joAll.toString() }
+        Files.write2File(content, file)
     }
 
     /**
@@ -76,7 +73,7 @@ class RuntimeInfo private constructor() {
      * @param key 键（枚举值）
      * @return 对应的 long 值
      */
-    fun getLong(key: RuntimeInfoKey): Long = joCurrent.optLong(key.name, 0L)
+    fun getLong(key: RuntimeInfoKey): Long = synchronized(joAll) { joCurrent.optLong(key.name, 0L) }
 
     /**
      * 根据枚举键获取对应的字符串值。如果键不存在，返回空字符串。
@@ -84,7 +81,7 @@ class RuntimeInfo private constructor() {
      * @param key 键（枚举值）
      * @return 对应的字符串值
      */
-    fun getString(key: RuntimeInfoKey): String = joCurrent.optString(key.name, "")
+    fun getString(key: RuntimeInfoKey): String = synchronized(joAll) { joCurrent.optString(key.name, "") }
 
     /**
      * 使用枚举键将值存储到当前用户的运行时信息中。
@@ -102,11 +99,13 @@ class RuntimeInfo private constructor() {
      * @param key   键
      * @param value 存储的值
      */
-    private fun put(key: String, value: Any?) {
+    private fun put(key: String, value: Any?): Unit = StoreAccess.transaction {
         io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
         try {
-            joCurrent.put(key, value)
-            joAll.put(userId, joCurrent)
+            synchronized(joAll) {
+                joCurrent.put(key, value)
+                joAll.put(userId, joCurrent)
+            }
         } catch (e: JSONException) {
             // 错误日志
             Log.runtime(TAG, "put err:")
@@ -131,22 +130,16 @@ class RuntimeInfo private constructor() {
          */
         @JvmStatic
         fun getInstance(): RuntimeInfo {
-            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
-            val currentInstance = instance
+            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureSessionActive()
             val currentUserId = UserMap.currentUid ?: ""
-            
-            if (currentInstance == null || currentInstance.userId != currentUserId) {
-                synchronized(this) {
-                    val newInstance = instance
-                    if (newInstance == null || newInstance.userId != currentUserId) {
-                        val newRuntimeInfo = RuntimeInfo()
-                        instance = newRuntimeInfo
-                        return newRuntimeInfo
-                    }
-                    return newInstance
-                }
+            instance?.takeIf { it.userId == currentUserId }?.let { return it }
+            return StoreAccess.transaction {
+                io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
+                val lockedUserId = UserMap.currentUid ?: ""
+                val currentInstance = instance
+                if (currentInstance != null && currentInstance.userId == lockedUserId) currentInstance
+                else RuntimeInfo(lockedUserId).also { instance = it }
             }
-            return currentInstance
         }
     }
 }

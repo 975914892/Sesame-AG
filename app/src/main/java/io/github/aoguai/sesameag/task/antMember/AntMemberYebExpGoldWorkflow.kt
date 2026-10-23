@@ -106,7 +106,7 @@ internal fun AntMember.handleYebExpGoldTasks() {
         var handledTask = trySignInYebExpGold(queryResponse, manualTaskTitles)
         if (ApplicationHookConstants.isOffline()) return
         val adapter = YebExpGoldTaskFlowAdapter(this)
-        val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+        val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
         handledTask = runResult.progressChanged || handledTask
         if (runResult.interrupted || ApplicationHookConstants.isOffline()) return
 

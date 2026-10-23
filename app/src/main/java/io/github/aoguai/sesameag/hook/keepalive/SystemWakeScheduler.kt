@@ -23,8 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 
 object SystemWakeScheduler {
     private const val TAG = "SystemWakeScheduler"
@@ -37,7 +36,7 @@ object SystemWakeScheduler {
     const val LANE_EXACT = 0
     const val LANE_FLEXIBLE = 1
     private const val PLANNER_REQUEST_CODE = 0x53534147
-    private val plannerLock = ReentrantLock(true)
+    private val planner = SerialTaskQueue()
     private val timerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var localJob: Job? = null
     private var localSchedule: PersistentSchedule? = null
@@ -71,8 +70,7 @@ object SystemWakeScheduler {
 
     /** 两个精度通道互不阻挡；目标进程仅保留最近计划的一个轻量计时器。 */
     fun schedule(context: Context, schedule: PersistentSchedule, silent: Boolean = false): Boolean = try {
-        plannerLock.lockInterruptibly()
-        try {
+        planner.execute {
             val appContext = context.applicationContext ?: context
             val snapshot = PersistentScheduleRegistry.listFresh()
             val scheduled = snapshot.filter { it.state == PersistentScheduleState.SCHEDULED }
@@ -140,8 +138,6 @@ object SystemWakeScheduler {
                 )
             }
             systemScheduled || localScheduled
-        } finally {
-            plannerLock.unlock()
         }
     } catch (e: InterruptedException) {
         throw e
@@ -169,7 +165,7 @@ object SystemWakeScheduler {
         if (next == null) return schedules.isEmpty()
         val job = timerScope.launch(start = CoroutineStart.LAZY) {
             delay((next.triggerAtMs - System.currentTimeMillis()).coerceAtLeast(0L))
-            val current = plannerLock.withLock {
+            val current = planner.submit {
                 if (localSchedule != next) false else {
                     localSchedule = null
                     localJob = null
@@ -183,7 +179,7 @@ object SystemWakeScheduler {
         return true
     }
 
-    internal fun cancelLocalTimer() = plannerLock.withLock {
+    internal fun cancelLocalTimer() = planner.execute {
         localJob?.cancel()
         localJob = null
         localSchedule = null

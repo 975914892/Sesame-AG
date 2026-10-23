@@ -27,14 +27,22 @@ internal class TaskExecutionReport(
 ) {
     var executionJob: Job? = current()?.executionJob
 
-    fun ensureCurrent(userId: String? = null) {
+    fun ensureSessionActive(userId: String? = null) {
         if (Thread.currentThread().isInterrupted || executionJob?.isActive == false) {
             throw CancellationException("任务已取消")
         }
-        if (!AccountSessionCoordinator.isCurrentSession(identity.userId, identity.sessionEpoch) ||
+        if (AccountSessionCoordinator.checkSessionIdentity(identity.userId, identity.sessionEpoch) !is
+            io.github.aoguai.sesameag.hook.AccountSessionCheck.Current ||
             (userId != null && identity.userId != userId)
         ) throw CancellationException("任务账号会话已失效")
     }
+    fun ensureCurrent(userId: String? = null) {
+        ensureSessionActive(userId)
+        if (!io.github.aoguai.sesameag.hook.AccountSlotRegistry.isExecutableUser(identity.userId)) {
+            throw CancellationException("任务账号会话已失效")
+        }
+    }
+
     companion object {
         private val activeReport = ThreadLocal<TaskExecutionReport?>()
 

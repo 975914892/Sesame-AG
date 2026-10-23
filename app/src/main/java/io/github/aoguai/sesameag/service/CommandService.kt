@@ -31,8 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
@@ -64,7 +63,7 @@ class CommandService : Service() {
 
     // 使用 SupervisorJob，确保单个任务崩溃不影响整个作用域
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val commandMutex = Mutex()
+    private val commandQueue = SerialTaskQueue()
     private val pendingCommandCount = AtomicInteger(0)
 
     // ShellManager 实例
@@ -104,7 +103,7 @@ class CommandService : Service() {
             pendingCommandCount.incrementAndGet()
             serviceScope.launch {
                 try {
-                    commandMutex.withLock {
+                    commandQueue.submit {
                         try {
                             ensureShellManager()
                             shellManager?.onStateChanged = { newType ->
@@ -114,13 +113,13 @@ class CommandService : Service() {
                             if (shellManager?.selectedName == "no_executor") {
                                 if (command == io.github.aoguai.sesameag.util.CommandUtil.DIAGNOSTIC_LOGCAT_COMMAND) {
                                     safeCallbackError(callback, "executor_unavailable")
-                                    return@withLock
+                                    return@submit
                                 }
                                 val refreshedType = shellManager?.refreshSelection(notifyUnavailable = false)
                                 if (refreshedType == "no_executor") {
                                     dispatchStatusChange("no_executor")
                                     safeCallbackError(callback, "无 Root/Shizuku 权限")
-                                    return@withLock
+                                    return@submit
                                 }
                             }
 

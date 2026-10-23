@@ -721,7 +721,7 @@ internal suspend fun AntFarm.runLoveChickenGatheringWorkflow(initialResponse: JS
             val confirmedBefore = adapter.confirmedCount
             val taskResult = if (state.isBlocked("listCompetitionTask"))
                 TaskFlowRunResult(completed = false, progressed = false, stopped = true, rounds = 0)
-                else TaskFlowEngine(adapter, roundSleepMs = 300L, executionState = state.flowState).run()
+                else TaskFlowEngine(adapter, roundSleepMs = 255L, executionState = state.flowState).run()
             val taskProgressed = taskResult.progressChanged || adapter.confirmedCount > confirmedBefore
             progressed = progressed || taskProgressed
             if (taskResult.interrupted || ApplicationHookConstants.isOffline()) break

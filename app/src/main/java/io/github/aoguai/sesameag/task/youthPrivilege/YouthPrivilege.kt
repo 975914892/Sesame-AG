@@ -99,7 +99,7 @@ class YouthPrivilege : ModelTask() {
                 claimForestProps()
             }
             if (youthTasks?.value == true) {
-                TaskFlowEngine(YouthTaskFlowAdapter(), roundSleepMs = 800L).run()
+                TaskFlowEngine(YouthTaskFlowAdapter(), roundSleepMs = 680L).run()
                 claimTrialPrize()
                 TaskFlowEngine(MonthlyPrivilegeAdapter(), roundSleepMs = 0L).run()
             }

@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.data
 
+import io.github.aoguai.sesameag.storage.StoreAccess
+
 import com.fasterxml.jackson.databind.JsonMappingException
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.model.Model
@@ -87,7 +89,9 @@ class Status {
     var memberSignInList: MutableSet<String> = HashSet()
 
     /** 模块化标记与计数存储 (Key: 模块名, Value: Map<标记名, 次数>) */
-    var moduleFlags: MutableMap<String, MutableMap<String, Int>> = HashMap()
+    // 已发布的标记只读；写入方在存储事务内构造新快照后整体替换。
+    @Volatile
+    var moduleFlags: Map<String, Map<String, Int>> = emptyMap()
 
     /** 上次任务启动时间 */
     var lastTaskTime: Long = 0L
@@ -189,29 +193,29 @@ class Status {
         }
 
         @JvmStatic
-        fun getVitalityCount(skuId: String): Int {
-            return INSTANCE.vitalityStoreList[skuId] ?: 0
+        fun getVitalityCount(skuId: String): Int = StoreAccess.transaction {
+            return@transaction INSTANCE.vitalityStoreList[skuId] ?: 0
         }
 
         @JvmStatic
-        fun canVitalityExchangeToday(skuId: String, count: Int): Boolean {
-            return !hasFlagToday(StatusFlags.FLAG_ANTFOREST_VITALITY_EXCHANGE_LIMIT_PREFIX + skuId) && getVitalityCount(skuId) < count
+        fun canVitalityExchangeToday(skuId: String, count: Int): Boolean = StoreAccess.transaction {
+            return@transaction !hasFlagToday(StatusFlags.FLAG_ANTFOREST_VITALITY_EXCHANGE_LIMIT_PREFIX + skuId) && getVitalityCount(skuId) < count
         }
 
         @JvmStatic
-        fun vitalityExchangeToday(skuId: String) {
+        fun vitalityExchangeToday(skuId: String): Unit = StoreAccess.transaction {
             val count = getVitalityCount(skuId) + 1
             INSTANCE.vitalityStoreList[skuId] = count
             save()
         }
 
         @JvmStatic
-        fun canAnimalSleep(): Boolean {
-            return !INSTANCE.animalSleep
+        fun canAnimalSleep(): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.animalSleep
         }
 
         @JvmStatic
-        fun animalSleep() {
+        fun animalSleep(): Unit = StoreAccess.transaction {
             if (!INSTANCE.animalSleep) {
                 INSTANCE.animalSleep = true
                 save()
@@ -219,16 +223,16 @@ class Status {
         }
 
         @JvmStatic
-        fun getWaterFriendTodayCount(id: String, taskUid: String): Int? {
-            if (taskUid != UserMap.currentUid) return null
-            return INSTANCE.waterFriendLogList["$taskUid-$id"] ?: 0
+        fun getWaterFriendTodayCount(id: String, taskUid: String): Int? = StoreAccess.transaction {
+            if (taskUid != UserMap.currentUid) return@transaction null
+            return@transaction INSTANCE.waterFriendLogList["$taskUid-$id"] ?: 0
         }
 
         @JvmStatic
-        fun canWaterFriendToday(id: String, newCount: Int): Boolean {
+        fun canWaterFriendToday(id: String, newCount: Int): Boolean = StoreAccess.transaction {
             val key = "${UserMap.currentUid}-$id"
-            val count = INSTANCE.waterFriendLogList[key] ?: return true
-            return count < newCount
+            val count = INSTANCE.waterFriendLogList[key] ?: return@transaction true
+            return@transaction count < newCount
         }
 
         /**
@@ -237,16 +241,16 @@ class Status {
          * 用于规避：任务执行过程中切号导致 Status 标记写入到下一个账号的极少数情况。
          */
         @JvmStatic
-        fun canWaterFriendToday(id: String, newCount: Int, taskUid: String?): Boolean {
-            if (taskUid.isNullOrBlank()) return canWaterFriendToday(id, newCount)
-            if (taskUid != UserMap.currentUid) return false
+        fun canWaterFriendToday(id: String, newCount: Int, taskUid: String?): Boolean = StoreAccess.transaction {
+            if (taskUid.isNullOrBlank()) return@transaction canWaterFriendToday(id, newCount)
+            if (taskUid != UserMap.currentUid) return@transaction false
             val key = "$taskUid-$id"
-            val count = INSTANCE.waterFriendLogList[key] ?: return true
-            return count < newCount
+            val count = INSTANCE.waterFriendLogList[key] ?: return@transaction true
+            return@transaction count < newCount
         }
 
         @JvmStatic
-        fun waterFriendToday(id: String, count: Int) {
+        fun waterFriendToday(id: String, count: Int): Unit = StoreAccess.transaction {
             val key = "${UserMap.currentUid}-$id"
             INSTANCE.waterFriendLogList[key] = count
             save()
@@ -258,12 +262,12 @@ class Status {
          * @param taskUid 任务启动时捕获的 UID（避免切号后写入到错误账号）
          */
         @JvmStatic
-        fun waterFriendToday(id: String, count: Int, taskUid: String?) {
+        fun waterFriendToday(id: String, count: Int, taskUid: String?): Unit = StoreAccess.transaction {
             if (taskUid.isNullOrBlank()) {
                 waterFriendToday(id, count)
-                return
+                return@transaction
             }
-            if (taskUid != UserMap.currentUid) return
+            if (taskUid != UserMap.currentUid) return@transaction
             val key = "$taskUid-$id"
             INSTANCE.waterFriendLogList[key] = count
             save()
@@ -277,11 +281,11 @@ class Status {
          * @param taskUid 任务启动时捕获的 UID（避免切号后写入到错误账号）
          */
         @JvmStatic
-        fun wateringFriendToday(id: String, addTimes: Int, taskUid: String?) {
-            if (id.isBlank() || addTimes <= 0) return
+        fun wateringFriendToday(id: String, addTimes: Int, taskUid: String?): Unit = StoreAccess.transaction {
+            if (id.isBlank() || addTimes <= 0) return@transaction
             val uid = if (taskUid.isNullOrBlank()) UserMap.currentUid else taskUid
-            if (uid.isNullOrBlank()) return
-            if (!taskUid.isNullOrBlank() && taskUid != UserMap.currentUid) return
+            if (uid.isNullOrBlank()) return@transaction
+            if (!taskUid.isNullOrBlank() && taskUid != UserMap.currentUid) return@transaction
 
             val key = "$uid-$id"
             val count = INSTANCE.wateringFriendLogList[key] ?: 0
@@ -295,9 +299,9 @@ class Status {
          * @param id 给你浇水的好友 UID
          */
         @JvmStatic
-        fun wateredFriendToday(id: String) {
+        fun wateredFriendToday(id: String): Unit = StoreAccess.transaction {
             val uid = UserMap.currentUid
-            if (uid.isNullOrBlank() || id.isBlank()) return
+            if (uid.isNullOrBlank() || id.isBlank()) return@transaction
             val key = "$uid-$id"
             val count = INSTANCE.wateredFriendLogList[key] ?: 0
             INSTANCE.wateredFriendLogList[key] = count + 1
@@ -305,29 +309,29 @@ class Status {
         }
 
         @JvmStatic
-        fun getReserveTimes(id: String): Int {
-            return INSTANCE.reserveLogList[id] ?: 0
+        fun getReserveTimes(id: String): Int = StoreAccess.transaction {
+            return@transaction INSTANCE.reserveLogList[id] ?: 0
         }
 
         @JvmStatic
-        fun canReserveToday(id: String, count: Int): Boolean {
-            return getReserveTimes(id) < count
+        fun canReserveToday(id: String, count: Int): Boolean = StoreAccess.transaction {
+            return@transaction getReserveTimes(id) < count
         }
 
         @JvmStatic
-        fun reserveToday(id: String, newCount: Int) {
+        fun reserveToday(id: String, newCount: Int): Unit = StoreAccess.transaction {
             val count = INSTANCE.reserveLogList[id] ?: 0
             INSTANCE.reserveLogList[id] = count + newCount
             save()
         }
 
         @JvmStatic
-        fun canCooperateWaterToday(uid: String?, coopId: String): Boolean {
-            return !INSTANCE.cooperateWaterList.contains("${uid}_$coopId")
+        fun canCooperateWaterToday(uid: String?, coopId: String): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.cooperateWaterList.contains("${uid}_$coopId")
         }
 
         @JvmStatic
-        fun cooperateWaterToday(uid: String?, coopId: String?) {
+        fun cooperateWaterToday(uid: String?, coopId: String?): Unit = StoreAccess.transaction {
             val v = "${uid}_$coopId"
             if (INSTANCE.cooperateWaterList.add(v)) {
                 save()
@@ -335,51 +339,51 @@ class Status {
         }
 
         @JvmStatic
-        fun canAncientTreeToday(cityCode: String): Boolean {
-            return !INSTANCE.ancientTreeCityCodeList.contains(cityCode)
+        fun canAncientTreeToday(cityCode: String): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.ancientTreeCityCodeList.contains(cityCode)
         }
 
         @JvmStatic
-        fun ancientTreeToday(cityCode: String) {
+        fun ancientTreeToday(cityCode: String): Unit = StoreAccess.transaction {
             if (INSTANCE.ancientTreeCityCodeList.add(cityCode)) {
                 save()
             }
         }
 
         @JvmStatic
-        fun canFeedFriendToday(id: String, newCount: Int): Boolean {
-            val count = INSTANCE.feedFriendLogList[id] ?: return true
-            return count < newCount
+        fun canFeedFriendToday(id: String, newCount: Int): Boolean = StoreAccess.transaction {
+            val count = INSTANCE.feedFriendLogList[id] ?: return@transaction true
+            return@transaction count < newCount
         }
 
         @JvmStatic
-        fun feedFriendToday(id: String) {
+        fun feedFriendToday(id: String): Unit = StoreAccess.transaction {
             val count = INSTANCE.feedFriendLogList[id] ?: 0
             INSTANCE.feedFriendLogList[id] = count + 1
             save()
         }
 
         @JvmStatic
-        fun canVisitFriendToday(id: String, newCount: Int): Boolean {
+        fun canVisitFriendToday(id: String, newCount: Int): Boolean = StoreAccess.transaction {
             val key = "${UserMap.currentUid}-$id"
-            val count = INSTANCE.visitFriendLogList[key] ?: return true
-            return count < newCount
+            val count = INSTANCE.visitFriendLogList[key] ?: return@transaction true
+            return@transaction count < newCount
         }
 
         @JvmStatic
-        fun visitFriendToday(id: String, newCount: Int) {
+        fun visitFriendToday(id: String, newCount: Int): Unit = StoreAccess.transaction {
             val key = "${UserMap.currentUid}-$id"
             INSTANCE.visitFriendLogList[key] = newCount
             save()
         }
 
         @JvmStatic
-        fun canMemberSignInToday(uid: String?): Boolean {
-            return !INSTANCE.memberSignInList.contains(uid)
+        fun canMemberSignInToday(uid: String?): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.memberSignInList.contains(uid)
         }
 
         @JvmStatic
-        fun memberSignInToday(uid: String?) {
+        fun memberSignInToday(uid: String?): Unit = StoreAccess.transaction {
             if (uid != null) {
                 if (INSTANCE.memberSignInList.add(uid)) {
                     save()
@@ -388,12 +392,12 @@ class Status {
         }
 
         @JvmStatic
-        fun canUseAccelerateTool(): Boolean {
-            return INSTANCE.useAccelerateToolCount < 8
+        fun canUseAccelerateTool(): Boolean = StoreAccess.transaction {
+            return@transaction INSTANCE.useAccelerateToolCount < 8
         }
 
         @JvmStatic
-        fun useAccelerateTool() {
+        fun useAccelerateTool(): Unit = StoreAccess.transaction {
             INSTANCE.useAccelerateToolCount += 1
             save()
         }
@@ -402,9 +406,9 @@ class Status {
          * 获取今日捐蛋总数
          */
         @JvmStatic
-        fun getDailyDonationTotal(uid: String?): Int {
-            if (uid.isNullOrEmpty()) return 0
-            return getIntFlagToday(StatusFlags.FLAG_FARM_DONATION_COUNT + uid) ?: 0
+        fun getDailyDonationTotal(uid: String?): Int = StoreAccess.transaction {
+            if (uid.isNullOrEmpty()) return@transaction 0
+            return@transaction getIntFlagToday(StatusFlags.FLAG_FARM_DONATION_COUNT + uid) ?: 0
         }
 
         /**
@@ -412,8 +416,8 @@ class Status {
          * @param incremental true: 累加原有数值, false: 强制覆盖为新数值(用于服务器同步)
          */
         @JvmStatic
-        fun updateDailyDonationTotal(uid: String?, count: Int, incremental: Boolean = true) {
-            if (uid.isNullOrEmpty()) return
+        fun updateDailyDonationTotal(uid: String?, count: Int, incremental: Boolean = true): Unit = StoreAccess.transaction {
+            if (uid.isNullOrEmpty()) return@transaction
             val finalCount = if (incremental) getDailyDonationTotal(uid) + count else count
 
             if (finalCount != getDailyDonationTotal(uid)) {
@@ -422,36 +426,36 @@ class Status {
         }
 
         @JvmStatic
-        fun canAntStallAssistFriendToday(): Boolean {
-            return !INSTANCE.antStallAssistFriend.contains(UserMap.currentUid)
+        fun canAntStallAssistFriendToday(): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.antStallAssistFriend.contains(UserMap.currentUid)
         }
 
         @JvmStatic
-        fun antStallAssistFriendToday() {
+        fun antStallAssistFriendToday(): Unit = StoreAccess.transaction {
             if (INSTANCE.antStallAssistFriend.add(UserMap.currentUid!!)) {
                 save()
             }
         }
 
         @JvmStatic
-        fun canAntOrchardAssistFriendToday(): Boolean {
-            return !INSTANCE.antOrchardAssistFriend.contains(UserMap.currentUid)
+        fun canAntOrchardAssistFriendToday(): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.antOrchardAssistFriend.contains(UserMap.currentUid)
         }
 
         @JvmStatic
-        fun antOrchardAssistFriendToday() {
+        fun antOrchardAssistFriendToday(): Unit = StoreAccess.transaction {
             if (INSTANCE.antOrchardAssistFriend.add(UserMap.currentUid!!)) {
                 save()
             }
         }
 
         @JvmStatic
-        fun canProtectBubbleToday(uid: String?): Boolean {
-            return !INSTANCE.protectBubbleList.contains(uid)
+        fun canProtectBubbleToday(uid: String?): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.protectBubbleList.contains(uid)
         }
 
         @JvmStatic
-        fun protectBubbleToday(uid: String?) {
+        fun protectBubbleToday(uid: String?): Unit = StoreAccess.transaction {
             if (uid != null) {
                 if (INSTANCE.protectBubbleList.add(uid)) {
                     save()
@@ -462,36 +466,36 @@ class Status {
         }
 
         @JvmStatic
-        fun canPasteTicketTime(): Boolean {
-            return !INSTANCE.canPasteTicketTime.contains(UserMap.currentUid)
+        fun canPasteTicketTime(): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.canPasteTicketTime.contains(UserMap.currentUid)
         }
 
         @JvmStatic
-        fun pasteTicketTime() {
+        fun pasteTicketTime(): Unit = StoreAccess.transaction {
             if (INSTANCE.canPasteTicketTime.add(UserMap.currentUid!!)) {
                 save()
             }
         }
 
         @JvmStatic
-        fun canDoubleToday(): Boolean {
-            val task = Model.getModel(AntForest::class.java) ?: return false
-            return INSTANCE.doubleTimes < (task.doubleCountLimit?.value ?: 0)
+        fun canDoubleToday(): Boolean = StoreAccess.transaction {
+            val task = Model.getModel(AntForest::class.java) ?: return@transaction false
+            return@transaction INSTANCE.doubleTimes < (task.doubleCountLimit?.value ?: 0)
         }
 
         @JvmStatic
-        fun doubleToday() {
+        fun doubleToday(): Unit = StoreAccess.transaction {
             INSTANCE.doubleTimes += 1
             save()
         }
 
         @JvmStatic
-        fun canDonateCharityCoin(): Boolean {
-            return !INSTANCE.donateCharityCoin
+        fun canDonateCharityCoin(): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.donateCharityCoin
         }
 
         @JvmStatic
-        fun donateCharityCoin() {
+        fun donateCharityCoin(): Unit = StoreAccess.transaction {
             if (!INSTANCE.donateCharityCoin) {
                 INSTANCE.donateCharityCoin = true
                 save()
@@ -499,120 +503,116 @@ class Status {
         }
 
         @JvmStatic
-        fun canExchangeToday(uid: String): Boolean {
-            return !INSTANCE.exchangeList.contains(uid)
+        fun canExchangeToday(uid: String): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.exchangeList.contains(uid)
         }
 
         @JvmStatic
-        fun exchangeToday(uid: String) {
+        fun exchangeToday(uid: String): Unit = StoreAccess.transaction {
             if (INSTANCE.exchangeList.add(uid)) {
                 save()
             }
         }
 
         @JvmStatic
-        fun canGreenFinancePointFriend(): Boolean {
-            return INSTANCE.greenFinancePointFriend.contains(UserMap.currentUid)
+        fun canGreenFinancePointFriend(): Boolean = StoreAccess.transaction {
+            return@transaction INSTANCE.greenFinancePointFriend.contains(UserMap.currentUid)
         }
 
         @JvmStatic
-        fun greenFinancePointFriend() {
-            if (canGreenFinancePointFriend()) return
+        fun greenFinancePointFriend(): Unit = StoreAccess.transaction {
+            if (canGreenFinancePointFriend()) return@transaction
             INSTANCE.greenFinancePointFriend.add(UserMap.currentUid!!)
             save()
         }
 
         @JvmStatic
-        fun canGreenFinancePrizesMap(): Boolean {
+        fun canGreenFinancePrizesMap(): Boolean = StoreAccess.transaction {
             val week = TimeUtil.getWeekNumber(Date())
             val currentUid = UserMap.currentUid
             if (INSTANCE.greenFinancePrizesMap.containsKey(currentUid)) {
                 val storedWeek = INSTANCE.greenFinancePrizesMap[currentUid]
-                return storedWeek == null || storedWeek != week
+                return@transaction storedWeek == null || storedWeek != week
             }
-            return true
+            return@transaction true
         }
 
         @JvmStatic
-        fun greenFinancePrizesMap() {
-            if (!canGreenFinancePrizesMap()) return
+        fun greenFinancePrizesMap(): Unit = StoreAccess.transaction {
+            if (!canGreenFinancePrizesMap()) return@transaction
             INSTANCE.greenFinancePrizesMap[UserMap.currentUid!!] = TimeUtil.getWeekNumber(Date())
             save()
         }
 
         @JvmStatic
         fun load(currentUid: String?): Status = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                return@transaction load(currentUid, true)
-            }
+            return@transaction load(currentUid, true)
         }
 
         @JvmStatic
         fun load(currentUid: String?, showLog: Boolean): Status = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                if (currentUid.isNullOrEmpty()) {
-                    if (showLog) Log.record(TAG, "用户为空，状态加载失败")
-                    throw RuntimeException("用户为空，状态加载失败")
-                }
-
-                try {
-                    val statusFile = Files.getStatusFile(currentUid)
-                    if (statusFile!!.exists()) {
-                        val fileTime = statusFile.lastModified()
-                        val isUserChanged = currentUid != lastUid
-
-                        // 缓存检查：如果 UID 和文件修改时间都没变，跳过 IO
-                        if (!isUserChanged && fileTime != 0L && fileTime == lastModifiedTime) {
-                            // 同一用户重复加载，不打印 record 日志
-                        } else {
-                            if (showLog) {
-                                if (isUserChanged) Log.record(TAG, "加载用户[$currentUid]的 status.json")
-                                else Log.record(TAG, "加载 status.json")
-                            }
-
-                            val json = Files.readFromFile(statusFile)
-                            if (json.trim().isNotEmpty()) {
-                                JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(json, Status::class.java)
-
-                                val formatted = JsonUtil.formatJson(INSTANCE)
-                                if (formatted != json) {
-                                    if (showLog) Log.record(TAG, "重新格式化 status.json")
-                                    Files.write2File(formatted, statusFile)
-                                }
-                                lastModifiedTime = statusFile.lastModified()
-                                lastUid = currentUid
-                                // 🚩 关键：修正加载后的身份
-                                INSTANCE.currentUid = currentUid
-                            } else {
-                                if (showLog) Log.record(TAG, "配置文件为空，初始化默认配置")
-                                initializeDefaultConfig(statusFile)
-                            }
-                        }
-                    } else {
-                        if (showLog) Log.record(TAG, "配置文件不存在，初始化默认配置")
-                        initializeDefaultConfig(statusFile)
-                    }
-                } catch (t: Throwable) {
-                    Log.printStackTrace(TAG, "状态加载失败，保留原文件", t)
-                    throw t
-                }
-
-                // 无论加载还是初始化，确保身份锚定
-                if (INSTANCE.currentUid == null) INSTANCE.currentUid = currentUid
-
-                // 无论是否命中缓存，日期检查逻辑保持不变
-                if (updateDay(Calendar.getInstance())) {
-                    if (showLog) Log.record(TAG, "发现日期更新，重置 status.json 状态")
-                    // 如果过期重置了，重新确保新日期的身份和时间有效
-                    INSTANCE.currentUid = currentUid
-                    INSTANCE.saveTime = System.currentTimeMillis()
-                }
-
-                if (INSTANCE.saveTime == 0L) {
-                    INSTANCE.saveTime = System.currentTimeMillis()
-                }
-                return@transaction INSTANCE
+            if (currentUid.isNullOrEmpty()) {
+                if (showLog) Log.record(TAG, "用户为空，状态加载失败")
+                throw RuntimeException("用户为空，状态加载失败")
             }
+
+            try {
+                val statusFile = Files.getStatusFile(currentUid)
+                if (statusFile!!.exists()) {
+                    val fileTime = statusFile.lastModified()
+                    val isUserChanged = currentUid != lastUid
+
+                    // 缓存检查：如果 UID 和文件修改时间都没变，跳过 IO
+                    if (!isUserChanged && fileTime != 0L && fileTime == lastModifiedTime) {
+                        // 同一用户重复加载，不打印 record 日志
+                    } else {
+                        if (showLog) {
+                            if (isUserChanged) Log.record(TAG, "加载用户[$currentUid]的 status.json")
+                            else Log.record(TAG, "加载 status.json")
+                        }
+
+                        val json = Files.readFromFile(statusFile)
+                        if (json.trim().isNotEmpty()) {
+                            JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(json, Status::class.java)
+
+                            val formatted = JsonUtil.formatJson(INSTANCE)
+                            if (formatted != json) {
+                                if (showLog) Log.record(TAG, "重新格式化 status.json")
+                                Files.write2File(formatted, statusFile)
+                            }
+                            lastModifiedTime = statusFile.lastModified()
+                            lastUid = currentUid
+                            // 🚩 关键：修正加载后的身份
+                            INSTANCE.currentUid = currentUid
+                        } else {
+                            if (showLog) Log.record(TAG, "配置文件为空，初始化默认配置")
+                            initializeDefaultConfig(statusFile)
+                        }
+                    }
+                } else {
+                    if (showLog) Log.record(TAG, "配置文件不存在，初始化默认配置")
+                    initializeDefaultConfig(statusFile)
+                }
+            } catch (t: Throwable) {
+                Log.printStackTrace(TAG, "状态加载失败，保留原文件", t)
+                throw t
+            }
+
+            // 无论加载还是初始化，确保身份锚定
+            if (INSTANCE.currentUid == null) INSTANCE.currentUid = currentUid
+
+            // 无论是否命中缓存，日期检查逻辑保持不变
+            if (updateDay(Calendar.getInstance())) {
+                if (showLog) Log.record(TAG, "发现日期更新，重置 status.json 状态")
+                // 如果过期重置了，重新确保新日期的身份和时间有效
+                INSTANCE.currentUid = currentUid
+                INSTANCE.saveTime = System.currentTimeMillis()
+            }
+
+            if (INSTANCE.saveTime == 0L) {
+                INSTANCE.saveTime = System.currentTimeMillis()
+            }
+            return@transaction INSTANCE
         }
 
         private fun initializeDefaultConfig(statusFile: java.io.File) {
@@ -647,14 +647,13 @@ class Status {
             }
         }
 
-        @Synchronized
         @JvmStatic
-        fun unload() {
+        fun unload(): Unit = StoreAccess.transaction {
             try {
                 // 创建新状态实例并确保清空所有每日标记
                 val newStatus = Status()
                 // 确保清空所有标记和计数
-                INSTANCE.moduleFlags.clear()
+                INSTANCE.moduleFlags = emptyMap()
                 JsonUtil.copyMapper().updateValue(INSTANCE, newStatus)
                 // 清除缓存标记，强制下次加载重新读取
                 lastModifiedTime = 0L
@@ -666,59 +665,57 @@ class Status {
 
         @JvmStatic
         fun save(nowCalendar: Calendar = Calendar.getInstance()): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
-                val targetUid = UserMap.currentUid
-                if (targetUid.isNullOrEmpty()) {
-                    Log.record(TAG, "用户为空，状态保存失败")
-                    throw RuntimeException("用户为空，状态加载失败")
-                }
+            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
+            val targetUid = UserMap.currentUid
+            if (targetUid.isNullOrEmpty()) {
+                Log.record(TAG, "用户为空，状态保存失败")
+                throw RuntimeException("用户为空，状态加载失败")
+            }
 
-                // 🚩 核心防御：如果内存里的 UID 与当前全局 UID 不符，说明处于切换中，严禁写入
-                if (INSTANCE.currentUid != null && INSTANCE.currentUid != targetUid) {
-                    Log.record(TAG, "拒绝跨账号保存: Memory(${INSTANCE.currentUid}) -> Disk($targetUid)")
-                    return@transaction
-                }
+            // 🚩 核心防御：如果内存里的 UID 与当前全局 UID 不符，说明处于切换中，严禁写入
+            if (INSTANCE.currentUid != null && INSTANCE.currentUid != targetUid) {
+                Log.record(TAG, "拒绝跨账号保存: Memory(${INSTANCE.currentUid}) -> Disk($targetUid)")
+                return@transaction
+            }
 
-                if (updateDay(nowCalendar)) {
-                    Log.record(TAG, "重置 status.json")
-                } else {
-                    Log.record(TAG, "保存 status.json")
+            if (updateDay(nowCalendar)) {
+                Log.record(TAG, "重置 status.json")
+            } else {
+                Log.record(TAG, "保存 status.json")
+            }
+            val lastSaveTime = INSTANCE.saveTime
+            try {
+                INSTANCE.currentUid = targetUid
+                INSTANCE.saveTime = System.currentTimeMillis()
+                val statusFile = Files.getStatusFile(targetUid)!!
+                check(Files.write2File(JsonUtil.formatJson(INSTANCE), statusFile)) {
+                    "状态保存失败: ${statusFile.absolutePath}"
                 }
-                val lastSaveTime = INSTANCE.saveTime
-                try {
-                    INSTANCE.currentUid = targetUid
-                    INSTANCE.saveTime = System.currentTimeMillis()
-                    val statusFile = Files.getStatusFile(targetUid)!!
-                    check(Files.write2File(JsonUtil.formatJson(INSTANCE), statusFile)) {
-                        "状态保存失败: ${statusFile.absolutePath}"
-                    }
-                    // 关键：更新标记，防止下一次 load 触发冗余读取
-                    lastModifiedTime = statusFile.lastModified()
-                    lastUid = targetUid
-                } catch (e: Exception) {
-                    INSTANCE.saveTime = lastSaveTime
-                    throw e
-                }
+                // 关键：更新标记，防止下一次 load 触发冗余读取
+                lastModifiedTime = statusFile.lastModified()
+                lastUid = targetUid
+            } catch (e: Exception) {
+                INSTANCE.saveTime = lastSaveTime
+                throw e
             }
         }
 
         @JvmStatic
-        fun updateDay(nowCalendar: Calendar): Boolean {
+        fun updateDay(nowCalendar: Calendar): Boolean = StoreAccess.transaction {
             if (TimeUtil.isLessThanSecondOfDays(INSTANCE.saveTime, nowCalendar.timeInMillis)) {
                 unload()
-                return true
+                return@transaction true
             }
-            return false
+            return@transaction false
         }
 
         @JvmStatic
-        fun canOrnamentToday(): Boolean {
-            return INSTANCE.canOrnament
+        fun canOrnamentToday(): Boolean = StoreAccess.transaction {
+            return@transaction INSTANCE.canOrnament
         }
 
         @JvmStatic
-        fun setOrnamentToday() {
+        fun setOrnamentToday(): Unit = StoreAccess.transaction {
             if (INSTANCE.canOrnament) {
                 INSTANCE.canOrnament = false
                 save()
@@ -726,12 +723,12 @@ class Status {
         }
 
         @JvmStatic
-        fun canStallDonateToday(): Boolean {
-            return INSTANCE.canStallDonate
+        fun canStallDonateToday(): Boolean = StoreAccess.transaction {
+            return@transaction INSTANCE.canStallDonate
         }
 
         @JvmStatic
-        fun setStallDonateToday() {
+        fun setStallDonateToday(): Unit = StoreAccess.transaction {
             if (INSTANCE.canStallDonate) {
                 INSTANCE.canStallDonate = false
                 save()
@@ -747,14 +744,13 @@ class Status {
          */
         @JvmStatic
         @JvmOverloads
-        fun hasFlagToday(flag: String, retryLimit: Int = 0, retryTimes: String? = null): Boolean {
-            return INSTANCE.hasFlagTodayInstance(flag, retryLimit, retryTimes)
-        }
+        fun hasFlagToday(flag: String, retryLimit: Int = 0, retryTimes: String? = null): Boolean =
+            INSTANCE.hasFlagTodayInstance(flag, retryLimit, retryTimes)
 
         @JvmStatic
-        fun setFlagToday(flag: String, state: TodayFlagState) {
+        fun setFlagToday(flag: String, state: TodayFlagState): Unit = StoreAccess.transaction {
             if (state == TodayFlagState.RETRY_LATER) {
-                return
+                return@transaction
             }
             setFlagToday(flag)
         }
@@ -767,20 +763,18 @@ class Status {
         @JvmStatic
         @JvmOverloads
         fun setFlagToday(flag: String, retryTimes: String? = null, expectedUserId: String? = null): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                if (expectedUserId != null) {
-                    check(UserMap.currentUid == expectedUserId && INSTANCE.currentUid == expectedUserId) { "今日标记账号已变化" }
-                    check(!ApplicationHookConstants.isOffline()) { "离线状态不能确认好友同步完成" }
-                }
-                if (ApplicationHookConstants.isOffline()) {
-                    if (offlineSkippedTodayFlags.add(flag)) {
-                        Log.record(TAG, "离线模式跳过今日标识: $flag")
-                    }
-                    return@transaction
-                }
-
-                setFlagTodayInternal(flag, retryTimes)
+            if (expectedUserId != null) {
+                check(UserMap.currentUid == expectedUserId && INSTANCE.currentUid == expectedUserId) { "今日标记账号已变化" }
+                check(!ApplicationHookConstants.isOffline()) { "离线状态不能确认好友同步完成" }
             }
+            if (ApplicationHookConstants.isOffline()) {
+                if (offlineSkippedTodayFlags.add(flag)) {
+                    Log.record(TAG, "离线模式跳过今日标识: $flag")
+                }
+                return@transaction
+            }
+
+            setFlagTodayInternal(flag, retryTimes)
         }
 
         /**
@@ -789,10 +783,10 @@ class Status {
          */
         @JvmStatic
         @JvmOverloads
-        fun setFlagTodayWhileOffline(flag: String, retryTimes: String? = null) {
+        fun setFlagTodayWhileOffline(flag: String, retryTimes: String? = null): Unit = StoreAccess.transaction {
             if (!flag.startsWith(StatusFlags.FLAG_RPC_DAILY_RISK_STOP_PREFIX)) {
                 Log.record(TAG, "拒绝写入非 RPC 风控离线标识: $flag")
-                return
+                return@transaction
             }
             setFlagTodayInternal(flag, retryTimes)
         }
@@ -800,8 +794,8 @@ class Status {
         private fun setFlagTodayInternal(flag: String, retryTimes: String?) {
             io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
             val (module, name) = parseFlag(flag)
-            val flags = INSTANCE.moduleFlags.getOrPut(module) { HashMap() }
-            val oldFlags = HashMap(flags)
+            val previous = INSTANCE.moduleFlags
+            val flags = previous[module].orEmpty().toMutableMap()
             val oldCount = flags[name] ?: 0
 
             var changed = false
@@ -828,11 +822,11 @@ class Status {
             }
 
             if (changed) {
+                INSTANCE.moduleFlags = previous + (module to flags.toMap())
                 try {
                     save()
                 } catch (e: Exception) {
-                    flags.clear()
-                    flags.putAll(oldFlags)
+                    INSTANCE.moduleFlags = previous
                     throw e
                 }
             }
@@ -845,8 +839,8 @@ class Status {
          * @param extraDoneCodes 额外的“视为完成”的 resultCode 或 errorCode
          */
         @JvmStatic
-        fun setFlagIfDone(flag: String, jo: JSONObject?, vararg extraDoneCodes: String) {
-            if (jo == null) return
+        fun setFlagIfDone(flag: String, jo: JSONObject?, vararg extraDoneCodes: String): Unit = StoreAccess.transaction {
+            if (jo == null) return@transaction
             val resultCode = jo.optString("resultCode")
             val errorCode = jo.optString("errorCode")
             val success = jo.optBoolean("success") || jo.optBoolean("isSuccess") ||
@@ -867,12 +861,13 @@ class Status {
          * 支持 "Module::Task" 格式
          */
         @JvmStatic
-        fun removeFlag(flag: String) {
+        fun removeFlag(flag: String): Unit = StoreAccess.transaction {
             var changed = false
             val (module, name) = parseFlag(flag)
 
-            // 1. 从 moduleFlags 中移除
-            INSTANCE.moduleFlags[module]?.let {
+            val previous = INSTANCE.moduleFlags
+            val flags = previous[module]?.toMutableMap() ?: return@transaction
+            flags.let {
                 if (it.remove(name) != null) {
                     changed = true
                 }
@@ -885,7 +880,13 @@ class Status {
             }
 
             if (changed) {
-                save()
+                INSTANCE.moduleFlags = previous + (module to flags.toMap())
+                try {
+                    save()
+                } catch (e: Exception) {
+                    INSTANCE.moduleFlags = previous
+                    throw e
+                }
             }
         }
 
@@ -898,7 +899,7 @@ class Status {
             mutateTodayFlagsForUser(userId) { status ->
                 val removedCount = status.moduleFlags.values.sumOf { it.size } + status.intFlagMap.size
                 if (removedCount > 0) {
-                    status.moduleFlags.clear()
+                    status.moduleFlags = emptyMap()
                     status.intFlagMap.clear()
                 }
                 removedCount
@@ -926,83 +927,89 @@ class Status {
             userId: String,
             mutation: (Status) -> Int,
         ): TodayFlagClearResult = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
-            synchronized(this) {
-                val targetUserId = userId.trim()
-                if (targetUserId.isEmpty()) {
-                    return@transaction TodayFlagClearResult(userId = userId, errorMessage = "账号标识无效")
-                }
-                val statusFile = Files.getStatusFile(targetUserId)
-                    ?: return@transaction TodayFlagClearResult(userId = targetUserId, errorMessage = "无法定位账号每日状态文件")
-                if (!statusFile.exists()) {
-                    return@transaction TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件不存在")
-                }
+            val targetUserId = userId.trim()
+            if (targetUserId.isEmpty()) {
+                return@transaction TodayFlagClearResult(userId = userId, errorMessage = "账号标识无效")
+            }
+            val statusFile = Files.getStatusFile(targetUserId)
+                ?: return@transaction TodayFlagClearResult(userId = targetUserId, errorMessage = "无法定位账号每日状态文件")
+            if (!statusFile.exists()) {
+                return@transaction TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件不存在")
+            }
 
-                return@transaction try {
-                    val raw = Files.readFromFile(statusFile)
-                    if (raw.isBlank()) {
-                        TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件为空")
+            return@transaction try {
+                val raw = Files.readFromFile(statusFile)
+                if (raw.isBlank()) {
+                    TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件为空")
+                } else {
+                    val detachedStatus = JsonUtil.copyMapper().readValue(raw, Status::class.java)
+                    val removedCount = mutation(detachedStatus)
+                    if (removedCount <= 0) {
+                        TodayFlagClearResult(userId = targetUserId)
+                    } else if (!Files.write2File(JsonUtil.formatJson(detachedStatus), statusFile)) {
+                        TodayFlagClearResult(userId = targetUserId, errorMessage = "每日状态文件写入失败")
                     } else {
-                        val detachedStatus = JsonUtil.copyMapper().readValue(raw, Status::class.java)
-                        val removedCount = mutation(detachedStatus)
-                        if (removedCount <= 0) {
-                            TodayFlagClearResult(userId = targetUserId)
-                        } else if (!Files.write2File(JsonUtil.formatJson(detachedStatus), statusFile)) {
-                            TodayFlagClearResult(userId = targetUserId, errorMessage = "每日状态文件写入失败")
-                        } else {
-                            // The active in-memory Status may refer to this account, so force its next load to read disk.
-                            lastModifiedTime = 0L
-                            lastUid = null
-                            TodayFlagClearResult(
-                                userId = targetUserId,
-                                removedCount = removedCount,
-                                written = true,
-                            )
-                        }
+                        // The active in-memory Status may refer to this account, so force its next load to read disk.
+                        lastModifiedTime = 0L
+                        lastUid = null
+                        TodayFlagClearResult(
+                            userId = targetUserId,
+                            removedCount = removedCount,
+                            written = true,
+                        )
                     }
-                } catch (t: Throwable) {
-                    Log.printStackTrace(TAG, "清除账号[$targetUserId]每日标识失败", t)
-                    TodayFlagClearResult(
-                        userId = targetUserId,
-                        errorMessage = t.message ?: "每日状态文件格式有误",
-                    )
                 }
+            } catch (t: Throwable) {
+                Log.printStackTrace(TAG, "清除账号[$targetUserId]每日标识失败", t)
+                TodayFlagClearResult(
+                    userId = targetUserId,
+                    errorMessage = t.message ?: "每日状态文件格式有误",
+                )
             }
         }
 
         private fun removeTodayFlagKeys(status: Status, keys: Set<TodayFlagKey>): Int {
             var removedCount = 0
+            val modules = status.moduleFlags.mapValues { (_, flags) -> flags.toMutableMap() }.toMutableMap()
             keys.forEach { key ->
-                val flags = status.moduleFlags[key.module] ?: return@forEach
+                val flags = modules[key.module] ?: return@forEach
                 if (flags.remove(key.name) != null) removedCount++
-                if (flags.isEmpty()) status.moduleFlags.remove(key.module)
+                if (flags.isEmpty()) modules.remove(key.module)
+            }
+            if (removedCount > 0) {
+                status.moduleFlags = modules.mapValues { (_, flags) -> flags.toMap() }
             }
             return removedCount
         }
 
         @JvmStatic
-        fun getIntFlagToday(flag: String): Int? {
-            return INSTANCE.getIntFlagTodayInstance(flag)
-        }
+        fun getIntFlagToday(flag: String): Int? = INSTANCE.getIntFlagTodayInstance(flag)
 
         @JvmStatic
-        fun setIntFlagToday(flag: String, value: Int) {
+        fun setIntFlagToday(flag: String, value: Int): Unit = StoreAccess.transaction {
             val (module, name) = parseFlag(flag)
-            val flags = INSTANCE.moduleFlags.getOrPut(module) { HashMap() }
+            val previous = INSTANCE.moduleFlags
+            val flags = previous[module].orEmpty()
 
             // 仅当数值确实不同时才保存，避免冗余 I/O
             if (flags[name] != value) {
-                flags[name] = value
-                save()
+                INSTANCE.moduleFlags = previous + (module to (flags + (name to value)))
+                try {
+                    save()
+                } catch (e: Exception) {
+                    INSTANCE.moduleFlags = previous
+                    throw e
+                }
             }
         }
 
         @JvmStatic
-        fun canMemberPointExchangeBenefitToday(benefitId: String): Boolean {
-            return !INSTANCE.memberPointExchangeBenefitLogList.contains(benefitId)
+        fun canMemberPointExchangeBenefitToday(benefitId: String): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.memberPointExchangeBenefitLogList.contains(benefitId)
         }
 
         @JvmStatic
-        fun memberPointExchangeBenefitToday(benefitId: String) {
+        fun memberPointExchangeBenefitToday(benefitId: String): Unit = StoreAccess.transaction {
             if (canMemberPointExchangeBenefitToday(benefitId)) {
                 INSTANCE.memberPointExchangeBenefitLogList.add(benefitId)
                 save()
@@ -1010,12 +1017,12 @@ class Status {
         }
 
         @JvmStatic
-        fun canMyBankWelfareExchangeToday(itemId: String): Boolean {
-            return !INSTANCE.myBankWelfareExchangeLogList.contains(itemId)
+        fun canMyBankWelfareExchangeToday(itemId: String): Boolean = StoreAccess.transaction {
+            return@transaction !INSTANCE.myBankWelfareExchangeLogList.contains(itemId)
         }
 
         @JvmStatic
-        fun myBankWelfareExchangeToday(itemId: String) {
+        fun myBankWelfareExchangeToday(itemId: String): Unit = StoreAccess.transaction {
             if (canMyBankWelfareExchangeToday(itemId)) {
                 INSTANCE.myBankWelfareExchangeLogList.add(itemId)
                 save()
@@ -1029,8 +1036,8 @@ class Status {
          * @return true 可以兑换 false 兑换达到上限
          */
         @JvmStatic
-        fun canParadiseCoinExchangeBenefitToday(spuId: String): Boolean {
-            return !hasFlagToday(StatusFlags.FLAG_FARM_PARADISE_COIN_EXCHANGE_LIMIT_PREFIX + spuId)
+        fun canParadiseCoinExchangeBenefitToday(spuId: String): Boolean = StoreAccess.transaction {
+            return@transaction !hasFlagToday(StatusFlags.FLAG_FARM_PARADISE_COIN_EXCHANGE_LIMIT_PREFIX + spuId)
         }
 
     }

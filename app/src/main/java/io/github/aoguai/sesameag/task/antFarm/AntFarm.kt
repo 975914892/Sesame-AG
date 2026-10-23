@@ -23,6 +23,7 @@ import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
+import io.github.aoguai.sesameag.hook.rpc.intervallimit.FixedOrRangeIntervalLimit
 import io.github.aoguai.sesameag.hook.rpc.intervallimit.RpcIntervalLimit.addIntervalLimit
 import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
@@ -87,8 +88,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -106,7 +107,7 @@ private const val SPECIAL_FOOD_USE_FARM_FOOD_RPC = "com.alipay.antfarm.useFarmFo
 class AntFarm : ModelTask() {
     internal var ownerFarmId: String? = null
     private val farmTaskBlacklistModule = "蚂蚁庄园"
-    private val farmWorkflowMutex = Mutex()
+    private val farmWorkflowQueue = SerialTaskQueue()
     private var farmTaskExecutionState = TaskFlowExecutionState()
     internal val farmWorkAttempted = mutableSetOf<String>()
     private val farmAwardNoProgressIds = mutableSetOf<String>()
@@ -894,10 +895,10 @@ modelFields.addField(
     override fun boot(classLoader: ClassLoader?) {
         super.boot(classLoader)
         instance = this
-        addIntervalLimit("com.alipay.antfarm.enterFarm", 2000)
+        addIntervalLimit("com.alipay.antfarm.enterFarm", FixedOrRangeIntervalLimit("1700-2000", 1700, 2000))
     }
 
-    override suspend fun runSuspend() = farmWorkflowMutex.withLock {
+    override suspend fun runSuspend() = farmWorkflowQueue.submit {
         try {
             val tc = TimeCounter(TAG)
             val userId = UserMap.currentUid
@@ -910,7 +911,7 @@ modelFields.addField(
             manurePotBelowThresholdReported.clear()
 
             if (!runFarmLifecycleWorkflow(tc)) {
-                return@withLock
+                return@submit
             }
             val pendingFarmTaskFinalization = runFarmTaskWorkflow(tc, userId)
             val pendingFarmTaskFinalizationAfterSocial = runFarmSocialWorkflow(tc, pendingFarmTaskFinalization)
@@ -1122,13 +1123,13 @@ modelFields.addField(
         return userDataStore.get(ZHIMA_PIGEON_REWARD_RECEIPT_KEY, String::class.java) != null
     }
 
-    internal suspend fun confirmZhimaPigeonDeparture(): Boolean = farmWorkflowMutex.withLock {
-        if (ownerFarmId.isNullOrBlank() && enterFarm() == null) return@withLock false
+    internal suspend fun confirmZhimaPigeonDeparture(): Boolean = farmWorkflowQueue.submit {
+        if (ownerFarmId.isNullOrBlank() && enterFarm() == null) return@submit false
         val config = NpcConfig.ZHIMA_PIGEON
-        val current = syncNpcAnimalStatus(config.source, "SYNC_PIGEON_REWARD") ?: return@withLock false
-        val pigeon = current.find(config.animalId) ?: return@withLock true
+        val current = syncNpcAnimalStatus(config.source, "SYNC_PIGEON_REWARD") ?: return@submit false
+        val pigeon = current.find(config.animalId) ?: return@submit true
         checkNpcReward(pigeon, config)
-        val refreshed = syncNpcAnimalStatus(config.source, "SYNC_PIGEON_DEPARTURE") ?: return@withLock false
+        val refreshed = syncNpcAnimalStatus(config.source, "SYNC_PIGEON_DEPARTURE") ?: return@submit false
         refreshed.find(config.animalId) == null
     }
 
@@ -1312,20 +1313,20 @@ modelFields.addField(
         source: String,
         ownerUserId: String,
         sessionEpoch: Long
-    ) = farmWorkflowMutex.withLock {
+    ) = farmWorkflowQueue.submit {
         if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) {
             Log.farm("庄园持久子任务[$group][$childId]会话已切换，取消执行: owner=$ownerUserId session=$sessionEpoch")
-            return@withLock
+            return@submit
         }
         if (!isEnable() || !check() || ApplicationHookConstants.isOffline()) {
             Log.farm("庄园子任务[$group]当前受全局执行限制，留待自然调度")
-            return@withLock
+            return@submit
         }
         if (group == "LC") {
             val current = PersistentScheduleRegistry.list().firstOrNull {
                 it.dedupeKey == persistentFarmDedupeKey(childId)
-            } ?: return@withLock
-            if (current.triggerAtMs != payload.optLong("trigger_at")) return@withLock
+            } ?: return@submit
+            if (current.triggerAtMs != payload.optLong("trigger_at")) return@submit
             // 内存与持久唤醒可能同时到期；在庄园互斥锁内消费这一个计划。
             loveChickenChildTask?.cancel()
             loveChickenChildTask = null
@@ -1337,16 +1338,16 @@ modelFields.addField(
         invalidToolTypesThisRound.clear()
         val entered = enterFarm()
         currentCoroutineContext().ensureActive()
-        if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) return@withLock
+        if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) return@submit
         if (entered == null) {
             if (group == "LC" && !ApplicationHookConstants.isOffline()) {
                 val retryAt = System.currentTimeMillis() + 10 * 60_000L
                 registerPersistentChildTask(childId, group, retryAt, JSONObject(payload.toString()).put("trigger_at", retryAt))
             }
-            return@withLock
+            return@submit
         }
         val farmId = payload.optString("farm_id")
-        if (farmId.isBlank() || farmId != ownerFarmId) return@withLock
+        if (farmId.isBlank() || farmId != ownerFarmId) return@submit
         Log.farm("庄园持久子任务触发[$group][$childId] source=$source")
         when (group) {
             "AS" -> runSleepChildTask()
@@ -1359,7 +1360,7 @@ modelFields.addField(
             "FD" -> runDueFarmWork()
             else -> Log.farm("未知庄园持久子任务[$group][$childId]，跳过")
         }
-        if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) return@withLock
+        if (!isPersistentChildSessionCurrent(ownerUserId, sessionEpoch)) return@submit
         refreshFarmFeedingSchedule()
         scheduleFarmPendingWork()
     }
@@ -1573,7 +1574,7 @@ modelFields.addField(
                 }
 
                 Log.farm("装扮商城💸[准备兑换 ${item.name} (${item.level}), 价格: ${item.price}]")
-                delay(1000)
+                delay(RandomUtil.nextLong(850, 1001))
 
                 val exchangeJo = runCatching {
                     JSONObject(AntFarmRpcCall.exchangeOrnamentBenefit(item.spuId, item.skuId))
@@ -3474,7 +3475,7 @@ modelFields.addField(
     private fun doFarmTasks(): TaskFlowRunResult {
         return try {
             val result = TaskFlowEngine(
-                FarmDailyTaskFlowAdapter(), roundSleepMs = 800L, executionState = farmTaskExecutionState,
+                FarmDailyTaskFlowAdapter(), roundSleepMs = 680L, executionState = farmTaskExecutionState,
             ).run()
             syncAnimalStatus(ownerFarmId)
             Status.setFlagToday(StatusFlags.FLAG_FARM_TASK_FINISHED, resolveFarmTaskFlagState())
@@ -3493,7 +3494,7 @@ modelFields.addField(
      */
     internal fun runHireAnimalFeedTaskFlow() {
         try {
-            TaskFlowEngine(FarmHireTaskFlowAdapter(), roundSleepMs = 300L).run()
+            TaskFlowEngine(FarmHireTaskFlowAdapter(), roundSleepMs = 255L).run()
         } catch (t: Throwable) {
             Log.printStackTrace(TAG, "runHireAnimalFeedTaskFlow 错误:", t)
         }
@@ -4053,7 +4054,7 @@ modelFields.addField(
             }
             Log.record(TAG, "${if (isManual) "手动" else "自动"}多阶段任务补全循环开始...")
             TaskFlowEngine(
-                FarmMultiStageTaskFlowAdapter(isManual), roundSleepMs = 800L, executionState = farmTaskExecutionState,
+                FarmMultiStageTaskFlowAdapter(isManual), roundSleepMs = 680L, executionState = farmTaskExecutionState,
             ).run()
         } catch (e: CancellationException) {
             throw e
@@ -6415,7 +6416,7 @@ modelFields.addField(
                         break
                     }
                 }
-                CoroutineUtils.sleepCompat(RandomUtil.nextInt(1000, 2000).toLong())
+                CoroutineUtils.sleepCompat(RandomUtil.nextInt(850, 1700).toLong())
             }
         } catch (e: CancellationException) {
             throw e
@@ -7599,25 +7600,25 @@ modelFields.addField(
     /**
      * 芝麻炼金已确认领取并反馈雇佣任务后，才允许庄园侧雇佣或切换到大表鸽。
      */
-    internal suspend fun activateZhimaPigeonFromAlchemyTask(): TaskFlowActionResult = farmWorkflowMutex.withLock {
+    internal suspend fun activateZhimaPigeonFromAlchemyTask(): TaskFlowActionResult = farmWorkflowQueue.submit {
         if (!isZhimaPigeonConfigured()) {
-            return@withLock TaskFlowActionResult.defer(DeferredReason.PREREQUISITE_PENDING, message = "未配置芝麻大表鸽")
+            return@submit TaskFlowActionResult.defer(DeferredReason.PREREQUISITE_PENDING, message = "未配置芝麻大表鸽")
         }
         if (hasPendingZhimaPigeonRewardReceipt()) {
-            return@withLock TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, message = "满产奖励仍待收取确认，暂缓新雇佣")
+            return@submit TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, message = "满产奖励仍待收取确认，暂缓新雇佣")
         }
         if (ownerFarmId.isNullOrBlank() && enterFarm() == null) {
-            return@withLock TaskFlowActionResult.failure(
+            return@submit TaskFlowActionResult.failure(
                 TaskRpcFailureType.RETRYABLE_RPC,
                 message = "庄园状态未就绪，保留后续重试",
                 rpc = "AntFarm.enterFarm",
             )
         }
         val result = handleNpcAnimalLogic()
-        if (!result.success) return@withLock result
+        if (!result.success) return@submit result
         runNpcTaskFlow()
         if (hasPendingZhimaPigeonRewardReceipt()) {
-            return@withLock TaskFlowActionResult.defer(
+            return@submit TaskFlowActionResult.defer(
                 DeferredReason.STATE_CONFIRMATION,
                 message = "满产遣返已发起，等待奖励确认",
                 refreshAfterAction = true,
@@ -7733,7 +7734,7 @@ modelFields.addField(
                 continue
             }
             if (config.taskSceneCode.isNotBlank()) {
-                val result = TaskFlowEngine(NpcTaskFlowAdapter(config), roundSleepMs = 300L).run()
+                val result = TaskFlowEngine(NpcTaskFlowAdapter(config), roundSleepMs = 255L).run()
                 if (result.interrupted || ApplicationHookConstants.isOffline()) return
             }
             val latestSync = syncNpcAnimalStatus(config.source, "SYNC__NPC_TASKLIST") ?: return
@@ -8618,7 +8619,7 @@ modelFields.addField(
                     }
                     // 使用多个时稍微延迟，避免过快
                     if (actualCount > 1 && index < actualCount - 1) {
-                        CoroutineUtils.sleepCompat(1000)
+                        CoroutineUtils.sleepCompat(RandomUtil.nextLong(850, 1001))
                     }
                 }
             }
