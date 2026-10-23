@@ -65,8 +65,8 @@ object SettingsTransferExporter {
         if (userId.isBlank()) {
             return null
         }
-        val file = File(Files.getUserConfigDir(userId), "customset.json")
-        val body = if (file.exists()) file.readText(Charsets.UTF_8) else ""
+        val file = Files.child(Files.getUserConfigDir(userId), "customset.json")
+        val body = if (file.exists()) Files.readText(file) else ""
         if (body.isBlank()) {
             return linkedMapOf()
         }

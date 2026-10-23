@@ -6,6 +6,7 @@ import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.entity.AlipayVersion
 import io.github.aoguai.sesameag.util.Log.printStackTrace
 import io.github.aoguai.sesameag.util.Log.record
+import io.github.libxposed.api.XposedInterface
 import java.lang.reflect.Method
 import kotlin.concurrent.Volatile
 
@@ -25,17 +26,17 @@ object VersionHook {
     @Volatile
     private var capturedVersion: AlipayVersion? = null
 
-    @Volatile
-    private var hookInstalled = false
+    private var hookHandle: XposedInterface.HookHandle? = null
 
     /**
      * 在 loadPackage 阶段尽早安装 Hook
      *
      * @param classLoader 类加载器
      */
+    @Synchronized
     fun installHook(classLoader: ClassLoader?) {
-        if (hookInstalled) {
-            record(TAG, "⚠️ Hook 已安装,跳过")
+        if (capturedVersion != null || hookHandle != null) {
+            record(TAG, "⚠️ 版本已获取或 Hook 已安装,跳过")
             return
         }
 
@@ -47,7 +48,7 @@ object VersionHook {
                 String::class.java,
                 Int::class.javaPrimitiveType!!
             )
-            ApplicationHook.requireXposedInterface().hook(getPackageInfoMethod).intercept { chain ->
+            hookHandle = ApplicationHook.requireXposedInterface().hook(getPackageInfoMethod).intercept { chain ->
                 val result = chain.proceed()
                 try {
                     val packageInfo = result as? PackageInfo
@@ -55,8 +56,7 @@ object VersionHook {
                         val versionName = packageInfo.versionName
                         val longVersionCode = PackageInfoCompat.getLongVersionCode(packageInfo)
                         val versionCode = longVersionCode.toInt()
-                        if (capturedVersion == null && versionName != null) {
-                            capturedVersion = AlipayVersion(versionName)
+                        if (!versionName.isNullOrBlank() && completeCapture(AlipayVersion(versionName))) {
                             record(
                                 TAG,
                                 "✅ 捕获目标应用版本: $versionName (code: $versionCode, longCode: $longVersionCode)"
@@ -69,12 +69,35 @@ object VersionHook {
                 result
             }
 
-            hookInstalled = true
             record(TAG, "✅ 版本号 Hook 安装成功")
+            // 安装句柄保存前，框架回调可能已完成版本采集。
+            capturedVersion?.let { completeCapture(it) }
         } catch (t: Throwable) {
             record(TAG, "❌ 安装版本号 Hook 失败")
             printStackTrace(TAG, t)
         }
+    }
+
+    /**
+     * 保存有效版本并结束采集；卸载失败时保留句柄，供下一次完成通知重试。
+     *
+     * @return 是否首次保存版本
+     */
+    @Synchronized
+    internal fun completeCapture(version: AlipayVersion): Boolean {
+        if (version.versionString.isBlank()) return false
+        val firstCapture = capturedVersion == null
+        if (firstCapture) {
+            capturedVersion = version
+        }
+        try {
+            hookHandle?.unhook()
+            hookHandle = null
+        } catch (t: Throwable) {
+            record(TAG, "❌ 卸载版本号 Hook 失败")
+            printStackTrace(TAG, t)
+        }
+        return firstCapture
     }
 
     /**

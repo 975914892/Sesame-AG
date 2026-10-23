@@ -172,8 +172,8 @@ object Statistics {
             return this
         }
 
-        val statisticsFile = getStatisticsFile(userId)
         try {
+            val statisticsFile = getStatisticsFile(userId)
             if (statisticsFile == null) {
                 resetToDefault()
                 return this
@@ -193,8 +193,8 @@ object Statistics {
                             Files.write2File(formatted, statisticsFile)
                         }
                     } catch (e: Exception) {
-                        Log.printStackTrace(TAG, "statistics.json 解析失败，已重置", e)
-                        resetToDefault()
+                        Log.printStackTrace(TAG, "statistics.json 加载失败，保留原文件", e)
+                        throw e
                     }
                 } else {
                     resetToDefault()
@@ -203,8 +203,9 @@ object Statistics {
                 resetToDefault()
             }
         } catch (t: Throwable) {
-            Log.printStackTrace(TAG, "统计文件格式有误，已重置统计文件", t)
-            resetToDefault()
+            unload()
+            Log.printStackTrace(TAG, "统计加载失败，保留原文件", t)
+            throw t
         }
 
         return this
@@ -242,6 +243,7 @@ object Statistics {
             Log.record(TAG, "已重置为默认值")
         } catch (e: Exception) {
             Log.printStackTrace(TAG, "resetToDefault Exception", e)
+            throw e
         }
     }
 

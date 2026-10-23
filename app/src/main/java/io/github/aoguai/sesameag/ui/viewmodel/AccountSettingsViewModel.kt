@@ -445,7 +445,11 @@ class AccountSettingsViewModel(
         }
     }
 
-    private fun loadAccount(): AccountSettingsUiState = synchronized(Config) {
+    private fun loadAccount(): AccountSettingsUiState = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(Config) { loadAccountLocked() }
+    }
+
+    private fun loadAccountLocked(): AccountSettingsUiState {
         val normalizedUserId = AccountSlotRegistry.normalizeUserId(userId)
         require(normalizedUserId != null && normalizedUserId in Files.listExistingUserConfigIds()) {
             "账号配置不存在或账号标识无效"
@@ -502,7 +506,7 @@ class AccountSettingsViewModel(
         val pendingAuditClearKeys = fields.keys.filterTo(linkedSetOf()) {
             it.savedStateKey() in restoredAuditClears
         }
-        AccountSettingsUiState(
+        return AccountSettingsUiState(
             isLoading = false,
             groups = groups,
             drafts = mergedDrafts,

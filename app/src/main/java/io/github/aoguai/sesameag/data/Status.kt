@@ -540,78 +540,79 @@ class Status {
             save()
         }
 
-        @Synchronized
         @JvmStatic
-        fun load(currentUid: String?): Status {
-            return load(currentUid, true)
+        fun load(currentUid: String?): Status = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            synchronized(this) {
+                return@transaction load(currentUid, true)
+            }
         }
 
-        @Synchronized
         @JvmStatic
-        fun load(currentUid: String?, showLog: Boolean): Status {
-            if (currentUid.isNullOrEmpty()) {
-                if (showLog) Log.record(TAG, "用户为空，状态加载失败")
-                throw RuntimeException("用户为空，状态加载失败")
-            }
-
-            try {
-                val statusFile = Files.getStatusFile(currentUid)
-                if (statusFile!!.exists()) {
-                    val fileTime = statusFile.lastModified()
-                    val isUserChanged = currentUid != lastUid
-
-                    // 缓存检查：如果 UID 和文件修改时间都没变，跳过 IO
-                    if (!isUserChanged && fileTime != 0L && fileTime == lastModifiedTime) {
-                        // 同一用户重复加载，不打印 record 日志
-                    } else {
-                        if (showLog) {
-                            if (isUserChanged) Log.record(TAG, "加载用户[$currentUid]的 status.json")
-                            else Log.record(TAG, "加载 status.json")
-                        }
-
-                        val json = Files.readFromFile(statusFile)
-                        if (json.trim().isNotEmpty()) {
-                            JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(json, Status::class.java)
-
-                            val formatted = JsonUtil.formatJson(INSTANCE)
-                            if (formatted != json) {
-                                if (showLog) Log.record(TAG, "重新格式化 status.json")
-                                Files.write2File(formatted, statusFile)
-                            }
-                            lastModifiedTime = statusFile.lastModified()
-                            lastUid = currentUid
-                            // 🚩 关键：修正加载后的身份
-                            INSTANCE.currentUid = currentUid
-                        } else {
-                            if (showLog) Log.record(TAG, "配置文件为空，初始化默认配置")
-                            initializeDefaultConfig(statusFile)
-                        }
-                    }
-                } else {
-                    if (showLog) Log.record(TAG, "配置文件不存在，初始化默认配置")
-                    initializeDefaultConfig(statusFile)
+        fun load(currentUid: String?, showLog: Boolean): Status = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            synchronized(this) {
+                if (currentUid.isNullOrEmpty()) {
+                    if (showLog) Log.record(TAG, "用户为空，状态加载失败")
+                    throw RuntimeException("用户为空，状态加载失败")
                 }
-            } catch (t: Throwable) {
-                Log.printStackTrace(TAG, t)
-                if (showLog) Log.record(TAG, "状态文件格式有误，已重置")
-                resetAndSaveConfig()
-            }
 
-            // 无论加载还是初始化，确保身份锚定
-            if (INSTANCE.currentUid == null) INSTANCE.currentUid = currentUid
+                try {
+                    val statusFile = Files.getStatusFile(currentUid)
+                    if (statusFile!!.exists()) {
+                        val fileTime = statusFile.lastModified()
+                        val isUserChanged = currentUid != lastUid
 
-            // 无论是否命中缓存，日期检查逻辑保持不变
-            if (updateDay(Calendar.getInstance())) {
-                if (showLog) Log.record(TAG, "发现日期更新，重置 status.json 状态")
-                // 如果过期重置了，重新确保新日期的身份和时间有效
-                INSTANCE.currentUid = currentUid
-                INSTANCE.saveTime = System.currentTimeMillis()
-            }
+                        // 缓存检查：如果 UID 和文件修改时间都没变，跳过 IO
+                        if (!isUserChanged && fileTime != 0L && fileTime == lastModifiedTime) {
+                            // 同一用户重复加载，不打印 record 日志
+                        } else {
+                            if (showLog) {
+                                if (isUserChanged) Log.record(TAG, "加载用户[$currentUid]的 status.json")
+                                else Log.record(TAG, "加载 status.json")
+                            }
 
-            if (INSTANCE.saveTime == 0L) {
-                INSTANCE.saveTime = System.currentTimeMillis()
+                            val json = Files.readFromFile(statusFile)
+                            if (json.trim().isNotEmpty()) {
+                                JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(json, Status::class.java)
+
+                                val formatted = JsonUtil.formatJson(INSTANCE)
+                                if (formatted != json) {
+                                    if (showLog) Log.record(TAG, "重新格式化 status.json")
+                                    Files.write2File(formatted, statusFile)
+                                }
+                                lastModifiedTime = statusFile.lastModified()
+                                lastUid = currentUid
+                                // 🚩 关键：修正加载后的身份
+                                INSTANCE.currentUid = currentUid
+                            } else {
+                                if (showLog) Log.record(TAG, "配置文件为空，初始化默认配置")
+                                initializeDefaultConfig(statusFile)
+                            }
+                        }
+                    } else {
+                        if (showLog) Log.record(TAG, "配置文件不存在，初始化默认配置")
+                        initializeDefaultConfig(statusFile)
+                    }
+                } catch (t: Throwable) {
+                    Log.printStackTrace(TAG, "状态加载失败，保留原文件", t)
+                    throw t
+                }
+
+                // 无论加载还是初始化，确保身份锚定
+                if (INSTANCE.currentUid == null) INSTANCE.currentUid = currentUid
+
+                // 无论是否命中缓存，日期检查逻辑保持不变
+                if (updateDay(Calendar.getInstance())) {
+                    if (showLog) Log.record(TAG, "发现日期更新，重置 status.json 状态")
+                    // 如果过期重置了，重新确保新日期的身份和时间有效
+                    INSTANCE.currentUid = currentUid
+                    INSTANCE.saveTime = System.currentTimeMillis()
+                }
+
+                if (INSTANCE.saveTime == 0L) {
+                    INSTANCE.saveTime = System.currentTimeMillis()
+                }
+                return@transaction INSTANCE
             }
-            return INSTANCE
         }
 
         private fun initializeDefaultConfig(statusFile: java.io.File) {
@@ -663,41 +664,42 @@ class Status {
             }
         }
 
-        @Synchronized
         @JvmStatic
-        fun save(nowCalendar: Calendar = Calendar.getInstance()) {
-            io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
-            val targetUid = UserMap.currentUid
-            if (targetUid.isNullOrEmpty()) {
-                Log.record(TAG, "用户为空，状态保存失败")
-                throw RuntimeException("用户为空，状态加载失败")
-            }
-
-            // 🚩 核心防御：如果内存里的 UID 与当前全局 UID 不符，说明处于切换中，严禁写入
-            if (INSTANCE.currentUid != null && INSTANCE.currentUid != targetUid) {
-                Log.record(TAG, "拒绝跨账号保存: Memory(${INSTANCE.currentUid}) -> Disk($targetUid)")
-                return
-            }
-
-            if (updateDay(nowCalendar)) {
-                Log.record(TAG, "重置 status.json")
-            } else {
-                Log.record(TAG, "保存 status.json")
-            }
-            val lastSaveTime = INSTANCE.saveTime
-            try {
-                INSTANCE.currentUid = targetUid
-                INSTANCE.saveTime = System.currentTimeMillis()
-                val statusFile = Files.getStatusFile(targetUid)!!
-                check(Files.write2File(JsonUtil.formatJson(INSTANCE), statusFile)) {
-                    "状态保存失败: ${statusFile.absolutePath}"
+        fun save(nowCalendar: Calendar = Calendar.getInstance()): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            synchronized(this) {
+                io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent()
+                val targetUid = UserMap.currentUid
+                if (targetUid.isNullOrEmpty()) {
+                    Log.record(TAG, "用户为空，状态保存失败")
+                    throw RuntimeException("用户为空，状态加载失败")
                 }
-                // 关键：更新标记，防止下一次 load 触发冗余读取
-                lastModifiedTime = statusFile.lastModified()
-                lastUid = targetUid
-            } catch (e: Exception) {
-                INSTANCE.saveTime = lastSaveTime
-                throw e
+
+                // 🚩 核心防御：如果内存里的 UID 与当前全局 UID 不符，说明处于切换中，严禁写入
+                if (INSTANCE.currentUid != null && INSTANCE.currentUid != targetUid) {
+                    Log.record(TAG, "拒绝跨账号保存: Memory(${INSTANCE.currentUid}) -> Disk($targetUid)")
+                    return@transaction
+                }
+
+                if (updateDay(nowCalendar)) {
+                    Log.record(TAG, "重置 status.json")
+                } else {
+                    Log.record(TAG, "保存 status.json")
+                }
+                val lastSaveTime = INSTANCE.saveTime
+                try {
+                    INSTANCE.currentUid = targetUid
+                    INSTANCE.saveTime = System.currentTimeMillis()
+                    val statusFile = Files.getStatusFile(targetUid)!!
+                    check(Files.write2File(JsonUtil.formatJson(INSTANCE), statusFile)) {
+                        "状态保存失败: ${statusFile.absolutePath}"
+                    }
+                    // 关键：更新标记，防止下一次 load 触发冗余读取
+                    lastModifiedTime = statusFile.lastModified()
+                    lastUid = targetUid
+                } catch (e: Exception) {
+                    INSTANCE.saveTime = lastSaveTime
+                    throw e
+                }
             }
         }
 
@@ -764,20 +766,21 @@ class Status {
          */
         @JvmStatic
         @JvmOverloads
-        @Synchronized
-        fun setFlagToday(flag: String, retryTimes: String? = null, expectedUserId: String? = null) {
-            if (expectedUserId != null) {
-                check(UserMap.currentUid == expectedUserId && INSTANCE.currentUid == expectedUserId) { "今日标记账号已变化" }
-                check(!ApplicationHookConstants.isOffline()) { "离线状态不能确认好友同步完成" }
-            }
-            if (ApplicationHookConstants.isOffline()) {
-                if (offlineSkippedTodayFlags.add(flag)) {
-                    Log.record(TAG, "离线模式跳过今日标识: $flag")
+        fun setFlagToday(flag: String, retryTimes: String? = null, expectedUserId: String? = null): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            synchronized(this) {
+                if (expectedUserId != null) {
+                    check(UserMap.currentUid == expectedUserId && INSTANCE.currentUid == expectedUserId) { "今日标记账号已变化" }
+                    check(!ApplicationHookConstants.isOffline()) { "离线状态不能确认好友同步完成" }
                 }
-                return
-            }
+                if (ApplicationHookConstants.isOffline()) {
+                    if (offlineSkippedTodayFlags.add(flag)) {
+                        Log.record(TAG, "离线模式跳过今日标识: $flag")
+                    }
+                    return@transaction
+                }
 
-            setFlagTodayInternal(flag, retryTimes)
+                setFlagTodayInternal(flag, retryTimes)
+            }
         }
 
         /**
@@ -890,7 +893,6 @@ class Status {
          * Clears the general daily flag stores for [userId] without changing the active account.
          * It intentionally preserves all non-flag runtime collections in status.json.
          */
-        @Synchronized
         @JvmStatic
         fun clearAllTodayFlagsForUser(userId: String): TodayFlagClearResult =
             mutateTodayFlagsForUser(userId) { status ->
@@ -903,7 +905,6 @@ class Status {
             }
 
         /** Clears every registered daily flag that belongs to the given configuration module. */
-        @Synchronized
         @JvmStatic
         fun clearModuleTodayFlagsForUser(userId: String, modelCode: String): TodayFlagClearResult =
             mutateTodayFlagsForUser(userId) { status ->
@@ -911,7 +912,6 @@ class Status {
             }
 
         /** Clears only the concrete daily flags currently associated with one configuration field. */
-        @Synchronized
         @JvmStatic
         fun clearFieldTodayFlagsForUser(
             userId: String,
@@ -925,45 +925,47 @@ class Status {
         private fun mutateTodayFlagsForUser(
             userId: String,
             mutation: (Status) -> Int,
-        ): TodayFlagClearResult {
-            val targetUserId = userId.trim()
-            if (targetUserId.isEmpty()) {
-                return TodayFlagClearResult(userId = userId, errorMessage = "账号标识无效")
-            }
-            val statusFile = Files.getStatusFile(targetUserId)
-                ?: return TodayFlagClearResult(userId = targetUserId, errorMessage = "无法定位账号每日状态文件")
-            if (!statusFile.exists()) {
-                return TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件不存在")
-            }
-
-            return try {
-                val raw = Files.readFromFile(statusFile)
-                if (raw.isBlank()) {
-                    TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件为空")
-                } else {
-                    val detachedStatus = JsonUtil.copyMapper().readValue(raw, Status::class.java)
-                    val removedCount = mutation(detachedStatus)
-                    if (removedCount <= 0) {
-                        TodayFlagClearResult(userId = targetUserId)
-                    } else if (!Files.write2File(JsonUtil.formatJson(detachedStatus), statusFile)) {
-                        TodayFlagClearResult(userId = targetUserId, errorMessage = "每日状态文件写入失败")
-                    } else {
-                        // The active in-memory Status may refer to this account, so force its next load to read disk.
-                        lastModifiedTime = 0L
-                        lastUid = null
-                        TodayFlagClearResult(
-                            userId = targetUserId,
-                            removedCount = removedCount,
-                            written = true,
-                        )
-                    }
+        ): TodayFlagClearResult = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            synchronized(this) {
+                val targetUserId = userId.trim()
+                if (targetUserId.isEmpty()) {
+                    return@transaction TodayFlagClearResult(userId = userId, errorMessage = "账号标识无效")
                 }
-            } catch (t: Throwable) {
-                Log.printStackTrace(TAG, "清除账号[$targetUserId]每日标识失败", t)
-                TodayFlagClearResult(
-                    userId = targetUserId,
-                    errorMessage = t.message ?: "每日状态文件格式有误",
-                )
+                val statusFile = Files.getStatusFile(targetUserId)
+                    ?: return@transaction TodayFlagClearResult(userId = targetUserId, errorMessage = "无法定位账号每日状态文件")
+                if (!statusFile.exists()) {
+                    return@transaction TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件不存在")
+                }
+
+                return@transaction try {
+                    val raw = Files.readFromFile(statusFile)
+                    if (raw.isBlank()) {
+                        TodayFlagClearResult(userId = targetUserId, errorMessage = "账号每日状态文件为空")
+                    } else {
+                        val detachedStatus = JsonUtil.copyMapper().readValue(raw, Status::class.java)
+                        val removedCount = mutation(detachedStatus)
+                        if (removedCount <= 0) {
+                            TodayFlagClearResult(userId = targetUserId)
+                        } else if (!Files.write2File(JsonUtil.formatJson(detachedStatus), statusFile)) {
+                            TodayFlagClearResult(userId = targetUserId, errorMessage = "每日状态文件写入失败")
+                        } else {
+                            // The active in-memory Status may refer to this account, so force its next load to read disk.
+                            lastModifiedTime = 0L
+                            lastUid = null
+                            TodayFlagClearResult(
+                                userId = targetUserId,
+                                removedCount = removedCount,
+                                written = true,
+                            )
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.printStackTrace(TAG, "清除账号[$targetUserId]每日标识失败", t)
+                    TodayFlagClearResult(
+                        userId = targetUserId,
+                        errorMessage = t.message ?: "每日状态文件格式有误",
+                    )
+                }
             }
         }
 

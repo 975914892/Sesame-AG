@@ -25,6 +25,7 @@ class SesameApplication : Application() {
         super.onCreate()
         appContext = applicationContext
         ToastUtil.init(this)
+        io.github.aoguai.sesameag.storage.PrivateStorage.initialize(this)
         Log.init(this)
         io.github.aoguai.sesameag.util.ModuleDiagnostics.event("application", "created")
         ThemeManager.init(this)

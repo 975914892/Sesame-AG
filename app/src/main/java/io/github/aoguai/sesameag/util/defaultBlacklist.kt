@@ -380,7 +380,7 @@ private val youthPrivilegeDefaultBlacklist =
 private val sportsDefaultBlacklist =
     setOf(
         // 运动
-        "AP19300602", // 添加支付宝小组件
+        "AP19300602",
         "AP11258305", // 医疗健康添加首页任务
         "STEP_STETLEMENT_TASK", // 步数满1000
         "DURATION_STETLEMENT_TASK", // 锻炼30分钟
@@ -408,7 +408,7 @@ private val myBankWelfareDefaultBlacklist =
         "AP12333795", // 完成1笔借呗支用：需真实借款支用行为
         "AP18374962", // 领取网商贷备用金：事件规则明确拒绝通用send（10000005）
         "AP12350308", // 生存33天解锁3次地图迷雾
-        "AP19360653", // 支付宝ETC办理立减10元
+        "AP19360653",
         "AP17360654", // 免费查询ETC办理资格
     )
 

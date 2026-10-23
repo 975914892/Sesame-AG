@@ -401,29 +401,22 @@ class LogViewerViewModel(
             _uiState.update { it.copy(isExporting = true) }
             ModuleDiagnostics.event("export_log", "requested", "file=${File(path).name}")
             try {
-                if (!PermissionUtil.checkFilePermissions(context)) {
-                    ModuleDiagnostics.event("export_log", "permission_denied", "file=${File(path).name}")
-                    ToastUtil.showUiToast(context, "导出失败：缺少文件访问权限")
-                    return@launch
-                }
                 val sourceFile = File(path)
                 if (!sourceFile.exists()) {
                     ModuleDiagnostics.event("export_log", "source_missing", "file=${sourceFile.name}")
                     ToastUtil.showUiToast(context, "源文件不存在")
                     return@launch
                 }
-                val exportFile = withContext(Dispatchers.IO) {
-                    Files.exportFile(sourceFile, true)
-                }
-
-                ModuleDiagnostics.event("export_log", if (exportFile != null && exportFile.exists()) "completed" else "failed",
-                    "file=${sourceFile.name} size=${exportFile?.length() ?: 0}")
-                if (exportFile != null && exportFile.exists()) {
-                    val msg = "${context.getString(R.string.file_exported)} ${exportFile.path}"
-                    ToastUtil.showUiToast(context, msg)
-                } else {
-                    ToastUtil.showUiToast(context, "导出失败")
-                }
+                val exportedFile = withContext(Dispatchers.IO) {
+                    Files.exportFile(context, sourceFile, hasTime = true)
+                } ?: error("无法保存到下载目录")
+                ModuleDiagnostics.event("export_log", "completed", "file=${exportedFile.name}")
+                val relativePath = exportedFile.relativeTo(android.os.Environment.getExternalStorageDirectory())
+                ToastUtil.makeText(
+                    context,
+                    "${context.getString(R.string.file_exported)}：${relativePath.parent}/\n${relativePath.name}",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

@@ -366,7 +366,7 @@ object AccountSlotRegistry {
     private fun configuredUserIds(): List<String> =
         Files.listExistingUserConfigIds()
             .asSequence()
-            .map { userId -> File(Files.CONFIG_DIR, userId) }
+            .map { userId -> Files.child(Files.CONFIG_DIR, userId) }
             .mapNotNull(::verifiedDirectoryUserId)
             .distinct()
             .sorted()
@@ -374,8 +374,8 @@ object AccountSlotRegistry {
 
     private fun verifiedDirectoryUserId(directory: File): String? {
         val directoryUserId = normalizeUserId(directory.name) ?: return null
-        val configFile = File(directory, "config_v2.json")
-        val selfFile = File(directory, "self.json")
+        val configFile = Files.child(directory, "config_v2.json")
+        val selfFile = Files.child(directory, "self.json")
         if (!configFile.isFile || configFile.length() == 0L || !selfFile.isFile || selfFile.length() == 0L) {
             return null
         }
@@ -386,7 +386,7 @@ object AccountSlotRegistry {
     }
 
     private fun hasVerifiedConfiguredUser(userId: String): Boolean =
-        verifiedDirectoryUserId(File(Files.CONFIG_DIR, userId)) == userId
+        verifiedDirectoryUserId(Files.child(Files.CONFIG_DIR, userId)) == userId
 
     private fun bootstrapRecord(): AccountSlotRecord {
         val candidates = configuredUserIds()
@@ -486,50 +486,22 @@ object AccountSlotRegistry {
     private fun <T> withLockedRecord(
         recoverExpiredPending: Boolean = true,
         operation: (LoadedRecord) -> LockedResult<T>,
-    ): T? =
-        synchronized(recordMutationLock) {
-            runCatching {
+    ): T? = runCatching {
+        io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            synchronized(recordMutationLock) {
                 val configDir = Files.CONFIG_DIR
-                require(configDir.isDirectory || configDir.mkdirs()) { "config_dir_unavailable" }
-                val lockFile = File(configDir, LOCK_FILE_NAME)
-                FileChannel.open(lockFile.toPath(), CREATE, WRITE).use { channel ->
-                    // 等待短暂更新而不撤销账号资格；非阻塞申请避免内核按进程检测出伪死锁。
-                    var fileLock: FileLock? = null
-                    while (fileLock == null) {
-                        if (Thread.currentThread().isInterrupted) throw FileLockInterruptionException()
-                        fileLock = channel.tryLock()
-                        if (fileLock == null) {
-                            try {
-                                Thread.sleep(25L)
-                            } catch (_: InterruptedException) {
-                                Thread.currentThread().interrupt()
-                                throw FileLockInterruptionException()
-                            }
-                        }
-                    }
-                    fileLock.use {
-                        val loaded = requireNotNull(
-                            readLockedRecord(configDir, recoverExpiredPending),
-                        ) { "registry_read_failed" }
-                        val result = operation(loaded)
-                        val recordToWrite = result.updatedRecord ?: loaded.record.takeIf { loaded.needsWrite }
-                        if (recordToWrite != null) {
-                            check(writeLockedRecord(configDir, recordToWrite)) { "registry_write_failed" }
-                        }
-                        result.value
-                    }
-                }
-            }.onFailure { error ->
-                when (error) {
-                    is CancellationException -> throw error
-                    is FileLockInterruptionException, is ClosedByInterruptException -> {
-                        Thread.currentThread().interrupt()
-                        throw CancellationException("账号槽位访问已取消").apply { initCause(error) }
-                    }
-                    else -> logRegistryUnavailable(error)
-                }
-            }.getOrNull()
+                check(configDir.isDirectory || configDir.mkdirs()) { "config_dir_unavailable" }
+                val loaded = requireNotNull(readLockedRecord(configDir, recoverExpiredPending)) { "registry_read_failed" }
+                val result = operation(loaded)
+                val record = result.updatedRecord ?: loaded.record.takeIf { loaded.needsWrite }
+                if (record != null) check(writeLockedRecord(configDir, record)) { "registry_write_failed" }
+                result.value
+            }
         }
+    }.onFailure { error ->
+        if (error is CancellationException) throw error
+        logRegistryUnavailable(error)
+    }.getOrNull()
 
     private fun logRegistryUnavailable(error: Throwable) {
         val now = System.currentTimeMillis()
@@ -550,7 +522,7 @@ object AccountSlotRegistry {
         configDir: File,
         recoverExpiredPending: Boolean,
     ): LoadedRecord? {
-        val recordFile = File(configDir, RECORD_FILE_NAME)
+        val recordFile = Files.child(configDir, RECORD_FILE_NAME)
         if (!recordFile.exists()) {
             return LoadedRecord(bootstrapRecord(), needsWrite = true)
         }
@@ -564,24 +536,7 @@ object AccountSlotRegistry {
 
     private fun writeLockedRecord(configDir: File, record: AccountSlotRecord): Boolean {
         val canonicalRecord = validateRecord(record) ?: return false
-        var temporaryFile: File? = null
-        return runCatching {
-            temporaryFile = File.createTempFile("$RECORD_FILE_NAME.", ".tmp", configDir)
-            temporaryFile!!.writeText(JsonUtil.formatJson(canonicalRecord), Charsets.UTF_8)
-            NioFiles.move(
-                temporaryFile!!.toPath(),
-                File(configDir, RECORD_FILE_NAME).toPath(),
-                ATOMIC_MOVE,
-                REPLACE_EXISTING,
-            )
-            true
-        }.getOrDefault(false).also { success ->
-            if (!success) {
-                Log.record(TAG, "account_slot_registry_write_failed")
-                Log.w(TAG, "account_slot_registry_write_failed")
-            }
-            temporaryFile?.takeIf { it.exists() }?.delete()
-        }
+        return Files.writeAtomically(JsonUtil.formatJson(canonicalRecord), Files.child(configDir, RECORD_FILE_NAME))
     }
 
     internal fun shortHash(value: String): String =

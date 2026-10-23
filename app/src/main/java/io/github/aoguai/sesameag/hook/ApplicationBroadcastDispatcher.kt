@@ -119,7 +119,7 @@ internal object ApplicationBroadcastDispatcher {
                 reply(when {
                     targetUserId != activeUserId -> "设置已保存，切换到该账号后生效"
                     completed && io.github.aoguai.sesameag.data.Config.isLoadedFor(targetUserId) -> "设置已保存并生效"
-                    else -> "设置已保存，尚未确认运行态，请在支付宝中重新加载配置"
+                    else -> "设置已保存，尚未确认运行态，请在目标应用中重新加载配置"
                 })
             }
         }

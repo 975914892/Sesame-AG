@@ -469,20 +469,11 @@ object ExchangeOptionsCache {
     ) {
         checkCurrent()
         val file = Files.getTargetFileofUser(userId, fileName(target)) ?: error("无法获取兑换列表缓存路径")
-        val temporary = File(file.parentFile, "${file.name}.tmp")
-        try {
-            val body = JSONObject().put("rows", org.json.JSONArray(JsonUtil.formatJson(snapshot.rows, false)))
-                .put("payload", snapshot.payload).put("context", context).put("runId", runId)
-                .put("userId", userId).put("savedAt", System.currentTimeMillis()).toString()
-            temporary.outputStream().use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
-                output.fd.sync()
-            }
-            checkCurrent()
-            android.system.Os.rename(temporary.absolutePath, file.absolutePath)
-        } finally {
-            temporary.delete()
-        }
+        val body = JSONObject().put("rows", org.json.JSONArray(JsonUtil.formatJson(snapshot.rows, false)))
+            .put("payload", snapshot.payload).put("context", context).put("runId", runId)
+            .put("userId", userId).put("savedAt", System.currentTimeMillis()).toString()
+        checkCurrent()
+        check(Files.writeAtomically(body, file)) { "保存完整兑换列表失败" }
         ExchangeFetchProgress.report(userId, target, "整轮完成，完整缓存已保存，共 ${snapshot.rows.size} 项")
     }
 

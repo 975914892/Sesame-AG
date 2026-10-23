@@ -12,10 +12,10 @@ import java.util.UUID
 
 /**
  * @file AntSportsRpcCall.kt
- * @brief 支付宝蚂蚁运动（AntSports）RPC 接口调用集合
+ * @brief 蚂蚁运动（AntSports）RPC 接口调用集合
  *
  * @details
- * 本模块提供了支付宝蚂蚁运动所有功能的 RPC 接口的 Kotlin 封装版本。
+ * 本模块提供了支付蚂蚁运动所有功能的 RPC 接口的 Kotlin 封装版本。
  * 包括：
  * - 运动任务查询与完成
  * - 能量球（金币）收集与捐赠

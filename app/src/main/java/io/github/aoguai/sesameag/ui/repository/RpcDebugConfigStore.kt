@@ -16,7 +16,7 @@ internal data class RpcDebugLoadResult(
 
 internal class RpcDebugConfigStore {
 
-    private val configFile = File(Files.MAIN_DIR, ROOT_CONFIG_FILE_NAME)
+    private val configFile = Files.child(Files.MAIN_DIR, ROOT_CONFIG_FILE_NAME)
     private val objectMapper = JsonMapper.builder()
         .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
         .build()

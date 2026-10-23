@@ -124,7 +124,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _userList = MutableStateFlow<List<UserEntity>>(emptyList())
     val userList: StateFlow<List<UserEntity>> = _userList.asStateFlow()
 
-    private val _accountSlots = MutableStateFlow(AccountSlotRegistry.snapshot())
+    private val _accountSlots = MutableStateFlow(AccountSlotSnapshot(
+        migrationState = io.github.aoguai.sesameag.hook.AccountSlotMigrationState.READY,
+        activeUserIds = emptyList(), candidateUserIds = emptyList(), errorCode = "storage_not_ready",
+    ))
     val accountSlots: StateFlow<AccountSlotSnapshot> = _accountSlots.asStateFlow()
 
     private val _isLegalAccepted = MutableStateFlow(false)
@@ -163,6 +166,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun initAppLogic(): Boolean {
+        if (!io.github.aoguai.sesameag.storage.PrivateStorage.isReady) return false
         if (isInitialized) return false
         isInitialized = true
         registerAccountContextReceiver()
@@ -438,7 +442,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         configRefreshJob?.cancel()
         configRefreshJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                check(PermissionUtil.checkFilePermissions(getApplication()))
+                io.github.aoguai.sesameag.storage.PrivateStorage.requireReady()
                 val latestUserIds = Files.listExistingUserConfigIds(requireReadable = true)
                 val newList = mutableListOf<UserEntity>()
                 for (userId in latestUserIds) {

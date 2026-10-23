@@ -1,372 +1,77 @@
 package io.github.aoguai.sesameag.util
 
-import android.annotation.SuppressLint
 import com.fasterxml.jackson.core.type.TypeReference
-import com.fasterxml.jackson.core.util.DefaultIndenter
-import com.fasterxml.jackson.core.util.DefaultPrettyPrinter
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
+import io.github.aoguai.sesameag.storage.StoreAccess
 import java.io.File
-import java.io.IOException
-import java.io.RandomAccessFile
-import java.nio.channels.FileLock
-import java.nio.channels.FileLockInterruptionException
-import java.nio.file.ClosedWatchServiceException
-import java.nio.file.Path
-import java.nio.file.StandardWatchEventKinds
-import java.nio.file.WatchService
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.read
-import kotlin.concurrent.write
 
 object DataStore {
-    private const val TAG = "DataStore"
-    private const val FILE_NAME = "DataStore.json"
+    private val mapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+    private var storageFile: File? = null
+    private var listener: (() -> Unit)? = null
+    private var stopObserving: (() -> Unit)? = null
 
-    // 配置 Jackson：忽略未知的属性，防止版本升级导致崩溃
-    private val mapper = jacksonObjectMapper().apply {
-        configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-    }
+    fun setOnChangeListener(listener: () -> Unit) { this.listener = listener }
+    fun shutdown() = shutdownWatcher()
+    fun shutdownWatcher() { stopObserving?.invoke(); stopObserving = null }
 
-    private val data = ConcurrentHashMap<String, Any>()
-    private val lock = ReentrantReadWriteLock()
-    private lateinit var storageFile: File
-
-    @Volatile
-    private var watcherJob: Job? = null
-
-    @Volatile
-    private var watchService: WatchService? = null
-
-    private var onChangeListener: (() -> Unit)? = null
-
-    fun setOnChangeListener(listener: () -> Unit) {
-        onChangeListener = listener
-    }
-
-    /**
-     * 关闭 DataStore 的文件监听（用于模块销毁 / 用户切换等场景）。
-     * 注意：不会清空内存数据，仅停止 watcher，避免泄露与重复 watcher。
-     */
-    fun shutdown() {
-        shutdownWatcher()
-    }
-
-    /**
-     * 初始化 DataStore
-     * @param dir 存储目录
-     */
     fun init(dir: File) {
-        // 0. 避免重复 watcher（尤其是 UI / Hook 多次 init）
+        StoreAccess.transaction {
+            check(dir.isDirectory || dir.mkdirs()) { "无法创建配置目录" }
+            storageFile = Files.child(dir, "DataStore.json")
+            if (!storageFile!!.exists()) save(emptyMap()) else load()
+        }
         shutdownWatcher()
-
-        // 1. 确保目录存在 (修复崩溃的核心)
-        if (!dir.exists()) {
-            if (!dir.mkdirs()) {
-                Log.e(TAG, "Failed to create directory: ${dir.absolutePath}")
-                // 如果是 Xposed 环境，这里可能因为权限不足失败，但我们尝试继续
-            }
-        }
-
-        // 2. 设置目录权限为 777 (对 Xposed 模块至关重要，否则宿主读不到)
-        setWorldReadableWritable(dir)
-
-        lock.write {
-            storageFile = File(dir, FILE_NAME)
-            withStorageLock {
-                if (!storageFile.exists()) {
-                    saveToDisk(emptyMap())
-                } else {
-                    forceLoadFromDisk()
-                }
-            }
-        }
-        startWatcherNio()
-    }
-
-    /**
-     * 设置文件/目录为全局可读写 (Linux 权限 777/666)
-     * 这在 Xposed 跨进程通信中通常是必须的
-     */
-    @SuppressLint("SetWorldReadable", "SetWorldWritable")
-    private fun setWorldReadableWritable(file: File) {
-        try {
-            file.setReadable(true, false)
-            file.setWritable(true, false)
-            file.setExecutable(true, false) // 对目录需要执行权限
-        } catch (_: Exception) {
-            // 忽略某些系统限制导致的失败
+        stopObserving = StoreAccess.observe { change ->
+            if (change.collection == 1 && (change.name == "DataStore.json" || change.name.isEmpty())) listener?.invoke()
         }
     }
 
-    inline fun <reified T : Any> getOrCreate(key: String): T {
-        return getOrCreate(key, object : TypeReference<T>() {})
+    private fun load(): MutableMap<String, Any> {
+        val file = checkNotNull(storageFile) { "DataStore 未初始化" }
+        return mapper.readValue(Files.readText(file), object : TypeReference<MutableMap<String, Any>>() {})
+    }
+    private fun save(data: Map<String, Any>) {
+        check(Files.writeAtomically(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data), checkNotNull(storageFile)))
     }
 
-    fun <T> get(key: String, clazz: Class<T>): T? = lock.read {
-        try {
-            data[key]?.let { mapper.convertValue(it, clazz) }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error converting value for key: $key", e)
-            null
-        }
+    inline fun <reified T : Any> getOrCreate(key: String): T = getOrCreate(key, object : TypeReference<T>() {})
+    fun <T> get(key: String, clazz: Class<T>): T? = StoreAccess.transaction {
+        load()[key]?.let { mapper.convertValue(it, clazz) }
     }
-
-    /* -------------------------------------------------- */
-    /*  类型安全读取                                       */
-    /* -------------------------------------------------- */
-    fun <T : Any> getOrCreate(key: String, typeRef: TypeReference<T>): T = withStorageLock {
-        forceLoadFromDisk()
-        data[key]?.let {
-            try {
-                return@withStorageLock mapper.convertValue(it, typeRef)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to read value for key $key; keeping stored data.", e)
-                throw e
-            }
-        }
-
-        val default: T = createDefault(typeRef)
-        val updated = HashMap(data)
-        updated[key] = default
-        saveToDisk(updated)
-        default
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun <T> createDefault(typeRef: TypeReference<T>): T {
-        val javaType = mapper.typeFactory.constructType(typeRef)
-        return when (val rawClass = javaType.rawClass) {
-            List::class.java, java.util.List::class.java -> ArrayList<Any>() as T
-            Set::class.java, java.util.Set::class.java -> LinkedHashSet<Any>() as T
-            Map::class.java, java.util.Map::class.java -> LinkedHashMap<String, Any>() as T
-            String::class.java -> "" as T
-            Boolean::class.java, java.lang.Boolean::class.java -> false as T
-            Int::class.java, Integer::class.java -> 0 as T
-            Long::class.java, java.lang.Long::class.java -> 0L as T
-            else -> {
-                try {
-                    // 尝试无参构造
-                    rawClass.getDeclaredConstructor().newInstance() as T
-                } catch (e: Exception) {
-                    Log.e(TAG, "Cannot create default instance for ${rawClass.simpleName}, relying on Jackson null handling or crash.")
-                    throw RuntimeException("Could not create default value for ${rawClass.name}", e)
-                }
-            }
-        }
-    }
-
-    // 注册表锁在外层；存储读写固定先取进程内锁，再取文件锁。
-    // 使用独立锁文件，避免原子替换 DataStore.json 后文件锁仍指向旧 inode。
-    private fun <T> withStorageLock(block: () -> T): T = lock.write {
-        if (!::storageFile.isInitialized) return@write block()
-        val lockFile = File(storageFile.parentFile, ".data-store.lock")
-        RandomAccessFile(lockFile, "rw").use { file ->
-            setWorldReadableWritable(lockFile)
-            // 与注册表一致使用非阻塞申请，避免多线程跨进程锁被内核按进程判为死锁。
-            var fileLock: FileLock? = null
-            while (fileLock == null) {
-                if (Thread.currentThread().isInterrupted) throw FileLockInterruptionException()
-                fileLock = file.channel.tryLock()
-                if (fileLock == null) {
-                    try {
-                        Thread.sleep(25L)
-                    } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        throw FileLockInterruptionException()
-                    }
-                }
-            }
-            fileLock.use { block() }
-        }
-    }
-
-    /** 调用方持有文件锁；读取失败必须中止写入，不能以旧快照覆盖磁盘。 */
-    private fun forceLoadFromDisk() {
-        if (!::storageFile.isInitialized) return
-        val loaded: Map<String, Any> = mapper.readValue(storageFile)
-        data.clear()
-        data.putAll(loaded)
-    }
-
-    private fun loadFromDisk() {
-        if (!::storageFile.isInitialized) return
-        try {
-            withStorageLock { forceLoadFromDisk() }
-            // 即使其他读取已经刷新 data，也需要通知注册表失效；回调不能持有存储锁。
-            onChangeListener?.invoke()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to load config: ${e.message}")
-        }
-    }
-
-    private val prettyPrinter = DefaultPrettyPrinter().apply {
-        indentArraysWith(DefaultIndenter.SYSTEM_LINEFEED_INSTANCE)
-        indentObjectsWith(DefaultIndenter("    ", DefaultIndenter.SYS_LF))
-    }
-
-    private fun createWriteTempFile(): File {
-        val parentDir = storageFile.parentFile
-            ?: throw IllegalStateException("DataStore parent directory is missing")
-        if (!parentDir.exists() && !parentDir.mkdirs()) {
-            throw IllegalStateException("Failed to create DataStore directory: ${parentDir.absolutePath}")
-        }
-        setWorldReadableWritable(parentDir)
-        // 多进程共用固定 .tmp 会互相 rename/delete，临时文件必须按次唯一。
-        return File.createTempFile("${storageFile.name}.", ".tmp", parentDir)
-    }
-
-    private fun saveToDisk(snapshot: Map<String, Any>) {
-        if (!::storageFile.isInitialized) {
-            data.clear()
-            data.putAll(snapshot)
-            return
-        }
-        var tempFile: File? = null
-        try {
-            tempFile = createWriteTempFile()
-            mapper.writer(prettyPrinter).writeValue(tempFile, snapshot)
-            setWorldReadableWritable(tempFile)
-            // 不降级为覆盖式 copy：失败时必须保留旧的完整文件。
-            if (!tempFile.renameTo(storageFile)) {
-                throw IOException("Failed to atomically replace ${storageFile.absolutePath}")
-            }
-            data.clear()
-            data.putAll(snapshot)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save config", e)
-            throw e
-        } finally {
-            if (tempFile?.exists() == true) {
-                tempFile.delete()
-            }
-        }
-    }
-
-    @Synchronized
-    fun shutdownWatcher() {
-        watcherJob?.cancel()
-        watcherJob = null
-
-        try {
-            watchService?.close()
-        } catch (_: Throwable) {
-            // ignore
-        }
-        watchService = null
-        Log.i(TAG, "DataStore watcher stopped")
-    }
-
-    private fun startWatcherNio() {
-        if (!::storageFile.isInitialized) return
-
-        watcherJob?.cancel()
-        watcherJob = GlobalThreadPools.execute(Dispatchers.IO) {
-            val path = storageFile.toPath().parent ?: return@execute
-
-            val watch = runCatching {
-                watchService?.close()
-                path.fileSystem.newWatchService()
-            }.getOrNull() ?: return@execute
-
-            watchService = watch
-            runCatching {
-                path.register(
-                    watch,
-                    StandardWatchEventKinds.ENTRY_CREATE,
-                    StandardWatchEventKinds.ENTRY_DELETE,
-                    StandardWatchEventKinds.ENTRY_MODIFY
-                )
-            }.onFailure { e ->
-                runCatching { watch.close() }
-                Log.e(TAG, "Failed to register watch service", e)
-                return@execute
-            }
-
-            try {
-                while (isActive) {
-                    val key = try {
-                        // 等待真实文件事件，避免空闲时每秒唤醒 CPU。shutdownWatcher() 会关闭 WatchService
-                        // 解除 take() 阻塞，因此不会牺牲账号切换和进程销毁时的可取消性。
-                        watch.take()
-                    } catch (_: ClosedWatchServiceException) {
-                        return@execute
-                    } catch (_: InterruptedException) {
-                        return@execute
-                    }
-
-                    var shouldReload = false
-                    key.pollEvents().forEach { event ->
-                        val changedPath = event.context() as? Path
-                        if (event.kind() == StandardWatchEventKinds.OVERFLOW ||
-                            changedPath?.toString() == storageFile.name
-                        ) {
-                            shouldReload = true
-                        }
-                    }
-
-                    if (shouldReload) {
-                        loadFromDisk()
-                    }
-
-                    if (!key.reset()) {
-                        return@execute
-                    }
-                }
-            } catch (_: CancellationException) {
-                // ignore
-            } catch (e: Exception) {
-                Log.e(TAG, "File watcher died", e)
-            } finally {
-                runCatching { watch.close() }
-                if (watchService === watch) {
-                    watchService = null
-                }
-                Log.i(TAG, "DataStore watcher exited")
-            }
-        }
-        Log.i(TAG, "DataStore watcher started: ${storageFile.absolutePath}")
-    }
-
-    /** 在同一次存储锁内读取最新值并更新；值未变化时不写盘。 */
-    fun <T : Any> update(
-        key: String,
-        typeRef: TypeReference<T>,
-        transform: (T?) -> T?,
-    ): T? = withStorageLock {
-        forceLoadFromDisk()
-        val current: T? = data[key]?.let { mapper.convertValue(it, typeRef) }
-        val value = transform(current)
-        if (value != current) {
-            val updated = HashMap(data)
-            if (value == null) {
-                updated.remove(key)
-            } else {
-                updated[key] = value
-            }
-            saveToDisk(updated)
-        }
+    fun <T : Any> getOrCreate(key: String, typeRef: TypeReference<T>): T = StoreAccess.transaction {
+        val data = load()
+        data[key]?.let { return@transaction mapper.convertValue(it, typeRef) }
+        val value: T = defaultValue(typeRef)
+        data[key] = value
+        save(data)
         value
     }
-
-    fun put(key: String, value: Any) = withStorageLock {
-        forceLoadFromDisk()
-        val updated = HashMap(data)
-        updated[key] = value
-        saveToDisk(updated)
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> defaultValue(typeRef: TypeReference<T>): T {
+        val type = mapper.typeFactory.constructType(typeRef).rawClass
+        return when (type) {
+            List::class.java -> arrayListOf<Any>()
+            Set::class.java -> linkedSetOf<Any>()
+            Map::class.java -> linkedMapOf<String, Any>()
+            String::class.java -> ""
+            Boolean::class.java, Boolean::class.javaObjectType -> false
+            Int::class.java, Int::class.javaObjectType -> 0
+            Long::class.java, Long::class.javaObjectType -> 0L
+            else -> type.getDeclaredConstructor().newInstance()
+        } as T
     }
-
-    fun remove(key: String) = withStorageLock {
-        forceLoadFromDisk()
-        val updated = HashMap(data)
-        updated.remove(key)
-        saveToDisk(updated)
+    fun <T : Any> update(key: String, typeRef: TypeReference<T>, transform: (T?) -> T?): T? = StoreAccess.transaction {
+        val data = load()
+        val current: T? = data[key]?.let { mapper.convertValue(it, typeRef) }
+        val updated = transform(current)
+        if (updated != current) {
+            if (updated == null) data.remove(key) else data[key] = updated
+            save(data)
+        }
+        updated
     }
+    fun put(key: String, value: Any) = StoreAccess.transaction { val data = load(); data[key] = value; save(data) }
+    fun remove(key: String) = StoreAccess.transaction { val data = load(); if (data.remove(key) != null) save(data) }
 }
-

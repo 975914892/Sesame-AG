@@ -161,13 +161,11 @@ class ApplicationHook {
 
         // 2. 进程检查。Lite 子进程只安装自然 RPC 抓包，不得进入任务运行时。
         if (shouldHookCaptureOnlyProcess()) {
-            installCaptureOnlyHooks(activeLoader)
             hookCaptureOnlyProcessAttach()
             return
         }
         if (!shouldHookProcess()) return
 
-        init(Files.CONFIG_DIR)
         if (isHooked) return
         isHooked = true
 
@@ -181,8 +179,6 @@ class ApplicationHook {
         hookLauncherResume()
         hookLoginResume()
         hookServiceLifecycle(apkPath)
-
-        HookUtil.hookOtherService(activeLoader)
     }
 
     private fun loadRemotePreferences(framework: String): SharedPreferences? {
@@ -225,42 +221,35 @@ class ApplicationHook {
         }
     }
 
-    private fun installCaptureOnlyHooks(activeLoader: ClassLoader) {
-        val installed = RpcTrafficCapture.installForCaptureOnlyProcess(activeLoader)
-        val application = runCatching {
-            val activityThread = Class.forName("android.app.ActivityThread")
-            activityThread.getDeclaredMethod("currentApplication").invoke(null) as? Application
-        }.getOrNull()
-        application?.let { Log.init(it) }
-        Log.runtime(
-            TAG,
-            "capture_only_hook_install: process=$finalProcessName installed=$installed applicationReady=${application != null}",
-        )
-    }
-
     private fun hookCaptureOnlyProcessAttach() {
         try {
             val attachMethod = findMethod(Application::class.java, "attach", Context::class.java)
             requireXposedInterface().hook(attachMethod).intercept { chain ->
                 val result = chain.proceed()
                 val context = chain.args[0] as? Context ?: return@intercept result
-                val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
-                if (!identityDecision.accepted || !RuntimeIdentityGuard.isCaptureOnlyProcess()) {
-                    val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
-                    val message =
-                        "capture_instance_rejected: $reasonCode process=$processName process_role=capture_only"
-                    logFrameworkWarning(message)
-                    android.util.Log.w(TAG, message)
-                    return@intercept result
+                execute(Dispatchers.IO) {
+                    val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
+                    if (!identityDecision.accepted || !RuntimeIdentityGuard.isCaptureOnlyProcess()) {
+                        val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
+                        val message =
+                            "capture_instance_rejected: $reasonCode process=$processName process_role=capture_only"
+                        logFrameworkWarning(message)
+                        android.util.Log.w(TAG, message)
+                        return@execute
+                    }
+                    if (!io.github.aoguai.sesameag.util.CommandUtil.connectStorage(context)) {
+                        android.util.Log.w(TAG, "模块存储未就绪，请打开模块完成数据迁移")
+                        return@execute
+                    }
+                    XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
+                    Log.init(context)
+                    val activeLoader = classLoader ?: return@execute
+                    val installed = RpcTrafficCapture.installForCaptureOnlyProcess(activeLoader, context)
+                    Log.runtime(
+                        TAG,
+                        "capture_only_hook_ready: process=$finalProcessName installed=$installed",
+                    )
                 }
-                XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
-                Log.init(context)
-                val activeLoader = classLoader ?: return@intercept result
-                val installed = RpcTrafficCapture.installForCaptureOnlyProcess(activeLoader)
-                Log.runtime(
-                    TAG,
-                    "capture_only_hook_ready: process=$finalProcessName installed=$installed",
-                )
                 result
             }
         } catch (e: Exception) {
@@ -275,31 +264,45 @@ class ApplicationHook {
                 val result = chain.proceed()
                 val context = chain.args[0] as? Context ?: return@intercept result
                 val application = chain.getThisObject() as? Application
-                val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
-                if (!identityDecision.accepted) {
-                    val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
-                    val message = "instance_rejected: $reasonCode process=$processName process_role=main"
-                    logFrameworkWarning(message)
-                    android.util.Log.w(TAG, message)
-                    return@intercept result
-                }
-                XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
-                appContext = context
-                mainHandler = Handler(Looper.getMainLooper())
-                Log.init(context)
-                // Application.attach 位于宿主启动主路径；反射安装和调度恢复延后到入口线程，
-                // 避免慢设备在 attach 阶段被这些非必要初始化阻塞。
-                ApplicationHookConstants.submitEntry("application_attach_init") {
-                    ensureScheduler()
-                    application?.let { PageStructureSnapshotter.install(it) }
-                    RpcTrafficCapture.install(classLoader!!)
+                // 身份确认包含跨进程绑定，不能在宿主启动线程等待。
+                execute(Dispatchers.IO) {
+                    val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
+                    if (!identityDecision.accepted) {
+                        val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
+                        val message = "instance_rejected: $reasonCode process=$processName process_role=main"
+                        logFrameworkWarning(message)
+                        android.util.Log.w(TAG, message)
+                        return@execute
+                    }
+                    if (!io.github.aoguai.sesameag.util.CommandUtil.connectStorage(context)) {
+                        android.util.Log.w(TAG, "模块存储未就绪，请打开模块完成数据迁移")
+                        return@execute
+                    }
+                    init(Files.CONFIG_DIR)
+                    appContext = context
+                    mainHandler = Handler(Looper.getMainLooper())
+                    Log.init(context)
+                    ApplicationHookConstants.submitEntry("application_attach_init") {
+                        XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
+                        ensureScheduler()
+                        application?.let { PageStructureSnapshotter.install(it) }
+                        RpcTrafficCapture.install(classLoader!!, context)
 
-                    SecurityBodyHelper.init(classLoader!!)
-                    AlipayMiniMarkHelper.init(classLoader!!)
-                    LocationHelper.init(classLoader!!)
-                    AuthCodeHelper.init(classLoader!!)
+                        SecurityBodyHelper.init(classLoader!!)
+                        AlipayMiniMarkHelper.init(classLoader!!)
+                        LocationHelper.init(classLoader!!)
+                        AuthCodeHelper.init(classLoader!!)
 
-                    initVersionInfo(packageName)
+                        initVersionInfo(packageName)
+                        // Service 可能已在身份确认期间创建，补接被延后的初始化。
+                        if (service != null && (!init || pendingInit)) {
+                            ensureMainTask()
+                            dayCalendar = Calendar.getInstance()
+                            if (initHandler(pendingInitReason ?: "service_onCreate")) {
+                                init = true
+                            }
+                        }
+                    }
                 }
                 result
             }
@@ -534,7 +537,9 @@ class ApplicationHook {
                 appContext = appService.applicationContext
                 // 宿主 Service 生命周期回调必须快速返回；完整初始化仅在入口后台线程执行。
                 ApplicationHookConstants.submitEntry("service_onCreate") {
-                    if (service !== appService) return@submitEntry
+                    if (service !== appService || XposedEnv.runtimeIdentity == null ||
+                        !RuntimeIdentityGuard.isTrustedForExecution()
+                    ) return@submitEntry
                     ensureScheduler()
                     ensureMainTask()
                     dayCalendar = Calendar.getInstance()
@@ -575,11 +580,15 @@ class ApplicationHook {
     private fun initVersionInfo(packageName: String?) {
         if (VersionHook.hasVersion()) {
             alipayVersion = VersionHook.getCapturedVersion() ?: AlipayVersion("")
+            VersionHook.completeCapture(alipayVersion)
             record(TAG, "📦 目标应用版本(Hook): $alipayVersion")
         } else {
             try {
                 val pInfo: PackageInfo = appContext!!.packageManager.getPackageInfo(packageName!!, 0)
                 alipayVersion = AlipayVersion(pInfo.versionName.toString())
+                if (!pInfo.versionName.isNullOrBlank()) {
+                    VersionHook.completeCapture(alipayVersion)
+                }
             } catch (_: Exception) {
                 alipayVersion = AlipayVersion("")
             }
@@ -1193,7 +1202,7 @@ class ApplicationHook {
                     record(TAG, "⏳ Service 未就绪，延后初始化: $reason")
                     return false
                 }
-                if (!RuntimeIdentityGuard.isTrustedForExecution()) {
+                if (!RuntimeIdentityGuard.isTrustedForExecution() || XposedEnv.runtimeIdentity == null) {
                     record(TAG, "instance_rejected: ${RuntimeIdentityGuard.lastReasonCode() ?: "identity_not_verified"}")
                     Log.w(TAG, "instance_rejected: ${RuntimeIdentityGuard.lastReasonCode() ?: "identity_not_verified"}")
                     return false
@@ -1282,7 +1291,6 @@ class ApplicationHook {
                 Config.load(userId)
                 LocaleSettingsApplier.apply(appContext)
                 Logback.reloadFileLogging(enableCaptureAppender = true)
-                RpcTrafficCapture.refreshCaptureState()
                 val activeUserSnapshot = AccountSessionCoordinator.ensureActiveUserSnapshot(userId, activeClassLoader)
                 if (admission.requiresConfirmation) {
                     when (val confirmation = AccountSlotRegistry.confirmRuntimeUser(userId)) {
@@ -1336,6 +1344,7 @@ class ApplicationHook {
                     reason = reason,
                 )
                 sessionApplied = true
+                RpcTrafficCapture.refreshCaptureState()
                 pendingInit = false
                 pendingInitReason = null
 

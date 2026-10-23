@@ -1,6 +1,5 @@
 package io.github.aoguai.sesameag.hook
 
-import android.content.Context
 import io.github.aoguai.sesameag.entity.UserEntity
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.Files
@@ -21,20 +20,6 @@ object HookUtil {
         val profiles: Int = 0,
         val groups: Int = 0
     )
-
-    fun hookOtherService(classLoader: ClassLoader) {
-        try {
-            val fgBgMonitorClass = loadClass(classLoader, "com.alipay.mobile.common.fgbg.FgBgMonitorImpl")
-            hookReturnConstant(findMethod(fgBgMonitorClass, "isInBackground"), false)
-            hookReturnConstant(findMethod(fgBgMonitorClass, "isInBackground", Boolean::class.javaPrimitiveType!!), false)
-            hookReturnConstant(findMethod(fgBgMonitorClass, "isInBackgroundV2"), false)
-
-            val miscUtilsClass = loadClass(classLoader, "com.alipay.mobile.common.transport.utils.MiscUtils")
-            hookReturnConstant(findMethod(miscUtilsClass, "isAtFrontDesk", Context::class.java), true)
-        } catch (e: Exception) {
-            Log.printStackTrace(TAG, "hookOtherService 失败", e)
-        }
-    }
 
     fun getMicroApplicationContext(classLoader: ClassLoader): Any? {
         if (microContextCache != null) return microContextCache
@@ -112,7 +97,7 @@ object HookUtil {
             val daoClass = loadClass(classLoader, "com.alipay.mobile.socialcommonsdk.bizdata.contact.data.AliAccountDaoOp")
             val dao = callStaticMethod(cacheClass, "getCacheObj", daoClass) ?: error("AliAccountDaoOp 缓存对象为空")
             val allFriends = callMethod(dao, "getAllFriends") as? List<*> ?: emptyList<Any>()
-            check(allFriends.isNotEmpty()) { "支付宝本地好友缓存为空，已保留旧好友中心" }
+            check(allFriends.isNotEmpty()) { "本地好友缓存为空，已保留旧好友中心" }
             val friendClass = requireNotNull(allFriends.firstOrNull()).javaClass
             val userIdField = findField(friendClass, "userId")
             val accountField = findField(friendClass, "account")
@@ -163,27 +148,8 @@ object HookUtil {
         }
     }
 
-    private fun hookReturnConstant(method: Method, value: Any?) {
-        ApplicationHook.requireXposedInterface().hook(method).intercept { _ -> value }
-    }
-
     private fun loadClass(classLoader: ClassLoader, className: String): Class<*> {
         return Class.forName(className, false, classLoader)
-    }
-
-    private fun findMethod(targetClass: Class<*>, name: String, vararg parameterTypes: Class<*>): Method {
-        var current: Class<*>? = targetClass
-        while (current != null) {
-            runCatching {
-                return current.getDeclaredMethod(name, *parameterTypes).apply {
-                    isAccessible = true
-                }
-            }
-            current = current.superclass
-        }
-        return targetClass.getMethod(name, *parameterTypes).apply {
-            isAccessible = true
-        }
     }
 
     private fun callMethod(target: Any, name: String, vararg args: Any?): Any? {

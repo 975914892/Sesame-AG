@@ -15,25 +15,26 @@ object UserDataStoreManager {
      * 采用“独占式”管理策略：仅为真实有效 UID 创建实例，且切换时自动释放。
      */
     @JvmStatic
-    @Synchronized
-    fun getInstance(uid: String?): UserDataStore? {
-        // 过滤无效或占位 UID
-        if (uid.isNullOrEmpty() || uid == "default") return null
-        
-        // 自动清理逻辑：如果当前缓存了其他真实 UID，则在切换时自动释放
-        val it = stores.iterator()
-        while (it.hasNext()) {
-            val entry = it.next()
-            if (entry.key != uid) {
-                entry.value.shutdown()
-                it.remove()
-            }
-        }
+    fun getInstance(uid: String?): UserDataStore? = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(this) {
+            // 过滤无效或占位 UID
+            if (uid.isNullOrEmpty() || uid == "default") return@transaction null
 
-        return stores.getOrPut(uid) {
-            val userDir = Files.getUserConfigDir(uid)
-            val file = java.io.File(userDir, "UserDataStore.json")
-            UserDataStore(uid, file)
+            // 自动清理逻辑：如果当前缓存了其他真实 UID，则在切换时自动释放
+            val it = stores.iterator()
+            while (it.hasNext()) {
+                val entry = it.next()
+                if (entry.key != uid) {
+                    entry.value.shutdown()
+                    it.remove()
+                }
+            }
+
+            return@transaction stores.getOrPut(uid) {
+                val userDir = Files.getUserConfigDir(uid)
+                val file = Files.child(userDir, "UserDataStore.json")
+                UserDataStore(uid, file)
+            }
         }
     }
 

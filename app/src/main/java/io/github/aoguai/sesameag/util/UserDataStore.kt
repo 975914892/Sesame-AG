@@ -1,363 +1,74 @@
 package io.github.aoguai.sesameag.util
 
-import android.annotation.SuppressLint
-import android.util.Log
 import com.fasterxml.jackson.core.type.TypeReference
-import com.fasterxml.jackson.core.util.DefaultIndenter
-import com.fasterxml.jackson.core.util.DefaultPrettyPrinter
 import com.fasterxml.jackson.databind.DeserializationFeature
-import com.fasterxml.jackson.databind.exc.MismatchedInputException
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import io.github.aoguai.sesameag.storage.StoreAccess
 import java.io.File
-import java.nio.file.Path
-import java.nio.file.StandardWatchEventKinds
-import java.nio.file.WatchService
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.read
-import kotlin.concurrent.write
-import kotlin.math.abs
 
-/**
- * 用户特异性数据存储类 (UserDataStore)
- * 每个实例绑定一个特定的 UID，存储在对应的用户目录下。
- */
+/** Per-account data; all read/modify/write sequences hold the module storage transaction. */
 class UserDataStore(val uid: String, private val storageFile: File) {
-    private val tag = "UserDataStore-$uid"
-
     companion object {
-        private val mapper = jacksonObjectMapper().apply {
-            configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-        }
-        private val prettyPrinter = DefaultPrettyPrinter().apply {
-            indentArraysWith(DefaultIndenter.SYSTEM_LINEFEED_INSTANCE)
-            indentObjectsWith(DefaultIndenter("    ", DefaultIndenter.SYS_LF))
-        }
+        private val mapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
-
-    private val data = ConcurrentHashMap<String, Any>()
-    private val lock = ReentrantReadWriteLock()
-
-    private val lastLoadedTime = AtomicLong(0)
-    private val lastWriteTime = AtomicLong(0)
-
-    @Volatile
-    private var watcherJob: Job? = null
-
-    @Volatile
-    private var watchService: WatchService? = null
-
-    private var onChangeListener: (() -> Unit)? = null
-
+    private var listener: (() -> Unit)? = null
+    private val stopObserving: () -> Unit
     init {
-        ensureFileExists()
-        loadFromDisk()
-        startWatcherNio()
-    }
-
-    fun setOnChangeListener(listener: () -> Unit) {
-        onChangeListener = listener
-    }
-
-    private fun ensureFileExists() {
-        try {
-            val dir = storageFile.parentFile ?: return
-            if (!dir.exists()) {
-                dir.mkdirs()
-            }
-            setWorldReadableWritable(dir)
-
-            if (!storageFile.exists()) {
-                storageFile.createNewFile()
-                setWorldReadableWritable(storageFile)
-                storageFile.writeText("{}")
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to ensure storage file exists", e)
+        StoreAccess.transaction {
+            if (!storageFile.exists()) check(Files.writeAtomically("{}", storageFile))
+            load()
+        }
+        stopObserving = StoreAccess.observe { change ->
+            if (change.collection == 2 && change.owner == uid &&
+                (change.name == storageFile.name || change.name.isEmpty())) listener?.invoke()
         }
     }
-
-    @SuppressLint("SetWorldReadable", "SetWorldWritable")
-    private fun setWorldReadableWritable(file: File) {
-        try {
-            file.setReadable(true, false)
-            file.setWritable(true, false)
-            file.setExecutable(true, false)
-        } catch (_: Exception) {}
+    fun setOnChangeListener(listener: () -> Unit) { this.listener = listener }
+    fun shutdown() { stopObserving() }
+    private fun load(): MutableMap<String, Any> = mapper.readValue(Files.readText(storageFile), object : TypeReference<MutableMap<String, Any>>() {})
+    private fun save(data: Map<String, Any>) {
+        check(Files.writeAtomically(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data), storageFile)) { "保存账号数据失败" }
     }
-
-    fun shutdown() {
-        watcherJob?.cancel()
-        watcherJob = null
-        try {
-            watchService?.close()
-        } catch (_: Throwable) {}
-        watchService = null
-        Log.i(tag, "Watcher stopped for user $uid")
+    inline fun <reified T : Any> getOrCreate(key: String): T = getOrCreate(key, object : TypeReference<T>() {})
+    fun <T> get(key: String, clazz: Class<T>): T? = StoreAccess.transaction {
+        load()[key]?.let { mapper.convertValue(it, clazz) }
     }
-
-    inline fun <reified T : Any> getOrCreate(key: String): T {
-        return getOrCreate(key, object : TypeReference<T>() {})
-    }
-
-    fun <T> get(key: String, clazz: Class<T>): T? = lock.read {
-        try {
-            data[key]?.let { mapper.convertValue(it, clazz) }
-        } catch (e: Exception) {
-            Log.e(tag, "Error converting value for key: $key", e)
-            null
-        }
-    }
-
-    fun <T : Any> getOrCreate(key: String, typeRef: TypeReference<T>): T = lock.write {
-        forceLoadFromDisk()
-        data[key]?.let {
-            try {
-                return mapper.convertValue(it, typeRef)
-            } catch (e: Exception) {
-                Log.w(tag, "Data mismatch for key $key, overwriting with default.", e)
-            }
-        }
-
-        val default: T = createDefault(typeRef)
+    fun <T : Any> getOrCreate(key: String, typeRef: TypeReference<T>): T = StoreAccess.transaction {
+        val data = load()
+        data[key]?.let { return@transaction mapper.convertValue(it, typeRef) }
+        @Suppress("UNCHECKED_CAST")
+        val default = when (val type = mapper.typeFactory.constructType(typeRef).rawClass) {
+            List::class.java -> arrayListOf<Any>()
+            Set::class.java -> linkedSetOf<Any>()
+            Map::class.java -> linkedMapOf<String, Any>()
+            String::class.java -> ""
+            Boolean::class.java, Boolean::class.javaObjectType -> false
+            Int::class.java, Int::class.javaObjectType -> 0
+            Long::class.java, Long::class.javaObjectType -> 0L
+            else -> type.getDeclaredConstructor().newInstance()
+        } as T
         data[key] = default
-        saveToDisk()
+        save(data)
         default
     }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun <T> createDefault(typeRef: TypeReference<T>): T {
-        val javaType = mapper.typeFactory.constructType(typeRef)
-        val rawClass = javaType.rawClass
-        return when {
-            List::class.java.isAssignableFrom(rawClass) -> ArrayList<Any>() as T
-            Set::class.java.isAssignableFrom(rawClass) -> LinkedHashSet<Any>() as T
-            Map::class.java.isAssignableFrom(rawClass) -> LinkedHashMap<String, Any>() as T
-            rawClass == String::class.java -> "" as T
-            rawClass == Boolean::class.java || rawClass == Boolean::class.javaObjectType -> false as T
-            rawClass == Int::class.java || rawClass == Int::class.javaObjectType -> 0 as T
-            rawClass == Long::class.java || rawClass == Long::class.javaObjectType -> 0L as T
-            else -> {
-                try {
-                    rawClass.getDeclaredConstructor().newInstance() as T
-                } catch (e: Exception) {
-                    throw RuntimeException("Could not create default value for ${rawClass.name}", e)
-                }
-            }
-        }
+    fun put(key: String, value: Any) = put(key, value, requirePersistence = true)
+    fun put(key: String, value: Any, requirePersistence: Boolean) = StoreAccess.transaction {
+        // Every private-store write is atomic and synced, including required pending-action records.
+        val data = load(); data[key] = value; save(data)
     }
-
-    private fun forceLoadFromDisk() {
-        try {
-            if (!storageFile.exists() || storageFile.length() == 0L) {
-                // saveToDisk 可能正在替换文件；这里保留当前快照，避免把用户态缓存误清空。
-                return
-            }
-            val currentModTime = storageFile.lastModified()
-            if (currentModTime <= lastLoadedTime.get()) return
-
-            val loaded: Map<String, Any> = mapper.readValue(storageFile)
-            data.clear()
-            data.putAll(loaded)
-            lastLoadedTime.set(currentModTime)
-        } catch (e: Exception) {
-            if (e !is MismatchedInputException) {
-                Log.w(tag, "Force load from disk failed: ${e.message}")
-            }
-        }
+    fun remove(key: String) = StoreAccess.transaction { val data = load(); if (data.remove(key) != null) save(data) }
+    fun setPersistentFlag(flag: String, expiryTimeMillis: Long) = StoreAccess.transaction {
+        val flags = getOrCreate("persistent_flags", object : TypeReference<MutableMap<String, Long>>() {}).toMutableMap()
+        flags[flag] = expiryTimeMillis
+        put("persistent_flags", flags)
     }
-
-    private fun loadFromDisk() {
-        if (!storageFile.exists()) return
-        val currentModTime = storageFile.lastModified()
-        if (currentModTime <= lastLoadedTime.get()) return
-        if (abs(currentModTime - lastWriteTime.get()) < 500) {
-            lastLoadedTime.set(currentModTime)
-            return
-        }
-
-        lock.write {
-            try {
-                if (storageFile.length() == 0L) return@write
-                val loaded: Map<String, Any> = mapper.readValue(storageFile)
-                data.clear()
-                data.putAll(loaded)
-                lastLoadedTime.set(currentModTime)
-                onChangeListener?.invoke()
-            } catch (e: Exception) {
-                if (e !is MismatchedInputException) {
-                    Log.w(tag, "Failed to load: ${e.message}")
-                }
-            }
-        }
+    fun hasPersistentFlag(flag: String): Boolean = StoreAccess.transaction {
+        val flags = load()["persistent_flags"] as? Map<*, *> ?: return@transaction false
+        val expiry = (flags[flag] as? Number)?.toLong() ?: return@transaction false
+        expiry == -1L || System.currentTimeMillis() < expiry
     }
-
-    private fun createWriteTempFile(): File {
-        val parentDir = storageFile.parentFile
-            ?: throw IllegalStateException("UserDataStore parent directory is missing")
-        if (!parentDir.exists() && !parentDir.mkdirs()) {
-            throw IllegalStateException("Failed to create UserDataStore directory: ${parentDir.absolutePath}")
-        }
-        setWorldReadableWritable(parentDir)
-        // 多进程/多实例共用固定 .tmp 会互相覆盖，临时文件必须按次唯一。
-        return File.createTempFile("${storageFile.name}.", ".tmp", parentDir)
-    }
-
-    private fun saveToDisk(requirePersistence: Boolean = false) {
-        var tempFile: File? = null
-        try {
-            tempFile = createWriteTempFile()
-            mapper.writer(prettyPrinter).writeValue(tempFile, data)
-            if (requirePersistence) java.io.FileOutputStream(tempFile, true).use { it.fd.sync() }
-            setWorldReadableWritable(tempFile)
-            lastWriteTime.set(System.currentTimeMillis())
-            var renameSuccess = tempFile.renameTo(storageFile)
-            if (!renameSuccess) {
-                if (requirePersistence) throw java.io.IOException("Failed to atomically persist user data")
-                Log.w(tag, "renameTo failed, falling back to copy stream.")
-                try {
-                    tempFile.copyTo(storageFile, overwrite = true)
-                    renameSuccess = true
-                } catch (e: Exception) {
-                    Log.e(tag, "Failed to copy temp file to storage file", e)
-                }
-            }
-            if (renameSuccess) {
-                setWorldReadableWritable(storageFile)
-                lastLoadedTime.set(storageFile.lastModified())
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to save config", e)
-            if (requirePersistence) throw e
-        } finally {
-            if (tempFile?.exists() == true) {
-                tempFile.delete()
-            }
-        }
-    }
-
-    private fun startWatcherNio() {
-        watcherJob?.cancel()
-        watcherJob = GlobalThreadPools.execute(Dispatchers.IO) {
-            val path = storageFile.toPath().parent ?: return@execute
-            val watch = runCatching {
-                watchService?.close()
-                path.fileSystem.newWatchService()
-            }.getOrNull() ?: return@execute
-
-            watchService = watch
-            runCatching {
-                path.register(
-                    watch,
-                    StandardWatchEventKinds.ENTRY_CREATE,
-                    StandardWatchEventKinds.ENTRY_DELETE,
-                    StandardWatchEventKinds.ENTRY_MODIFY
-                )
-            }.onFailure { e ->
-                runCatching { watch.close() }
-                Log.e(tag, "Failed to register watch service", e)
-                return@execute
-            }
-
-            try {
-                while (isActive) {
-                    val key = try {
-                        // 由真实文件变更唤醒；shutdown() 会关闭 WatchService，因此 take() 不会阻塞销毁。
-                        watch.take()
-                    } catch (_: Exception) { return@execute }
-
-                    var shouldReload = false
-                    key.pollEvents().forEach { event ->
-                        val changedPath = event.context() as? Path
-                        if (changedPath?.toString() == storageFile.name) {
-                            shouldReload = true
-                        }
-                    }
-                    if (shouldReload) {
-                        delay(100)
-                        loadFromDisk()
-                    }
-                    if (!key.reset()) return@execute
-                }
-            } catch (_: CancellationException) {
-            } catch (e: Exception) {
-                Log.e(tag, "File watcher died", e)
-            } finally {
-                runCatching { watch.close() }
-                if (watchService === watch) watchService = null
-            }
-        }
-    }
-
-    fun put(key: String, value: Any) = lock.write {
-        forceLoadFromDisk()
-        data[key] = value
-        saveToDisk()
-    }
-
-    /** 消费动作的待确认记录必须落盘成功，调用方才能提交请求。 */
-    fun put(key: String, value: Any, requirePersistence: Boolean) = lock.write {
-        forceLoadFromDisk()
-        val previous = data.put(key, value)
-        try {
-            saveToDisk(requirePersistence)
-        } catch (e: Exception) {
-            if (previous == null) data.remove(key) else data[key] = previous
-            throw e
-        }
-    }
-
-    fun remove(key: String) = lock.write {
-        forceLoadFromDisk()
-        data.remove(key)
-        saveToDisk()
-    }
-
-    /* --- 持续化标记 (Persistent Flags) 扩展 --- */
-
-    /**
-     * 设置一个持久化标记，直到指定的时间戳过期。
-     * @param flag 标记名
-     * @param expiryTimeMillis 过期时间戳（毫秒）。传入 -1 代表永久有效。
-     */
-    fun setPersistentFlag(flag: String, expiryTimeMillis: Long) {
-        lock.write {
-            val typeRef = object : TypeReference<MutableMap<String, Long>>() {}
-            val flags = getOrCreate("persistent_flags", typeRef).toMutableMap()
-            flags[flag] = expiryTimeMillis
-            put("persistent_flags", flags)
-        }
-    }
-
-    /**
-     * 检查持久化标记是否有效（未过期）。
-     */
-    fun hasPersistentFlag(flag: String): Boolean {
-        lock.read {
-            val flags = data["persistent_flags"] as? Map<*, *> ?: return false
-            val expiry = (flags[flag] as? Number)?.toLong() ?: return false
-            if (expiry == -1L) return true
-            return System.currentTimeMillis() < expiry
-        }
-    }
-
-    /**
-     * 移除持久化标记。
-     */
-    fun removePersistentFlag(flag: String) {
-        lock.write {
-            val typeRef = object : TypeReference<MutableMap<String, Long>>() {}
-            val flags = getOrCreate("persistent_flags", typeRef).toMutableMap()
-            if (flags.remove(flag) != null) {
-                put("persistent_flags", flags)
-            }
-        }
+    fun removePersistentFlag(flag: String) = StoreAccess.transaction {
+        val flags = getOrCreate("persistent_flags", object : TypeReference<MutableMap<String, Long>>() {}).toMutableMap()
+        if (flags.remove(flag) != null) put("persistent_flags", flags)
     }
 }

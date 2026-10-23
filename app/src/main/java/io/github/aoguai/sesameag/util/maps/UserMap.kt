@@ -123,7 +123,7 @@ object UserMap {
         require(!userId.isNullOrBlank()) { "加载好友失败：账号为空" }
         return Files.withAccountLock(userId) {
             val file = requireNotNull(Files.getFriendIdMapFile(userId))
-            val body = file.readText(Charsets.UTF_8)
+            val body = Files.readText(file)
             val users = linkedMapOf<String, UserEntity>()
             if (body.isNotBlank()) {
                 val dtos = JsonUtil.parseObject(body, object : TypeReference<Map<String, UserEntity.UserDto>>() {})
@@ -289,12 +289,11 @@ object UserMap {
     }
 
     @JvmStatic
-    @Synchronized
-    fun updateActiveUser(userEntity: UserEntity?) {
-        val entity = userEntity ?: return
+    fun updateActiveUser(userEntity: UserEntity?): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        val entity = userEntity ?: return@transaction
         val safeUserId = entity.userId?.trim().orEmpty()
-        if (safeUserId.isEmpty()) return
-        if (currentUid != safeUserId) return
+        if (safeUserId.isEmpty()) return@transaction
+        if (currentUid != safeUserId) return@transaction
         replace(safeUserId, userMap + (safeUserId to entity))
         DataStore.put("activedUser", entity)
         Log.record(TAG, "update now active user: $entity")

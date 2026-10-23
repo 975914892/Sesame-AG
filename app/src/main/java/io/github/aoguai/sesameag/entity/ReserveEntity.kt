@@ -4,7 +4,7 @@ import io.github.aoguai.sesameag.util.maps.IdMapManager
 import io.github.aoguai.sesameag.util.maps.ReserveaMap
 
 /**
- * 表示支付宝保留项的实体类，包含 ID 和名称。
+ * 表示保留项的实体类，包含 ID 和名称。
  *
  * @param i 保留项的 ID
  * @param n 保留项的名称

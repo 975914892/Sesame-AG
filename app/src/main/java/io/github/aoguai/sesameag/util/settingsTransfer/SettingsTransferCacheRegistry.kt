@@ -165,7 +165,7 @@ object SettingsTransferCacheRegistry {
     }
 
     private fun resolveUserFile(userId: String, fileName: String): File {
-        return File(Files.getUserConfigDir(userId), fileName)
+        return Files.child(Files.getUserConfigDir(userId), fileName)
     }
 
     private fun validateRuleEntry(rule: CacheRule, content: String) {

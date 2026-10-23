@@ -74,89 +74,93 @@ abstract class IdMapManager {
      *
      * @param userId 用户ID
      */
-    @Synchronized
-    fun load(userId: String?) {
-        if (userId.isNullOrEmpty()) {
-            Log.runtime(TAG, "Skip loading map for empty userId")
-            load()
-        } else {
-            idMap.clear()
-            try {
-                val file = Files.getTargetFileofUser(userId, thisFileName())
-                checkNotNull(file)
-                val body = Files.readFromFile(file)
-                if (body.isNotEmpty()) {
-                    val objectMapper = ObjectMapper()
-                    val newMap: Map<String, String> = objectMapper.readValue(
-                        body,
-                        object : TypeReference<Map<String, String>>() {}
-                    )
-                    idMap.putAll(newMap)
-                }
-            } catch (e: Exception) {
-                Log.printStackTrace(e)
-            }
-        }
-    }
-    
-    @Synchronized
-    fun load() {
-        idMap.clear()
-        try {
-            val newFile = Files.getTargetFileofDir(CONFIG_DIR, thisFileName())
-            val oldFile = Files.getTargetFileofDir(OLD_CONFIG_DIR, thisFileName())
-            
-            // 1. 新文件存在，直接加载
-            if (newFile.exists()) {
-                val body = Files.readFromFile(newFile)
-                if (body.isNotEmpty()) {
-                    val objectMapper = ObjectMapper()
-                    val newMap: Map<String, String> = objectMapper.readValue(
-                        body,
-                        object : TypeReference<Map<String, String>>() {}
-                    )
-                    idMap.putAll(newMap)
-                }
-                if (oldFile.exists()) {
-                    oldFile.delete()
-                }
-                return
-            }
-            
-            // 2. 新文件不存在，检查旧文件是否存在
-            if (oldFile.exists()) {
-                Log.runtime(TAG, "Old configuration file found, migrating to new path...")
-                
+    fun load(userId: String?): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(this) {
+            if (userId.isNullOrEmpty()) {
+                Log.runtime(TAG, "Skip loading map for empty userId")
+                load()
+            } else {
+                idMap.clear()
                 try {
-                    val body = Files.readFromFile(oldFile)
+                    val file = Files.getTargetFileofUser(userId, thisFileName())
+                    checkNotNull(file)
+                    val body = Files.readFromFile(file)
                     if (body.isNotEmpty()) {
                         val objectMapper = ObjectMapper()
                         val newMap: Map<String, String> = objectMapper.readValue(
                             body,
                             object : TypeReference<Map<String, String>>() {}
                         )
-                        val json = JsonUtil.formatJson(newMap)
-                        if (!json.isNullOrEmpty()) {
-                            Files.write2File(json, newFile)
-                            oldFile.delete()
-                            idMap.putAll(newMap)
-                        }
+                        idMap.putAll(newMap)
                     }
                 } catch (e: Exception) {
-                    Log.error(TAG, "Migration of old configuration files failed：${e.message}")
+                    Log.printStackTrace(e)
                 }
             }
-            
-            // 3. 新旧文件都不存在，初始化默认配置
-            if (!newFile.exists()) {
-                Log.runtime(TAG, "Configuration file not found, initializing an empty configuration file...")
-                val json = JsonUtil.formatJson(idMap)
-                if (!json.isNullOrEmpty()) {
-                    Files.write2File(json, newFile)
+        }
+    }
+    
+    fun load(): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(this) {
+            // Two legacy map locations are both storage resources; migration must not create the
+            // new file before deciding whether an older copy contains the user's data.
+            idMap.clear()
+            try {
+                val newFile = Files.child(CONFIG_DIR, thisFileName())
+                val oldFile = Files.child(OLD_CONFIG_DIR, thisFileName())
+                
+                // 1. 新文件存在，直接加载
+                if (newFile.exists()) {
+                    val body = Files.readFromFile(newFile)
+                    if (body.isNotEmpty()) {
+                        val objectMapper = ObjectMapper()
+                        val newMap: Map<String, String> = objectMapper.readValue(
+                            body,
+                            object : TypeReference<Map<String, String>>() {}
+                        )
+                        idMap.putAll(newMap)
+                    }
+                    if (oldFile.exists()) {
+                        oldFile.delete()
+                    }
+                    return@transaction
                 }
+
+                // 2. 新文件不存在，检查旧文件是否存在
+                if (oldFile.exists()) {
+                    Log.runtime(TAG, "Old configuration file found, migrating to new path...")
+
+                    try {
+                        val body = Files.readFromFile(oldFile)
+                        if (body.isNotEmpty()) {
+                            val objectMapper = ObjectMapper()
+                            val newMap: Map<String, String> = objectMapper.readValue(
+                                body,
+                                object : TypeReference<Map<String, String>>() {}
+                            )
+                            val json = JsonUtil.formatJson(newMap)
+                            if (!json.isNullOrEmpty()) {
+                                Files.write2File(json, newFile)
+                                oldFile.delete()
+                                idMap.putAll(newMap)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.error(TAG, "Migration of old configuration files failed：${e.message}")
+                    }
+                }
+
+                // 3. 新旧文件都不存在，初始化默认配置
+                if (!newFile.exists()) {
+                    Log.runtime(TAG, "Configuration file not found, initializing an empty configuration file...")
+                    val json = JsonUtil.formatJson(idMap)
+                    if (!json.isNullOrEmpty()) {
+                        Files.write2File(json, newFile)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.printStackTrace(TAG, "ID映射管理器初始化失败：", e)
             }
-        } catch (e: Exception) {
-            Log.printStackTrace(TAG, "ID映射管理器初始化失败：", e)
         }
     }
     
@@ -166,40 +170,43 @@ abstract class IdMapManager {
      * @param userId 用户ID
      * @return 如果保存成功返回true，否则返回false
      */
-    @Synchronized
-    open fun save(userId: String?): Boolean {
-        return try {
-            val file = Files.getTargetFileofUser(userId, thisFileName()) ?: run {
-                Log.error("IdMapManager", "无法获取目标文件")
-                return false
+    open fun save(userId: String?): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(this) {
+            return@transaction try {
+                val file = Files.getTargetFileofUser(userId, thisFileName()) ?: run {
+                    Log.error("IdMapManager", "无法获取目标文件")
+                    return@transaction false
+                }
+                val json = JsonUtil.formatJson(idMap)
+                Files.write2File(json, file)
+            } catch (e: Exception) {
+                Log.error("IdMapManager", "保存IdMap失败: ${e.message}")
+                Log.printStackTrace("IdMapManager", e)
+                false
             }
-            val json = JsonUtil.formatJson(idMap)
-            Files.write2File(json, file)
-        } catch (e: Exception) {
-            Log.error("IdMapManager", "保存IdMap失败: ${e.message}")
-            Log.printStackTrace("IdMapManager", e)
-            false
         }
     }
     
-    @Synchronized
-    fun save(): Boolean {
-        return try {
-            val json = JsonUtil.formatJson(idMap)
-            val file = Files.getTargetFileofDir(CONFIG_DIR, thisFileName())
-            Files.write2File(json, file)
-        } catch (e: Exception) {
-            Log.printStackTrace(e)
-            false
+    fun save(): Boolean = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(this) {
+            return@transaction try {
+                val json = JsonUtil.formatJson(idMap)
+                val file = Files.getTargetFileofDir(CONFIG_DIR, thisFileName())
+                Files.write2File(json, file)
+            } catch (e: Exception) {
+                Log.printStackTrace(e)
+                false
+            }
         }
     }
     
     /**
      * 清除ID映射
      */
-    @Synchronized
-    fun clear() {
-        idMap.clear()
+    fun clear(): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        synchronized(this) {
+            idMap.clear()
+        }
     }
     
     companion object {

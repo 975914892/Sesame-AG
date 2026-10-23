@@ -4,7 +4,7 @@ import io.github.aoguai.sesameag.util.maps.BeachMap
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 
 /**
- * 表示支付宝海滩的实体类，包含 ID 和名称。
+ * 表示海滩的实体类，包含 ID 和名称。
  *
  * @param i 海滩的 ID
  * @param n 海滩的名称

@@ -143,7 +143,6 @@ private fun PermissionHealthRow(
 ) {
     val requesting = item.status == PermissionStatus.REQUESTING
     val canOpenSettings = item.actionLabel != null && when (item.requirement) {
-        PermissionRequirement.MODULE_FILE,
         PermissionRequirement.MODULE_NOTIFICATION,
         PermissionRequirement.MODULE_BATTERY,
         PermissionRequirement.TARGET_BATTERY -> true
@@ -162,6 +161,7 @@ private fun PermissionHealthRow(
         item.requirement == PermissionRequirement.SHELL_EXECUTOR -> {
             if (item.isGranted && serviceStatus is ServiceStatus.Active) "${serviceStatus.type} 已连接" else "未连接"
         }
+        item.requirement == PermissionRequirement.MODULE_FILE -> if (item.isGranted) "已就绪" else "待迁移"
         item.isGranted -> if (item.requirement == PermissionRequirement.LSPOSED_TARGET_SCOPE) "已添加" else "已授权"
         item.status == PermissionStatus.UNAVAILABLE -> "待确认"
         item.status == PermissionStatus.UNSUPPORTED -> "当前不可用"
@@ -189,7 +189,8 @@ private fun PermissionHealthRow(
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(statusText, color = statusColor, style = MaterialTheme.typography.labelLarge)
                 Text(item.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (canOpenSettings || item.canRequest) {
+                if (canOpenSettings || item.canRequest ||
+                    (item.requirement == PermissionRequirement.MODULE_FILE && item.actionLabel != null)) {
                     TextButton(
                         onClick = { onRequest(item.requirement) },
                         enabled = if (canOpenSettings) !requesting else actionEnabled,

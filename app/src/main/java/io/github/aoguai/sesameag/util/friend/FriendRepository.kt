@@ -24,7 +24,7 @@ object FriendRepository {
         if (owner.isEmpty()) return FriendCenterConfig()
         return Files.withAccountLock(owner) {
             val file = Files.getFriendCenterFile(owner)
-            val body = file.readText(Charsets.UTF_8)
+            val body = Files.readText(file)
             val config = if (body.isBlank()) {
                 FriendCenterConfig(userId = owner)
             } else {

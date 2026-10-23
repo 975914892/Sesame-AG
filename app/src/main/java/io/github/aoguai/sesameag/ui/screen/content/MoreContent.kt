@@ -52,6 +52,8 @@ fun MoreContent(
     onOpenRpcDebug: () -> Unit,
     onOpenExtendTools: () -> Unit,
     onClearModuleData: () -> Unit,
+    onExportStorageBackup: () -> Unit,
+    onRestoreStorageBackup: () -> Unit,
     clearModuleDataFailurePaths: List<String>,
     onDismissClearModuleDataFailure: () -> Unit,
     modifier: Modifier = Modifier,
@@ -144,6 +146,22 @@ fun MoreContent(
         }
 
         item { Spacer(Modifier.height(8.dp)); SectionTitle("应用") }
+        item {
+            SettingsItem(
+                title = "导出完整备份",
+                subtitle = "保存全部账号配置、执行记录和日志",
+                icon = Icons.Outlined.Extension,
+                onClick = onExportStorageBackup,
+            )
+        }
+        item {
+            SettingsItem(
+                title = "恢复完整备份",
+                subtitle = "从完整备份 ZIP 恢复全部模块数据",
+                icon = Icons.Outlined.Extension,
+                onClick = onRestoreStorageBackup,
+            )
+        }
         item {
             SettingsItem(
                 title = "清除模块数据",

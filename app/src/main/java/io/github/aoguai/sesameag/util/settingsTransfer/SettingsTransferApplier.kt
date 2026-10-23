@@ -121,8 +121,8 @@ object SettingsTransferApplier {
     private fun targetFiles(userId: String, resolved: ResolvedSettingsImport): List<File> {
         val files = linkedSetOf(Files.getConfigV2File(userId))
         val directory = Files.getUserConfigDir(userId)
-        if (resolved.customSettings != null) files.add(File(directory, "customset.json"))
-        if (resolved.canApplyPrivate && resolved.friendCenter != null) files.add(File(directory, "friendCenter.json"))
+        if (resolved.customSettings != null) files.add(Files.child(directory, "customset.json"))
+        if (resolved.canApplyPrivate && resolved.friendCenter != null) files.add(Files.child(directory, "friendCenter.json"))
         if (resolved.format == SettingsTransferSourceFormat.PACKAGE_V1) {
             files.addAll(SettingsTransferCacheRegistry.targetFilesForScope(userId, ConfigPortScope.GENERIC, resolved.genericCaches))
             if (resolved.canApplyPrivate) {

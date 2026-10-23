@@ -125,7 +125,7 @@ object AntForestRpcCall {
     @JvmStatic
     fun init() {
         val alipayVersion = io.github.aoguai.sesameag.hook.ApplicationHook.alipayVersion
-        Log.forest("当前支付宝版本: $alipayVersion")
+        Log.forest("当前目标应用版本: $alipayVersion")
         try {
             when (alipayVersion.versionString) {
                 "10.8.20.8000" -> {

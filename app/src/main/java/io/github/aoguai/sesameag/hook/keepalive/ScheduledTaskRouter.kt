@@ -28,7 +28,10 @@ import io.github.aoguai.sesameag.util.maps.UserMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -55,79 +58,92 @@ object ScheduledTaskRouter {
 
     suspend fun fireDueFromModule(context: Context, source: String): Int = deliveryMutex.withLock {
         val now = System.currentTimeMillis()
-        val due = PersistentScheduleRegistry.listFresh().filter {
-            it.state == PersistentScheduleState.SCHEDULED && it.triggerAtMs <= now
-        }.sortedBy { it.deadlineAtMs() }
+        val due = runInterruptible {
+            PersistentScheduleRegistry.listFresh().filter {
+                it.state == PersistentScheduleState.SCHEDULED && it.triggerAtMs <= now
+            }.sortedBy { it.deadlineAtMs() }
+        }
         try {
-            val deliverable = due.filter { schedule ->
-                when {
-                    now > schedule.deadlineAtMs() -> {
-                        PersistentScheduleRegistry.markExpired(context, schedule.id, now, source)
-                        false
-                    }
-                    schedule.lastError in setOf("launch_pending", "delivery_pending") -> {
-                        if (schedule.lastError == "launch_pending") {
-                            recordLaunchFailure(schedule, IllegalStateException("launch_unconfirmed"))
+            val deliverable = runInterruptible {
+                due.filter { schedule ->
+                    when {
+                        now > schedule.deadlineAtMs() -> {
+                            PersistentScheduleRegistry.markExpired(context, schedule.id, now, source)
+                            false
                         }
-                        PersistentScheduleRegistry.rescheduleDeferred(
-                            context, schedule.id, "${schedule.lastError}_timeout", now, expected = schedule,
-                        )
-                        false
+                        schedule.lastError in setOf("launch_pending", "delivery_pending") -> {
+                            if (schedule.lastError == "launch_pending") {
+                                recordLaunchFailure(schedule, IllegalStateException("launch_unconfirmed"))
+                            }
+                            PersistentScheduleRegistry.rescheduleDeferred(
+                                context, schedule.id, "${schedule.lastError}_timeout", now, expected = schedule,
+                            )
+                            false
+                        }
+                        else -> true
                     }
-                    else -> true
                 }
             }
             if (deliverable.isEmpty()) return@withLock due.size
-            val identity = AccountSessionCoordinator.currentOrPersistedSessionIdentity()
-            val readiness = HookReadyChecker.probe(context, identity?.userId.orEmpty())
-            var launchAttempted = PersistentScheduleRegistry.listFresh().any {
-                it.state == PersistentScheduleState.SCHEDULED && it.lastError == "launch_pending"
+            val identity = runInterruptible { AccountSessionCoordinator.currentOrPersistedSessionIdentity() }
+            val readiness = runInterruptible { HookReadyChecker.probe(context, identity?.userId.orEmpty()) }
+            var launchAttempted = runInterruptible {
+                PersistentScheduleRegistry.listFresh().any {
+                    it.state == PersistentScheduleState.SCHEDULED && it.lastError == "launch_pending"
+                }
             }
             for (schedule in deliverable) {
-                if (identity == null || schedule.ownerUserId != identity.userId || schedule.sessionEpoch != identity.sessionEpoch) {
-                    PersistentScheduleRegistry.markFailed(context, schedule.id, "session_mismatch", source = source, expected = schedule)
-                    continue
-                }
-                if (readiness.replied) {
-                    if (readiness.currentUserId.isNotBlank() && readiness.currentUserId != schedule.ownerUserId ||
-                        readiness.sessionEpoch > 0L && readiness.sessionEpoch != schedule.sessionEpoch
-                    ) {
-                        PersistentScheduleRegistry.markFailed(context, schedule.id, "target_session_mismatch", source = source, expected = schedule)
-                    } else if (readiness.ready && readiness.workflowReady &&
-                        readiness.currentUserId == schedule.ownerUserId && readiness.sessionEpoch == schedule.sessionEpoch
-                    ) {
-                        val waiting = PersistentScheduleRegistry.beginDeliveryWait(context, schedule, launching = false) ?: continue
-                        val intent = Intent(ApplicationHookConstants.BroadcastActions.EXECUTE).apply {
-                            setPackage(General.PACKAGE_NAME)
-                            putExtra(EXTRA_PERSISTENT_ID, waiting.id)
-                            putExtra(SystemWakeScheduler.EXTRA_CONFIRMATION_AT, waiting.updatedAtMs)
-                        }
-                        if (!sendTargetBroadcast(context, intent, waiting, source)) {
-                            PersistentScheduleRegistry.rescheduleDeferred(context, waiting.id, "broadcast_failed", expected = waiting)
-                        }
-                    } else {
-                        PersistentScheduleRegistry.rescheduleDeferred(
-                            context, schedule.id, "target_not_ready:${readiness.message}", expected = schedule,
-                        )
+                val waiting = runInterruptible {
+                    if (identity == null || schedule.ownerUserId != identity.userId || schedule.sessionEpoch != identity.sessionEpoch) {
+                        PersistentScheduleRegistry.markFailed(context, schedule.id, "session_mismatch", source = source, expected = schedule)
+                        return@runInterruptible null
                     }
-                    continue
-                }
-                if (launchAttempted || !shouldLaunchTarget(schedule) || !consumeLaunchQuota(schedule)) {
-                    PersistentScheduleRegistry.rescheduleDeferred(
-                        context, schedule.id, "target_unavailable_or_launch_disabled", expected = schedule,
-                    )
-                    continue
-                }
-                launchAttempted = true
-                val waiting = PersistentScheduleRegistry.beginDeliveryWait(context, schedule, launching = true) ?: continue
+                    if (readiness.replied) {
+                        if (readiness.currentUserId.isNotBlank() && readiness.currentUserId != schedule.ownerUserId ||
+                            readiness.sessionEpoch > 0L && readiness.sessionEpoch != schedule.sessionEpoch
+                        ) {
+                            PersistentScheduleRegistry.markFailed(context, schedule.id, "target_session_mismatch", source = source, expected = schedule)
+                        } else if (readiness.ready && readiness.workflowReady &&
+                            readiness.currentUserId == schedule.ownerUserId && readiness.sessionEpoch == schedule.sessionEpoch
+                        ) {
+                            val delivery = PersistentScheduleRegistry.beginDeliveryWait(context, schedule, launching = false)
+                                ?: return@runInterruptible null
+                            val intent = Intent(ApplicationHookConstants.BroadcastActions.EXECUTE).apply {
+                                setPackage(General.PACKAGE_NAME)
+                                putExtra(EXTRA_PERSISTENT_ID, delivery.id)
+                                putExtra(SystemWakeScheduler.EXTRA_CONFIRMATION_AT, delivery.updatedAtMs)
+                            }
+                            if (!sendTargetBroadcast(context, intent, delivery, source)) {
+                                PersistentScheduleRegistry.rescheduleDeferred(context, delivery.id, "broadcast_failed", expected = delivery)
+                            }
+                        } else {
+                            PersistentScheduleRegistry.rescheduleDeferred(
+                                context, schedule.id, "target_not_ready:${readiness.message}", expected = schedule,
+                            )
+                        }
+                        return@runInterruptible null
+                    }
+                    if (launchAttempted || !shouldLaunchTarget(schedule) || !consumeLaunchQuota(schedule)) {
+                        PersistentScheduleRegistry.rescheduleDeferred(
+                            context, schedule.id, "target_unavailable_or_launch_disabled", expected = schedule,
+                        )
+                        return@runInterruptible null
+                    }
+                    launchAttempted = true
+                    PersistentScheduleRegistry.beginDeliveryWait(context, schedule, launching = true)
+                } ?: continue
                 if (!SystemWakeScheduler.launchTargetNow(context, waiting)) {
-                    recordLaunchFailure(waiting, IllegalStateException("target_launch_failed"))
-                    PersistentScheduleRegistry.rescheduleDeferred(context, waiting.id, "target_launch_failed", expected = waiting)
+                    runInterruptible {
+                        recordLaunchFailure(waiting, IllegalStateException("target_launch_failed"))
+                        PersistentScheduleRegistry.rescheduleDeferred(context, waiting.id, "target_launch_failed", expected = waiting)
+                    }
                 }
             }
             due.size
         } finally {
-            SystemWakeScheduler.refresh(context)
+            if (currentCoroutineContext().isActive) {
+                runInterruptible { SystemWakeScheduler.refresh(context) }
+            }
         }
     }
 

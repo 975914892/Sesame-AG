@@ -9,6 +9,7 @@ import io.github.aoguai.sesameag.hook.RuntimeIdentityGuard
 import io.github.aoguai.sesameag.hook.TokenHooker
 import io.github.aoguai.sesameag.hook.XposedEnv
 import io.github.aoguai.sesameag.model.BaseModel
+import io.github.aoguai.sesameag.util.CommandUtil
 import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
@@ -25,6 +26,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import android.os.FileObserver
 import android.os.Handler
 import android.os.Looper
@@ -146,6 +153,12 @@ object RpcTrafficCapture {
         val expiresAtMs: Long,
     )
 
+    private val captureScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var authorizationJob: Job? = null
+    private var captureContext: Context? = null
+    @Volatile
+    private var captureUserId: String? = null
+
     private val installLock = Any()
     private val ariverRequestHookInstalled = AtomicBoolean(false)
     private val mtopRequestHookInstalled = AtomicBoolean(false)
@@ -187,7 +200,7 @@ object RpcTrafficCapture {
     private var sessionStarted = false
 
     @Volatile
-    private var captureEnabledProvider: () -> Boolean = { Config.isLoaded() && BaseModel.debugMode.value == true }
+    private var captureEnabledProvider: (String) -> Boolean = { Config.isLoaded() && BaseModel.debugMode.value == true }
 
     @Volatile
     private var captureEnabledCache: CaptureEnabledCache? = null
@@ -196,10 +209,12 @@ object RpcTrafficCapture {
     private var captureSessionCache: CaptureSessionCache? = null
 
     private var captureClassLoader: ClassLoader? = null
-    private val captureConfigObservers = mutableMapOf<String, FileObserver>()
+    private var stopCaptureConfigObservation: (() -> Unit)? = null
     private val captureConfigRefresh = Runnable {
-        runCatching { refreshCaptureState() }.onFailure {
-            Log.error(TAG, "同步抓包开关失败: ${it.stackTraceToString()}")
+        captureScope.launch {
+            runCatching { refreshCaptureState() }.onFailure {
+                Log.error(TAG, "同步抓包开关失败: ${it.stackTraceToString()}")
+            }
         }
     }
 
@@ -219,18 +234,34 @@ object RpcTrafficCapture {
     @Synchronized
     fun install(
         classLoader: ClassLoader,
-        enabledProvider: () -> Boolean = { Config.isLoaded() && BaseModel.debugMode.value == true },
+        context: Context,
+        enabledProvider: (String) -> Boolean = { Config.isLoaded() && BaseModel.debugMode.value == true },
     ): Boolean {
         captureClassLoader = classLoader
+        captureContext = context.applicationContext ?: context
         captureEnabledProvider = enabledProvider
-        return refreshCaptureState()
+        // 主进程在账号会话建立后启动抓包，attach 阶段仅保存安装上下文。
+        return if (RuntimeIdentityGuard.isMainProcess()) false else refreshCaptureState()
     }
 
     @Synchronized
     fun refreshCaptureState(): Boolean {
         val classLoader = captureClassLoader ?: return false
         captureEnabledCache = null
+        if (captureUserId == null && authorizationJob?.isActive != true) {
+            val context = captureContext ?: return false
+            authorizationJob = captureScope.launch {
+                val userId = CommandUtil.authorizeCapture(context, captureEnabledProvider)
+                if (userId != null) {
+                    synchronized(this@RpcTrafficCapture) {
+                        captureUserId = userId
+                        refreshCaptureState()
+                    }
+                }
+            }
+        }
         if (!isCaptureEnabled()) {
+            captureUserId = null
             synchronized(installLock) {
                 captureHooks.entries.toList().forEach { (method, handle) ->
                     runCatching { handle.unhook() }.onSuccess {
@@ -288,34 +319,18 @@ object RpcTrafficCapture {
             true
         }
 
-    /** Lite 进程只读取配置并观察抓包开关，不初始化业务任务。 */
-    fun installForCaptureOnlyProcess(classLoader: ClassLoader): Boolean =
-        install(classLoader, ::isCaptureEnabledInPersistentConfig)
+    /** Lite 仅获取已确认会话的许可和配置，不初始化业务任务。 */
+    fun installForCaptureOnlyProcess(classLoader: ClassLoader, context: Context): Boolean =
+        install(classLoader, context, ::isCaptureEnabledInPersistentConfig)
 
-    @Suppress("DEPRECATION")
     private fun observeCaptureConfig(configDir: File, userDir: File?) {
-        val directories = listOfNotNull(configDir, userDir).filter { it.isDirectory }.associateBy { it.absolutePath }
-        synchronized(captureConfigObservers) {
-            val obsolete = captureConfigObservers.keys.filter { it !in directories }
-            obsolete.forEach { captureConfigObservers.remove(it)?.stopWatching() }
-            directories.forEach { (name, directory) ->
-                if (captureConfigObservers.containsKey(name)) return@forEach
-                val observer = object : FileObserver(
-                    name, FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.MOVED_FROM or
-                        FileObserver.CREATE or FileObserver.DELETE or FileObserver.DELETE_SELF or FileObserver.MOVE_SELF,
-                ) {
-                    override fun onEvent(event: Int, path: String?) {
-                        if (path == null || path == "DataStore.json" || path == "config_v2.json" ||
-                            path == Files.getDefaultConfigV2File().name || File(directory, path).isDirectory
-                        ) {
-                            pendingCleanupHandler.removeCallbacks(captureConfigRefresh)
-                            pendingCleanupHandler.post(captureConfigRefresh)
-                        }
-                    }
-                }
-                observer.startWatching()
-                captureConfigObservers[name] = observer
-            }
+        if (stopCaptureConfigObservation != null) return
+        stopCaptureConfigObservation = io.github.aoguai.sesameag.storage.StoreAccess.observe { change ->
+            if (change.collection == 0 || (change.name.isNotEmpty() &&
+                    change.name != "config_v2.json" && change.name != "DataStore.json")) return@observe
+            captureEnabledCache = null
+            pendingCleanupHandler.removeCallbacks(captureConfigRefresh)
+            pendingCleanupHandler.post(captureConfigRefresh)
         }
     }
 
@@ -2055,6 +2070,7 @@ object RpcTrafficCapture {
     }
 
     private fun emit(event: RpcTrafficEvent) {
+        if (!isCaptureEnabled()) return
         val payload = event.payload?.let(::parsePayloadForEvent)
         val message = JSONObject().apply {
             put("schema", "rpc-capture")
@@ -2081,7 +2097,7 @@ object RpcTrafficCapture {
                 put("correlationStatus", event.correlationStatus)
             }
         }.toString()
-        Log.capture(message)
+        if (isCaptureEnabled()) Log.capture(message)
     }
 
     @JvmStatic
@@ -2094,7 +2110,7 @@ object RpcTrafficCapture {
             captureSessionCache = null
             reportedHttpClasses.clear()
             synchronized(reportedHttpCallSites) { reportedHttpCallSites.clear() }
-            runCatching { File(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME).delete() }
+            runCatching { Files.child(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME).delete() }
         }
     }
 
@@ -2114,7 +2130,7 @@ object RpcTrafficCapture {
                 sessionStarted = false
                 eventSequence.set(0L)
             }
-            if (!sessionStarted) {
+            if (!sessionStarted && isCaptureEnabled()) {
                 sessionStarted = true
                 Log.capture(
                     JSONObject().apply {
@@ -2146,7 +2162,7 @@ object RpcTrafficCapture {
     private fun readPersistedSessionId(): String? =
         runCatching {
             val now = System.currentTimeMillis()
-            val file = File(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME)
+            val file = Files.child(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME)
             val lastModifiedMs = file.lastModified()
             captureSessionCache
                 ?.takeIf { cache ->
@@ -2157,7 +2173,7 @@ object RpcTrafficCapture {
                 captureSessionCache = null
                 null
             } else {
-                JSONObject(file.readText(Charsets.UTF_8))
+                JSONObject(Files.readText(file))
                     .optString("sessionId")
                     .trim()
                     .takeIf { it.isNotEmpty() }
@@ -2173,7 +2189,7 @@ object RpcTrafficCapture {
 
     private fun persistSessionId(value: String) {
         runCatching {
-            val file = File(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME)
+            val file = Files.child(Files.CONFIG_DIR, CAPTURE_SESSION_FILE_NAME)
             if (Files.write2File(
                     JSONObject().put("sessionId", value).put("createdAtMs", System.currentTimeMillis()).toString(),
                     file,
@@ -2358,33 +2374,22 @@ object RpcTrafficCapture {
     }
 
     private fun isCaptureEnabled(): Boolean {
-        val enabled = runCatching { captureEnabledProvider.invoke() }.getOrDefault(false)
-        if (!enabled) {
-            clearPendingAriverRequests()
-        }
+        val enabled = captureUserId?.let { userId ->
+            runCatching { captureEnabledProvider(userId) }.getOrDefault(false)
+        } ?: false
+        if (!enabled) clearPendingAriverRequests()
         return enabled
     }
 
-    private fun isCaptureEnabledInPersistentConfig(): Boolean {
-        val previous = captureEnabledCache
+    private fun isCaptureEnabledInPersistentConfig(activeUserId: String): Boolean {
         return runCatching {
             val now = System.currentTimeMillis()
             val configDir = Files.CONFIG_DIR
-            val dataStoreFile = File(configDir, "DataStore.json")
-            val activeUserId = JsonUtil
-                .toNode(Files.readFromFile(dataStoreFile))
-                ?.path("activedUser")
-                ?.path("userId")
-                ?.asText()
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-            val userConfigFile = activeUserId
-                ?.let { userId -> File(File(configDir, userId), "config_v2.json") }
-                ?.takeIf { it.isFile }
-            observeCaptureConfig(configDir, activeUserId?.let { File(configDir, it) })
+            val userConfigFile = Files.child(Files.child(configDir, activeUserId), "config_v2.json").takeIf { it.isFile }
+            observeCaptureConfig(configDir, Files.child(configDir, activeUserId))
             val configFile = userConfigFile ?: Files.getDefaultConfigV2File().takeIf { it.isFile }
             val fingerprint = listOf(
-                dataStoreFile.lastModified(),
+                activeUserId,
                 configFile?.absolutePath.orEmpty(),
                 configFile?.lastModified() ?: -1L,
             ).joinToString(":")
@@ -2413,7 +2418,10 @@ object RpcTrafficCapture {
                 expiresAtMs = now + 1_000L,
             )
             enabled
-        }.getOrElse { previous?.enabled ?: false }
+        }.getOrElse {
+            captureEnabledCache = null
+            false
+        }
     }
 
     private fun currentProcessName(): String =

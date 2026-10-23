@@ -254,7 +254,7 @@ object ApplicationHookConstants {
                 runCatching {
                     io.github.aoguai.sesameag.util.Notify.sendAlert(
                         title,
-                        detail?.takeIf { it.isNotBlank() } ?: "请打开支付宝完成验证或查看错误日志",
+                        detail?.takeIf { it.isNotBlank() } ?: "请打开目标应用完成验证或查看错误日志",
                     )
                 }
             }
@@ -475,11 +475,16 @@ object ApplicationHookConstants {
     fun removePendingTriggers(
         reason: String,
         predicate: (TriggerInfo) -> Boolean,
-    ): List<TriggerInfo> =
-        synchronized(triggerLock) {
+    ): List<TriggerInfo> {
+        val snapshot = synchronized(triggerLock) {
+            listOfNotNull(pendingTrigger) + triggerQueue.toList()
+        }
+        // 筛选可能读取账号存储，不能在队列锁内等待跨进程事务。
+        val rejected = snapshot.filter(predicate)
+        return synchronized(triggerLock) {
             val removed = mutableListOf<TriggerInfo>()
             val currentPending = pendingTrigger
-            if (currentPending != null && predicate(currentPending)) {
+            if (currentPending != null && rejected.any { it === currentPending }) {
                 removed.add(currentPending)
                 pendingTrigger = null
             }
@@ -487,7 +492,7 @@ object ApplicationHookConstants {
                 val it = triggerQueue.iterator()
                 while (it.hasNext()) {
                     val trigger = it.next()
-                    if (predicate(trigger)) {
+                    if (rejected.any { candidate -> candidate === trigger }) {
                         removed.add(trigger)
                         it.remove()
                     }
@@ -498,6 +503,7 @@ object ApplicationHookConstants {
             }
             removed
         }
+    }
 
     private fun enqueueLocked(trigger: TriggerInfo): TriggerInfo? {
         var displaced: TriggerInfo? = null

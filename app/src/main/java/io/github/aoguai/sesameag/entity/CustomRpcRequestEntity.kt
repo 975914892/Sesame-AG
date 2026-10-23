@@ -84,7 +84,7 @@ class CustomRpcRequestEntity : MapperEntity() {
         }
 
         private fun readConfigText(): String {
-            val rootFile = File(Files.MAIN_DIR, "rpcRequest.json")
+            val rootFile = Files.child(Files.MAIN_DIR, "rpcRequest.json")
             if (rootFile.exists()) {
                 val rootText = Files.readFromFile(rootFile).trim()
                 if (rootText.isNotBlank()) return rootText

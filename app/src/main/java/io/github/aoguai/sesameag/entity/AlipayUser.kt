@@ -5,7 +5,7 @@ import io.github.aoguai.sesameag.util.friend.FriendSelectionResolver
 import io.github.aoguai.sesameag.util.maps.UserMap
 
 /**
- * 支付宝用户实体类
+ * 用户实体类
  *
  * **迁移说明**:
  * - 简化为Kotlin类，移除冗余代码

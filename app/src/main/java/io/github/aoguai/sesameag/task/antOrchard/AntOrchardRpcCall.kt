@@ -493,7 +493,7 @@ object AntOrchardRpcCall {
         val attributes = JSONObject().put("CH_INFO", "lianyun_nc_sydb")
             .put("PLAY_SCENE", "NORMAL").put("SCENE_ID", "nongchangleyuan")
         if (eventId == "GAME_FIRST_FRAME") attributes.put("ALIVE_ENTER", "0")
-        // 此键保留支付宝客户端的协议拼写，已由实际 submitEvent 请求及成功响应确认。
+        // 此键保留目标应用客户端的协议拼写，已由实际 submitEvent 请求及成功响应确认。
         if (elapsedMs > 0) attributes.put("GAME_ELAPASED_TIME", elapsedMs)
         val source = when (eventId) {
             "GAME_FIRST_FRAME" -> "paladinx_auto"

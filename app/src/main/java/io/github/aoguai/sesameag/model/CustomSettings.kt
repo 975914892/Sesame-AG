@@ -119,7 +119,7 @@ object CustomSettings {
         try {
             Files.withAccountLock(userId) {
                 val file = requireNotNull(Files.getCustomSetFile(userId))
-                val json = file.readText(Charsets.UTF_8)
+                val json = Files.readText(file)
                 val data = if (json.isBlank()) emptyMap<String, Any?>()
                     else normalizeForImport(JsonUtil.copyMapper().readValue(json, Map::class.java))
                 resetToDefault()
