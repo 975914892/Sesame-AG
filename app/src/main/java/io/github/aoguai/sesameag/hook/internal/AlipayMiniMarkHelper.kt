@@ -3,7 +3,7 @@ package io.github.aoguai.sesameag.hook.internal
 import io.github.aoguai.sesameag.util.Log
 
 /**
- * 支付宝小程序游戏获取alipayminimark
+ * 目标应用小程序游戏获取alipayminimark
  * 用于调用目标应用的 H5HttpUtils.getAlipayMiniMark 方法
  */
 object AlipayMiniMarkHelper {
@@ -20,7 +20,7 @@ object AlipayMiniMarkHelper {
     }
 
     /**
-     * 获取支付宝小程序标记
+     * 获取目标应用小程序标记
      * 通过调用 H5HttpUtils.getAlipayMiniMark 方法获取小程序标记
      *
      * @param str 游戏appid

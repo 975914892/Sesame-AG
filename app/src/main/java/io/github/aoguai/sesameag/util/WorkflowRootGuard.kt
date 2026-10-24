@@ -5,8 +5,7 @@ import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.RuntimeIdentityGuard
 import io.github.aoguai.sesameag.service.patch.SafeRootShell
 import io.github.aoguai.sesameag.util.maps.UserMap
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+
 
 /**
  * 统一工作流执行权限门禁。
@@ -17,7 +16,7 @@ import kotlinx.coroutines.sync.withLock
 object WorkflowRootGuard {
     private const val TAG = "WorkflowRootGuard"
     private const val CHECK_CACHE_WINDOW_MS = 3_000L
-    private val checkMutex = Mutex()
+    private val checkQueue = SerialTaskQueue()
     private val rootShell = SafeRootShell()
 
     @Volatile
@@ -51,17 +50,17 @@ object WorkflowRootGuard {
             return lastGranted
         }
 
-        return checkMutex.withLock {
+        return checkQueue.submit {
             val lockedNow = System.currentTimeMillis()
             resolveHookAccessSource()?.let { hookSource ->
                 lastCheckAtMs = lockedNow
                 lastGranted = true
                 logState(true, reason)
                 Log.record(TAG, "✅ 当前进程已完成 $hookSource 注入，允许启动工作流")
-                return@withLock true
+                return@submit true
             }
             if (!forceRefresh && lockedNow - lastCheckAtMs < CHECK_CACHE_WINDOW_MS) {
-                return@withLock lastGranted
+                return@submit lastGranted
             }
 
             val granted = try {

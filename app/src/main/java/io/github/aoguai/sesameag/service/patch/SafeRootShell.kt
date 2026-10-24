@@ -18,12 +18,10 @@ internal class SafeRootShell : Shell {
     override val PERMISSION_LEVEL: String = "Root"
 
     override suspend fun isAvailable(): Boolean {
-        val result = runCommand("id && echo __SESAME_ROOT_OK__", TEST_TIMEOUT, logFailure = false)
+        val result = runCommand("/system/bin/id -u", TEST_TIMEOUT, logFailure = false)
 
         val stdout = result.stdout.trim()
-        val available = result.isSuccess && (
-            stdout.contains("uid=0") || stdout.contains("__SESAME_ROOT_OK__")
-            )
+        val available = result.isSuccess && stdout == "0"
         if (!available) {
             Log.d(TAG, "Root不可用: Code=${result.exitCode}, Out='$stdout', Err='${result.stderr}'")
         }
@@ -70,12 +68,12 @@ internal class SafeRootShell : Shell {
         for (suPath in resolveSuCandidates()) {
             try {
                 val directResult = runSuWithArgs(suPath, command)
-                if (directResult.isSuccess || looksLikeRootProbeSucceeded(command, directResult.stdout)) {
+                if (directResult.isSuccess && (command != "/system/bin/id -u" || directResult.stdout.trim() == "0")) {
                     return directResult
                 }
 
                 val interactiveResult = runSuInteractively(suPath, command)
-                if (interactiveResult.isSuccess || looksLikeRootProbeSucceeded(command, interactiveResult.stdout)) {
+                if (interactiveResult.isSuccess && (command != "/system/bin/id -u" || interactiveResult.stdout.trim() == "0")) {
                     return interactiveResult
                 }
 
@@ -90,6 +88,32 @@ internal class SafeRootShell : Shell {
         throw IllegalStateException(
             failures.joinToString(" | ").ifBlank { "未找到可用的 su 可执行文件" }
         )
+    }
+
+    /** Select once before migration; never retry a filesystem mutation on another su path. */
+    internal fun streamingCommandFactory(): (String) -> Process {
+        for (suPath in resolveSuCandidates()) {
+            val direct = runCatching { runSuWithArgs(suPath, "/system/bin/id -u") }.getOrNull()
+            if (direct?.isSuccess == true && direct.stdout.trim() == "0") {
+                return { command ->
+                    ProcessBuilder(suPath, "-c", command).redirectError(File("/dev/null")).start()
+                }
+            }
+            val interactive = runCatching { runSuInteractively(suPath, "/system/bin/id -u") }.getOrNull()
+            if (interactive?.isSuccess == true && interactive.stdout.trim() == "0") {
+                return { command ->
+                    val process = ProcessBuilder(suPath).redirectError(File("/dev/null")).start()
+                    try {
+                        process.outputStream.use { it.write((command + "\nexit\n").toByteArray(Charsets.UTF_8)) }
+                        process
+                    } catch (failure: Throwable) {
+                        process.destroy()
+                        throw failure
+                    }
+                }
+            }
+        }
+        throw IllegalStateException("迁移没有可用的 Root 通道")
     }
 
     private fun resolveSuCandidates(): List<String> {
@@ -150,11 +174,5 @@ internal class SafeRootShell : Shell {
         }
     }
 
-    private fun looksLikeRootProbeSucceeded(command: String, stdout: String): Boolean {
-        if (!command.contains("__SESAME_ROOT_OK__") && !command.startsWith("id")) {
-            return false
-        }
-        return stdout.contains("uid=0") || stdout.contains("__SESAME_ROOT_OK__")
-    }
 }
 

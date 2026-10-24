@@ -4,10 +4,6 @@ import io.github.aoguai.sesameag.util.Log.record
 import java.text.Collator
 import java.util.Locale
 
-/**
- * @author Constanline
- * @since 2023/08/03
- */
 class HanziToPinyin protected constructor(private val mHasChinaCollator: Boolean) {
     class Token {
         constructor()
@@ -671,14 +667,10 @@ class HanziToPinyin protected constructor(private val mHasChinaCollator: Boolean
          */
         private const val FIRST_UNIHAN = '㐀'
         private val COLLATOR: Collator = Collator.getInstance(Locale.CHINA)
-        private var sInstance: HanziToPinyin? = null
+        private val sInstance = HanziToPinyin(true)
         
         @JvmStatic
-        fun getInstance(): HanziToPinyin {
-            synchronized(HanziToPinyin::class.java) {
-                return sInstance ?: HanziToPinyin(true).also { sInstance = it }
-            }
-        }
+        fun getInstance(): HanziToPinyin = sInstance
     }
 }
 

@@ -16,7 +16,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -45,6 +48,8 @@ import io.github.aoguai.sesameag.ui.theme.AppTheme
 import io.github.aoguai.sesameag.ui.theme.ThemeManager
 import io.github.aoguai.sesameag.ui.viewmodel.MainViewModel
 import io.github.aoguai.sesameag.task.customTasks.CustomTask
+import io.github.aoguai.sesameag.storage.PrivateStorage
+import io.github.aoguai.sesameag.storage.StorageBackup
 import io.github.aoguai.sesameag.util.CommandUtil
 import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Files
@@ -95,6 +100,48 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
     private val clearModuleDataFailures = MutableStateFlow<List<String>>(emptyList())
+    private val confirmStorageRestore = MutableStateFlow(false)
+    private val backupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) lifecycleScope.launch {
+            val before = PrivateStorage.state.value
+            if (before.busy) return@launch
+            PrivateStorage.update(before.copy(busy = true, message = "正在导出完整备份"))
+            try {
+                if (before.ready) StorageBackup.export(this@MainActivity, uri) else PrivateStorage.backupLegacy(uri)
+                ToastUtil.showToast(this@MainActivity, "完整备份已导出并校验")
+            } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                PrivateStorage.update(before.copy(message = "备份失败：${failure.message}"))
+                ToastUtil.showToast(this@MainActivity, "备份失败：${failure.message}")
+            } finally { PrivateStorage.update(PrivateStorage.state.value.copy(busy = false)) }
+        }
+    }
+    private val restoreLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) lifecycleScope.launch {
+            val before = PrivateStorage.state.value
+            if (before.busy) return@launch
+            PrivateStorage.update(before.copy(busy = true, message = "正在校验并恢复完整备份"))
+            try {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                    if (before.ready) StorageBackup.restore(applicationContext, uri) else PrivateStorage.restoreLegacy(uri)
+                    Config.unload()
+                    io.github.aoguai.sesameag.util.maps.UserMap.unload()
+                    io.github.aoguai.sesameag.data.Statistics.unload()
+                    UserDataStoreManager.shutdownAll()
+                    DataStore.init(Files.CONFIG_DIR)
+                }
+                viewModel.refreshUserConfigs()
+                refreshEnvironment()
+                ToastUtil.showToast(this@MainActivity, if (PrivateStorage.state.value.cleanupPending)
+                    "备份已恢复，部分旧数据待清理" else "备份已恢复，请重新打开目标应用")
+            } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                val state = PrivateStorage.state.value
+                PrivateStorage.update(state.copy(message = "恢复失败：${failure.message}"))
+                ToastUtil.showToast(this@MainActivity, "恢复失败：${failure.message}")
+            } finally { PrivateStorage.update(PrivateStorage.state.value.copy(busy = false)) }
+        }
+    }
     private val runtimePermissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             onRuntimePermissionRequestFinished(result)
@@ -116,7 +163,6 @@ class MainActivity : ComponentActivity() {
     private var pendingTargetPermissionSnapshotToken: Long = 0L
 
     private val autoCriticalPermissions = listOf(
-        PermissionRequirement.MODULE_FILE,
         PermissionRequirement.LSPOSED_TARGET_SCOPE
     )
 
@@ -204,6 +250,7 @@ class MainActivity : ComponentActivity() {
                     ModuleDiagnostics.event("executor", "changed", "state=${it.javaClass.simpleName} type=${(it as? CommandUtil.ServiceStatus.Active)?.type ?: "unknown"}")
                     refreshPermissionHealth()
                     viewModel.onExecutorStateChanged()
+                    if (it is CommandUtil.ServiceStatus.Active && PrivateStorage.state.value.needsInspection) PrivateStorage.inspect()
                     if (activePermissionMode == PermissionRequestMode.MANUAL_CARD ||
                         pendingPermissionRequest == PermissionRequirement.SHELL_EXECUTOR
                     ) {
@@ -212,7 +259,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        lifecycleScope.launch {
+            var storageInitialized = false
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                PrivateStorage.state.collectLatest { state ->
+                    if (state.ready && !state.busy && !storageInitialized) {
+                        storageInitialized = true
+                        Log.init(this@MainActivity)
+                        refreshEnvironment()
+                    }
+                    refreshPermissionHealth()
+                }
+            }
+        }
+        if (PrivateStorage.state.value.needsInspection) lifecycleScope.launch { PrivateStorage.inspect() }
         continuePermissionQueueOrAuto()
+        if (io.github.aoguai.sesameag.storage.PrivateStorage.state.value.let { it.ready && it.cleanupPending }) {
+            lifecycleScope.launch { io.github.aoguai.sesameag.storage.PrivateStorage.retryCleanup() }
+        }
 
         // 4. 同步图标状态
         val prefs = getSharedPreferences(PREFERENCES_KEY, MODE_PRIVATE)
@@ -230,10 +294,49 @@ class MainActivity : ComponentActivity() {
             val accountSlots by viewModel.accountSlots.collectAsStateWithLifecycle()
             val permissionHealth by viewModel.permissionHealth.collectAsStateWithLifecycle()
             val isDynamicColor by ThemeManager.isDynamicColor.collectAsStateWithLifecycle()
+            val storageState by io.github.aoguai.sesameag.storage.PrivateStorage.state.collectAsStateWithLifecycle()
             val clearFailurePaths by clearModuleDataFailures.collectAsStateWithLifecycle()
+            val showRestoreConfirmation by confirmStorageRestore.collectAsStateWithLifecycle()
 
             // AppTheme 会处理状态栏颜色
             AppTheme(dynamicColor = isDynamicColor) {
+                if (showRestoreConfirmation) {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { confirmStorageRestore.value = false },
+                        title = { androidx.compose.material3.Text("恢复完整备份") },
+                        text = { androidx.compose.material3.Text("将关闭目标应用，并用备份替换当前全部模块配置、账号记录和日志。请先完成目标应用中的操作。\n\n选择备份后，请保持本应用在前台，等待恢复完成后再操作。") },
+                        confirmButton = { androidx.compose.material3.TextButton(onClick = {
+                            confirmStorageRestore.value = false
+                            restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                        }) { androidx.compose.material3.Text("选择备份") } },
+                        dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmStorageRestore.value = false }) {
+                            androidx.compose.material3.Text("取消")
+                        } },
+                    )
+                }
+                if (storageState.ready && storageState.busy) {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = {},
+                        title = { androidx.compose.material3.Text(storageState.message) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                                androidx.compose.material3.Text("请保持本应用在前台，等待操作完成。期间不要返回、切换应用、锁屏、打开其他应用或清理后台。")
+                                androidx.compose.material3.LinearProgressIndicator()
+                            }
+                        },
+                        confirmButton = {},
+                    )
+                    return@AppTheme
+                }
+                io.github.aoguai.sesameag.ui.screen.components.StorageMigrationDialog(
+                    state = storageState,
+                    onMigrate = { lifecycleScope.launch { if (storageState.needsInspection) PrivateStorage.inspect() else PrivateStorage.migrate() } },
+                    onBackup = { backupLauncher.launch("sesame-backup-${System.currentTimeMillis()}.zip") },
+                    onRestore = { confirmStorageRestore.value = true },
+                    onAuthorize = { requestPermissionFromCard(PermissionRequirement.SHELL_EXECUTOR) },
+                    onExit = ::finish,
+                )
+                if (!storageState.ready) return@AppTheme
                 MainScreen(
                     oneWord = oneWord,
                     activeUserName = activeUser?.showName ?: "未载入账号",
@@ -285,6 +388,8 @@ class MainActivity : ComponentActivity() {
         data class ToggleIconHidden(val isHidden: Boolean) : MainUiEvent()
         data object OpenExtend : MainUiEvent()
         data object ClearConfig : MainUiEvent()
+        data object ExportStorageBackup : MainUiEvent()
+        data object RestoreStorageBackup : MainUiEvent()
         data object RefreshEnvironment : MainUiEvent()
         data class RequestPermission(val requirement: PermissionRequirement) : MainUiEvent()
         data object OpenTargetApp : MainUiEvent()
@@ -330,6 +435,8 @@ class MainActivity : ComponentActivity() {
             }
 
             MainUiEvent.OpenExtend -> Unit
+            MainUiEvent.ExportStorageBackup -> backupLauncher.launch("sesame-backup-${System.currentTimeMillis()}.zip")
+            MainUiEvent.RestoreStorageBackup -> confirmStorageRestore.value = true
             MainUiEvent.ClearConfig -> {
                 ModuleDiagnostics.event("clear_module_data", "requested")
                 clearModuleDataFailures.value = emptyList()
@@ -449,7 +556,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshEnvironment() {
         LsposedServiceManager.refreshScope()
         viewModel.refreshModuleFrameworkStatus()
-        hasPermissions = PermissionUtil.checkFilePermissions(this)
+        hasPermissions = io.github.aoguai.sesameag.storage.PrivateStorage.isReady
         if (hasPermissions) {
             viewModel.initAppLogic()
             viewModel.refreshUserConfigs()
@@ -511,15 +618,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestPermissionFromCard(permission: PermissionRequirement) {
+        if (permission == PermissionRequirement.MODULE_FILE) {
+            if (io.github.aoguai.sesameag.storage.PrivateStorage.isReady) {
+                lifecycleScope.launch { io.github.aoguai.sesameag.storage.PrivateStorage.retryCleanup() }
+            } else {
+                ToastUtil.showToast(this, "请先完成配置迁移")
+            }
+            return
+        }
         val targetPackage = when (permission) {
             PermissionRequirement.TARGET_EXACT_ALARM, PermissionRequirement.TARGET_BATTERY -> General.PACKAGE_NAME
             else -> packageName
         }
         val settingsIntent = when (permission) {
-            PermissionRequirement.MODULE_FILE -> Intent(
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION
-                else Settings.ACTION_APPLICATION_DETAILS_SETTINGS
-            ).setData(Uri.parse("package:$targetPackage"))
+            PermissionRequirement.MODULE_FILE -> null
             PermissionRequirement.MODULE_NOTIFICATION -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                 .putExtra(Settings.EXTRA_APP_PACKAGE, targetPackage)
             PermissionRequirement.MODULE_EXACT_ALARM, PermissionRequirement.TARGET_EXACT_ALARM -> {
@@ -539,9 +651,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             val fallbackAction = when (permission) {
-                PermissionRequirement.MODULE_FILE -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION
-                } else null
+                PermissionRequirement.MODULE_FILE -> null
                 PermissionRequirement.MODULE_EXACT_ALARM, PermissionRequirement.TARGET_EXACT_ALARM ->
                     Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM
                 else -> null
@@ -585,7 +695,7 @@ class MainActivity : ComponentActivity() {
         }
         activePermissionMode = mode
         activePermissionOrder = order
-        hasPermissions = PermissionUtil.checkFilePermissions(this)
+        hasPermissions = io.github.aoguai.sesameag.storage.PrivateStorage.isReady
         if (hasPermissions) {
             viewModel.initAppLogic()
         }
@@ -642,16 +752,7 @@ class MainActivity : ComponentActivity() {
         ModuleDiagnostics.event("permission", "requested", "requirement=$permission mode=$activePermissionMode")
         viewModel.markExternalNavigation()
         val requested = when (permission) {
-            PermissionRequirement.MODULE_FILE -> {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
-                    permission in deniedPermissionsThisVisibility &&
-                    !shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                ) {
-                    PermissionUtil.openAppSettings(this, permissionSettingsLauncher)
-                } else {
-                    PermissionUtil.checkOrRequestFilePermissions(this, runtimePermissionsLauncher, permissionSettingsLauncher)
-                }
-            }
+            PermissionRequirement.MODULE_FILE -> false
 
             PermissionRequirement.MODULE_NOTIFICATION -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -817,16 +918,13 @@ class MainActivity : ComponentActivity() {
                 requirement = PermissionRequirement.MODULE_FILE,
                 status = statusForGranted(
                     PermissionRequirement.MODULE_FILE,
-                    PermissionUtil.checkFilePermissions(this),
+                    io.github.aoguai.sesameag.storage.PrivateStorage.isReady,
                     requesting
                 ),
-                policy = PermissionPolicy.AUTO_CRITICAL,
-                title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "所有文件访问" else "文件访问",
-                description = "读取和保存配置、日志",
-                actionLabel = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
-                    PermissionRequirement.MODULE_FILE in deniedPermissionsThisVisibility &&
-                    !shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                ) "打开设置" else "授权文件访问"
+                policy = PermissionPolicy.MANUAL_CRITICAL,
+                title = "私有配置存储",
+                description = io.github.aoguai.sesameag.storage.PrivateStorage.state.value.message,
+                actionLabel = if (io.github.aoguai.sesameag.storage.PrivateStorage.state.value.cleanupPending) "清理旧副本" else null
             ),
             PermissionHealthItem(
                 requirement = PermissionRequirement.MODULE_NOTIFICATION,

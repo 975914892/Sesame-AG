@@ -4,7 +4,7 @@ import io.github.aoguai.sesameag.util.maps.BeachMap
 import io.github.aoguai.sesameag.util.maps.IdMapManager
 
 /**
- * 表示支付宝海滩的实体类，包含 ID 和名称。
+ * 表示海滩的实体类，包含 ID 和名称。
  *
  * @param i 海滩的 ID
  * @param n 海滩的名称
@@ -16,12 +16,12 @@ class AlipayBeach(i: String, n: String) : MapperEntity() {
     }
 
     companion object {
-        @Volatile
-        private var list: List<AlipayBeach>? = null
+        private class Snapshot(val items: List<AlipayBeach>? = null)
+        private val list = java.util.concurrent.atomic.AtomicReference(Snapshot())
 
         /**
          * 获取包含所有海滩的列表，首次调用时从 BeachMap 初始化。
-         * 使用双重检查锁定机制实现懒加载以提高性能。
+         * 完整构造后发布快照，读取不参与互斥。
          *
          * @return 包含所有 AlipayBeach 对象的不可变列表
          */
@@ -34,16 +34,14 @@ class AlipayBeach(i: String, n: String) : MapperEntity() {
 
         @JvmStatic
         fun getList(): List<AlipayBeach> {
-            if (list == null) {
-                synchronized(AlipayBeach::class.java) {
-                    if (list == null) {
-                        list = IdMapManager.getInstance(BeachMap::class.java).map.entries.map { (key, value) ->
-                            AlipayBeach(key, value)
-                        }
-                    }
+            while (true) {
+                val current = list.get()
+                current.items?.let { return it }
+                val items = IdMapManager.getInstance(BeachMap::class.java).map.entries.map { (key, value) ->
+                    AlipayBeach(key, value)
                 }
+                if (list.compareAndSet(current, Snapshot(items))) return items
             }
-            return list ?: emptyList()
         }
 
         /**
@@ -54,9 +52,11 @@ class AlipayBeach(i: String, n: String) : MapperEntity() {
          */
         @JvmStatic
         fun remove(id: String) {
-            getList()
-            synchronized(AlipayBeach::class.java) {
-                list = list?.filter { it.id != id }
+            while (true) {
+                getList()
+                val current = list.get()
+                val items = current.items ?: continue
+                if (list.compareAndSet(current, Snapshot(items.filter { it.id != id }))) return
             }
         }
     }

@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antFarm
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import android.net.Uri
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
@@ -253,8 +255,14 @@ class ChouChouLe {
 
                 override fun mapPhase(item: TaskFlowItem) = when (item.status) {
                     "FINISHED" -> TaskFlowPhase.REWARD_READY
-                    "TODO" -> if ((item.limit ?: 0) <= 0 || (item.current ?: 0) < (item.limit ?: 0))
-                        TaskFlowPhase.READY_TO_COMPLETE else TaskFlowPhase.TERMINAL
+                    "TODO" -> when {
+                        // 抓包确认这两项依赖充值消费，保留领奖分支，不代替真实业务提交完成。
+                        item.id == "MYZY_pay_rcccl_fkssj" || item.id == "MYZY_pay_IPccl_fkssj" ->
+                            TaskFlowPhase.BUSINESS_ACTION
+                        (item.limit ?: 0) <= 0 || (item.current ?: 0) < (item.limit ?: 0) ->
+                            TaskFlowPhase.READY_TO_COMPLETE
+                        else -> TaskFlowPhase.TERMINAL
+                    }
                     "RECEIVED" -> TaskFlowPhase.TERMINAL
                     else -> TaskFlowPhase.UNKNOWN
                 }
@@ -268,10 +276,9 @@ class ChouChouLe {
                 override fun receive(item: TaskFlowItem): TaskFlowActionResult =
                     receiveTaskAward(drawType, currentTasks.getValue(item.id))
 
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "$flowName 查询失败:$response")
                 override fun logInfo(message: String) = Log.farm(message)
                 override fun logError(message: String) = Log.error(TAG, message)
-            }, roundSleepMs = 300L).run().completed
+            }, roundSleepMs = 255L).run().completed
         } catch (t: Throwable) {
             val taskName = if (drawType == "ipDraw") "IP抽抽乐" else "日常抽抽乐"
             Log.printStackTrace("doChouchoule err:", t)
@@ -594,7 +601,7 @@ class ChouChouLe {
                     }
                     remainingTimes = afterTimes
                     if (remainingTimes > 0) {
-                        GlobalThreadPools.sleepCompat(1500L)
+                        GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1275, 1501))
                     }
                 }
             }
@@ -663,7 +670,7 @@ class ChouChouLe {
                 }
                 remainingTimes = afterTimes
                 if (remainingTimes > 0) {
-                    GlobalThreadPools.sleepCompat(1500L)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1275, 1501))
                 }
             }
             return allSuccess

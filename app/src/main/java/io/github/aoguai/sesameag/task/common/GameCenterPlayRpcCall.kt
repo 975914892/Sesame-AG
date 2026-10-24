@@ -13,6 +13,7 @@ import org.json.JSONTokener
 
 /** 游戏动作合同；任务所属模块负责完成、领奖和服务端终态回查。 */
 object GameCenterPlayRpcCall {
+    private val durationQueues = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, io.github.aoguai.sesameag.util.SerialTaskQueue>()
     private const val METHOD_SUBMIT_PLAY_DURATION =
         "com.alipay.gamecenteruprod.biz.rpc.v3.submitUserPlayDurationAction"
     private const val METHOD_FLOATING_BALL_CONSULT =
@@ -133,9 +134,13 @@ object GameCenterPlayRpcCall {
             objects.map { it.optString("gameTaskType") },
             urlParameters.valuesFor("gameTaskType"),
         )
+        val originalMap = urlParameters["originalMap"]?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
         val mappedTask = GameTask.fromAppId(gameAppId)
         val isGameTask = mappedTask != null ||
             gameTaskType.isNotBlank() ||
+            originalMap?.optString("scene") == "outer_multi_type_task" ||
             hasP2eFloatingBallProtocol(objects) ||
             urlParameters.valuesFor("gameAppId", "game_id").isNotEmpty() ||
             objects.any { objectValue ->
@@ -199,10 +204,16 @@ object GameCenterPlayRpcCall {
                 reason = "structured duration protocol",
             )
         }
-        if (directFinishSupported && descriptor.gameTaskType.isBlank()) {
+        val originalMap = descriptor.urlParameters["originalMap"]?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
+        if (descriptor.gameTaskType.equals("zhuanhua", ignoreCase = true) ||
+            descriptor.gameTaskType.equals("chongzhi", ignoreCase = true) ||
+            originalMap?.optString("scene") == "outer_multi_type_task"
+        ) {
             return TaskActionDecision(
-                action = TaskAction.DIRECT_FINISH,
-                reason = "module-provided direct completion contract",
+                action = TaskAction.DEFERRED,
+                reason = "structured game task requires its business event",
             )
         }
         if (descriptor.gameTaskType.equals("shichang", ignoreCase = true)) {
@@ -213,8 +224,12 @@ object GameCenterPlayRpcCall {
             )
         }
         return TaskActionDecision(
-            action = TaskAction.DEFERRED,
-            reason = "game task has no direct, click, duration or supported business completion contract",
+            action = TaskAction.DIRECT_FINISH.takeIf { directFinishSupported } ?: TaskAction.DEFERRED,
+            reason = if (directFinishSupported) {
+                "module-provided direct completion contract"
+            } else {
+                "game task has no direct, click, duration or supported business completion contract"
+            },
         )
     }
 
@@ -442,7 +457,9 @@ object GameCenterPlayRpcCall {
     private fun collectTaskUrlParameters(objects: List<JSONObject>): Map<String, String> {
         val parameters = linkedMapOf<String, String>()
         val queue = ArrayDeque<Pair<String, String?>>()
-        val nestedKeys = listOf("url", "sourceUrl", "schema", "query", "channelTaskPassThrough")
+        val nestedKeys = listOf(
+            "url", "sourceUrl", "schema", "query", "channelTaskPassThrough", "cdpQueryParams", "originalMap",
+        )
         objects.forEach { objectValue ->
             listOf("targetUrl", "actionUrl", "jumpUrl", "jumpLink", "pageUrl", "taskJumpUrl")
                 .map(objectValue::optString)
@@ -464,6 +481,8 @@ object GameCenterPlayRpcCall {
                 }
                 is JSONObject -> {
                     if (parentKey != null) parameters[parentKey] = json.toString()
+                    // 游戏业务 taskId 保留在 originalMap 中，不覆盖外层任务标识。
+                    if (parentKey == "originalMap") continue
                     json.keys().forEach { key ->
                         if (!json.isNull(key)) {
                             val parameter = json.get(key).toString()
@@ -475,7 +494,11 @@ object GameCenterPlayRpcCall {
                 }
             }
             val uri = runCatching {
-                Uri.parse(if (parentKey == "query" && value.contains('=')) "?$value" else value)
+                Uri.parse(
+                    if ((parentKey == "query" || parentKey == "cdpQueryParams") && value.contains('=')) {
+                        "?$value"
+                    } else value,
+                )
             }.getOrNull() ?: continue
             if (uri.isHierarchical && !uri.encodedQuery.isNullOrBlank()) {
                 uri.queryParameterNames.forEach { key ->
@@ -581,10 +604,10 @@ object GameCenterPlayRpcCall {
         val store = UserDataStoreManager.getCurrentInstance() ?: return TaskFlowActionResult.failure(
             TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW, message = "无法保存游戏时长进度",
         )
-        synchronized(store) {
+        return durationQueues.computeIfAbsent(store.uid to stateKey) { io.github.aoguai.sesameag.util.SerialTaskQueue() }.execute {
             check(store.uid == identity.userId && RpcDailyCircuit.isCurrent(identity)) { "游戏时长账号会话已变化" }
             if (ApplicationHookConstants.isOffline() || Thread.currentThread().isInterrupted) {
-                return TaskFlowActionResult.defer(
+                return@execute TaskFlowActionResult.defer(
                     DeferredReason.STATE_CONFIRMATION, "游戏时长执行已中断", stopCurrentRound = true,
                 )
             }
@@ -597,7 +620,7 @@ object GameCenterPlayRpcCall {
             } ?: JSONObject().put("startedAt", now).put("gameAppId", contract.gameAppId)
                 .put("source", contract.source).put("total", contract.playTime)
             var reported = state.optInt("reported")
-            if (reported >= contract.playTime) return TaskFlowActionResult.success(progressChanged = false)
+            if (reported >= contract.playTime) return@execute TaskFlowActionResult.success(progressChanged = false)
             if (!state.has("readyAt")) {
                 val chunk = minOf(firstChunkSeconds, contract.playTime)
                 state.put("chunk", chunk).put("readyAt", now + chunk * 1000L)
@@ -607,7 +630,7 @@ object GameCenterPlayRpcCall {
                 val chunk = state.getInt("chunk")
                 val ack = submitForAck(contract.copy(playTime = chunk))
                 check(RpcDailyCircuit.isCurrent(identity)) { "游戏时长上报期间账号会话已变化" }
-                if (!ack.accepted) return TaskFlowActionResult.failure(
+                if (!ack.accepted) return@execute TaskFlowActionResult.failure(
                     ack.failureType, message = "游戏时长上报失败", rpc = "GameCenterPlayRpcCall.submit",
                     raw = ack.raw, continueCurrentRoundOnFailure = true,
                 ).copy(refreshAfterAction = true)
@@ -618,9 +641,9 @@ object GameCenterPlayRpcCall {
                     state.put("chunk", nextChunk).put("readyAt", System.currentTimeMillis() + nextChunk * 1000L)
                 }
                 store.put(stateKey, state.toString(), requirePersistence = true)
-                if (reported >= contract.playTime) return TaskFlowActionResult.success(progressChanged = false)
+                if (reported >= contract.playTime) return@execute TaskFlowActionResult.success(progressChanged = false)
             }
-            return TaskFlowActionResult.defer(
+            TaskFlowActionResult.defer(
                 DeferredReason.TIME_WINDOW, "游戏时长已上报${reported}/${contract.playTime}秒，等待下一段",
                 rpc = "GameCenterPlayRpcCall.submit", deferredUntil = state.getLong("readyAt"),
             )

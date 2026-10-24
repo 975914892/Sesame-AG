@@ -37,6 +37,7 @@ object ExchangeOptionsRefreshBridge {
     const val TARGET_FOREST_VITALITY = "forest_vitality"
     const val TARGET_SESAME_GRAIN = "sesame_grain"
     const val TARGET_GOLDEN_BEAN_MALL = "golden_bean_mall"
+    const val TARGET_RESERVE = "reserve"
 
     data class RefreshResult(
         val success: Boolean,

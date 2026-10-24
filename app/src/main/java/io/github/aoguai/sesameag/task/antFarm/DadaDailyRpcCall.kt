@@ -4,9 +4,6 @@ import io.github.aoguai.sesameag.hook.RequestManager
 
 /**
  * 达达日报RPC调用
- *
- * @author Constanline
- * @since 2023/08/04
  */
 object DadaDailyRpcCall {
 

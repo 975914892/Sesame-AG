@@ -35,7 +35,12 @@ internal suspend fun AntForest.runForestPreparationAndCollectionWorkflow(tc: Tim
 
     val collectEnergyEnabled = isCollectEnergyEnabled()
 
-    var selfHomeObj = latestHomeAfterProps ?: initialHome
+    // 加速器可能已立即收走能量，不能将其收取前的主页快照再次用于收取。
+    var selfHomeObj = if (collectEnergyEnabled && latestHomeAfterProps != null) {
+        querySelfHome()
+    } else {
+        latestHomeAfterProps ?: initialHome
+    }
     if (selfHomeObj != null) {
         if (collectEnergyEnabled) {
             collectEnergy(UserMap.currentUid, selfHomeObj, "self")
@@ -130,17 +135,10 @@ internal fun AntForest.runEnergyOnlyCollectionWorkflow(tc: TimeCounter): JSONObj
     return selfHomeObj
 }
 
-internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
-    selfHomeObj: JSONObject?,
-    tc: TimeCounter,
-) {
-    if (selfHomeObj == null) {
-        return
-    }
-    var shouldRefreshForestHomeAfterEnergyRain = false
-
-    checkAndHandleWhackMole()
-    tc.countDebug("拼手速")
+// 首次处理和后续刷新共用主页收益入口，不重跑游戏、兑换等独立任务。
+private fun AntForest.collectSelfHomeRewards(selfHomeObj: JSONObject, tc: TimeCounter) {
+    collectGiftBox(selfHomeObj)
+    tc.countDebug("收取自己的礼盒")
 
     val processObj =
         if (isTeam(selfHomeObj)) {
@@ -159,15 +157,32 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
         givenProps(processObj)
         tc.countDebug("收取道具")
     }
+    collectEnergyBomb(selfHomeObj)
+    tc.countDebug("收取炸弹卡能量")
+}
+
+internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
+    selfHomeObj: JSONObject?,
+    tc: TimeCounter,
+) {
+    if (selfHomeObj == null) {
+        return
+    }
+    var shouldRefreshForestHomeAfterEnergyRain = false
+
+    checkAndHandleWhackMole()
+    tc.countDebug("拼手速")
+
+    collectSelfHomeRewards(selfHomeObj, tc)
     handleEnergyPvpChallenge()
     tc.countDebug("1V1能量挑战赛")
 
-    collectEnergyBomb(selfHomeObj)
-    tc.countDebug("收取炸弹卡能量")
-
     if (receiveForestTaskAward?.value == true) {
         receiveTaskAward()
-        waterMemberPlant()
+        plantTaskQueue.submit {
+            waterMemberPlant()
+            runMemberPlantTasks()
+        }
         tc.countDebug("森林任务")
         handleGift7thSign(selfHomeObj)
         tc.countDebug("森林七日礼包")
@@ -237,14 +252,16 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
     }
 
 
+    if (forestDailyDress?.value == true) ForestDress.run()
+    if (forestRead?.value == true) runForestReadWorkflow()
     if (forestChouChouLe?.value == true) {
-        ForestChouChouLe().chouChouLe()
+        ForestChouChouLe(forestCharityWater?.value == true && isForestWateringEnabled()).chouChouLe()
         tc.countDebug("抽抽乐")
     }
 
     doforestgame()
 
-    updateSelfHomePage(
+    val latestHomeObj = updateSelfHomePage(
         collectRobMultiplierEnergy = true,
         homePageSource =
             if (shouldRefreshForestHomeAfterEnergyRain) {
@@ -254,6 +271,7 @@ internal suspend fun AntForest.runForestHomeFollowUpWorkflow(
             },
     )
     tc.countDebug("领取N倍卡能量")
+    latestHomeObj?.let { collectSelfHomeRewards(it, tc) }
 
     logForestEnergyInfo()
     tc.stop()

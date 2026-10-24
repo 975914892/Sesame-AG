@@ -4,6 +4,11 @@ import android.app.Application
 import android.content.Context
 import android.os.FileObserver
 import androidx.core.content.edit
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.neverEqualPolicy
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModelProvider
@@ -34,8 +39,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -86,15 +90,18 @@ class LogViewerViewModel(
     private var exportJob: Job? = null
     private var updateJob: Job? = null
 
-    private val lineLock = Any()
-    private val allLines = mutableListOf<String>()
-    private var displayLines: List<String> = emptyList()
+    private data class LogLineRange(val start: Long, val end: Long, val endsLine: Boolean)
 
-    private val contentMutex = Mutex()
+    private val allLines = mutableListOf<LogLineRange>()
+    private var displayLines by mutableStateOf<List<LogLineRange>>(emptyList(), neverEqualPolicy())
+    // 只缓存按需显示的文本；历史内容留在文件中，搜索使用位置索引。
+    private val lineCache = LinkedHashMap<LogLineRange, MutableState<String>>(16, 0.75f, true)
+
+    private val contentQueue = SerialTaskQueue()
     private val forceFullReload = AtomicBoolean(true)
     @Volatile
     private var readOffset = 0L
-    private var pendingLine = ""
+    private var pendingLineOffset = 0L
     private var knownContentMarker: Long? = null
 
     @OptIn(FlowPreview::class)
@@ -116,13 +123,14 @@ class LogViewerViewModel(
         }
 
         loadJob = viewModelScope.launch {
-            synchronized(lineLock) {
+            contentQueue.submit {
                 allLines.clear()
                 displayLines = emptyList()
+                lineCache.clear()
+                readOffset = 0L
+                pendingLineOffset = 0L
+                knownContentMarker = null
             }
-            readOffset = 0L
-            pendingLine = ""
-            knownContentMarker = null
             forceFullReload.set(true)
             _uiState.update { it.copy(isLoading = true, totalCount = 0) }
             reloadCurrentFile(forceFull = true)
@@ -137,16 +145,16 @@ class LogViewerViewModel(
         val activeContext = currentCoroutineContext()
 
         try {
-            contentMutex.withLock {
+            contentQueue.submit {
                 activeContext.ensureActive()
+                if (currentFilePath != path) return@submit
+                val invalidateCache: Boolean
                 if (!file.exists() || !file.canRead()) {
-                    synchronized(lineLock) {
-                        allLines.clear()
-                        displayLines = emptyList()
-                    }
-                    pendingLine = ""
+                    allLines.clear()
+                    pendingLineOffset = 0L
                     readOffset = 0L
                     knownContentMarker = null
+                    invalidateCache = true
                 } else {
                     val fileLength = file.length()
                     val currentContentMarker = contentMarker(file, readOffset)
@@ -154,14 +162,17 @@ class LogViewerViewModel(
                         (knownContentMarker == null || currentContentMarker == null ||
                             currentContentMarker != knownContentMarker)
                     val needsFullReload = forceFull || fileLength < readOffset || readOffset == 0L || contentWasReplaced
+                    invalidateCache = needsFullReload
                     if (needsFullReload) {
                         loadWholeFile(file, fileLength)
                     } else if (fileLength > readOffset) {
                         appendFileRange(file, fileLength)
+                    } else {
+                        return@submit
                     }
                 }
                 activeContext.ensureActive()
-                refreshListLocked()
+                refreshListLocked(invalidateCache)
             }
         } catch (e: CancellationException) {
             throw e
@@ -172,97 +183,147 @@ class LogViewerViewModel(
     }
 
     private suspend fun loadWholeFile(file: File, fileLength: Long) {
-        val activeContext = currentCoroutineContext()
-        val loadedLines = ArrayList<String>()
-        file.bufferedReader(Charsets.UTF_8).use { reader ->
-            while (true) {
-                activeContext.ensureActive()
-                val line = reader.readLine() ?: break
-                loadedLines.add(line)
-            }
-        }
-        val endsWithLineBreak = fileLength == 0L || RandomAccessFile(file, "r").use { randomAccessFile ->
-            randomAccessFile.seek(fileLength - 1)
-            randomAccessFile.readByte().toInt() == '\n'.code
-        }
-        pendingLine = if (!endsWithLineBreak && loadedLines.isNotEmpty()) {
-            loadedLines.removeAt(loadedLines.lastIndex)
-        } else {
-            ""
-        }
-        synchronized(lineLock) {
-            allLines.clear()
-            allLines.addAll(loadedLines)
-        }
-        readOffset = fileLength
-        knownContentMarker = contentMarker(file, fileLength)
+        allLines.clear()
+        readOffset = 0L
+        pendingLineOffset = 0L
+        appendFileRange(file, fileLength)
     }
 
     private suspend fun appendFileRange(file: File, fileLength: Long) {
         val activeContext = currentCoroutineContext()
-        val appendedText = RandomAccessFile(file, "r").use { randomAccessFile ->
-            randomAccessFile.seek(readOffset)
+        val startOffset = pendingLineOffset
+        val ranges = ArrayList<LogLineRange>()
+        var lineStart = startOffset
+        RandomAccessFile(file, "r").use { input ->
+            input.seek(startOffset)
             val buffer = ByteArray(DEFAULT_READ_BUFFER_SIZE)
-            val bytes = java.io.ByteArrayOutputStream()
-            while (true) {
+            var offset = startOffset
+            // 只处理本次快照的长度，避免追逐持续追加的文件直到耗尽内存。
+            while (offset < fileLength) {
                 activeContext.ensureActive()
-                val count = randomAccessFile.read(buffer)
-                if (count <= 0) break
-                bytes.write(buffer, 0, count)
+                val count = minOf(buffer.size.toLong(), fileLength - offset).toInt()
+                input.readFully(buffer, 0, count)
+                for (index in 0 until count) {
+                    val byte = buffer[index].toInt() and 0xff
+                    val position = offset + index
+                    // 超长物理行分段显示，在 UTF-8 字符边界切分，不丢弃正文。
+                    if (position - lineStart >= MAX_DISPLAY_LINE_BYTES &&
+                        byte != '\n'.code && (byte and 0xc0) != 0x80
+                    ) {
+                        ranges.add(LogLineRange(lineStart, position, false))
+                        lineStart = position
+                    }
+                    if (byte == '\n'.code) {
+                        ranges.add(LogLineRange(lineStart, position + 1, true))
+                        lineStart = position + 1
+                    }
+                }
+                offset += count
             }
-            bytes.toString(Charsets.UTF_8.name())
         }
+        if (lineStart < fileLength) ranges.add(LogLineRange(lineStart, fileLength, false))
+        activeContext.ensureActive()
+        if (currentFilePath != file.path) return
+        // 重新读取上一段未结束的行，也重新解码其可能未写完整的 UTF-8 字符。
+        if (allLines.lastOrNull()?.start == startOffset) allLines.removeAt(allLines.lastIndex)
+        allLines.addAll(ranges)
+        pendingLineOffset = lineStart
         readOffset = fileLength
         knownContentMarker = contentMarker(file, fileLength)
-        if (appendedText.isEmpty()) return
-
-        val combined = pendingLine + appendedText
-        val parts = combined.split('\n')
-        val completeLines = parts.dropLast(1).map { it.removeSuffix("\r") }
-        pendingLine = if (combined.endsWith('\n')) "" else parts.last().removeSuffix("\r")
-        if (completeLines.isNotEmpty()) {
-            synchronized(lineLock) {
-                allLines.addAll(completeLines)
-            }
-        }
     }
 
     private suspend fun refreshList() = withContext(Dispatchers.IO) {
-        contentMutex.withLock {
+        contentQueue.submit {
             refreshListLocked()
         }
     }
 
-    private suspend fun refreshListLocked() {
+    private suspend fun refreshListLocked(invalidateCache: Boolean = false) {
         val activeContext = currentCoroutineContext()
+        val path = currentFilePath ?: return
         val query = _uiState.value.searchQuery.trim()
-        val resultLines = synchronized(lineLock) {
-            val sourceLines = if (pendingLine.isEmpty()) allLines else allLines + pendingLine
-            if (query.isEmpty()) {
-                sourceLines
-            } else {
-                sourceLines.filter { line ->
+        val sourceLines = allLines.toList()
+        val resultLines = if (query.isEmpty() || sourceLines.isEmpty()) {
+            sourceLines
+        } else {
+            val matches = ArrayList<LogLineRange>()
+            RandomAccessFile(path, "r").use { input ->
+                var firstPart = 0
+                var matched = false
+                var tail = ""
+                sourceLines.forEachIndexed { index, range ->
                     activeContext.ensureActive()
-                    line.contains(query, ignoreCase = true)
+                    if (!matched) {
+                        val buffer = ByteArray((range.end - range.start).toInt())
+                        input.seek(range.start)
+                        input.readFully(buffer)
+                        val text = tail + buffer.toString(Charsets.UTF_8).removeSuffix("\n").removeSuffix("\r")
+                        matched = text.contains(query, ignoreCase = true)
+                        tail = if (matched) "" else text.takeLast(query.length - 1)
+                    }
+                    if (range.endsLine || index == sourceLines.lastIndex) {
+                        // 跨显示分段的关键词仍可匹配，命中后保留整条物理日志。
+                        if (matched) matches.addAll(sourceLines.subList(firstPart, index + 1))
+                        firstPart = index + 1
+                        matched = false
+                        tail = ""
+                    }
                 }
-            }.also { displayLines = it }
+            }
+            matches
         }
-
-        _uiState.update {
-            it.copy(
-                totalCount = resultLines.size,
-                isLoading = false,
-                isSearching = false,
-            )
-        }
-
-        if (_uiState.value.autoScroll && resultLines.isNotEmpty()) {
-            _scrollEvent.send(resultLines.size - 1)
+        activeContext.ensureActive()
+        withContext(Dispatchers.Main) {
+            if (currentFilePath != path) return@withContext
+            if (invalidateCache) lineCache.clear()
+            displayLines = resultLines
+            _uiState.update {
+                it.copy(
+                    totalCount = resultLines.size,
+                    isLoading = false,
+                    isSearching = false,
+                )
+            }
+            if (_uiState.value.autoScroll && resultLines.isNotEmpty()) {
+                _scrollEvent.send(resultLines.size - 1)
+            }
         }
     }
 
-    fun getLineContent(position: Int): String = synchronized(lineLock) {
-        displayLines.getOrNull(position).orEmpty()
+    fun getLineContent(position: Int): String {
+        val lines = displayLines
+        val range = lines.getOrNull(position) ?: return ""
+        val path = currentFilePath ?: return ""
+        lineCache[range]?.let { return it.value }
+        // 未结束的尾行追加时先保留已显示的正文，避免异步读取期间行高归零。
+        val previousText = lineCache.entries.lastOrNull { it.key.start == range.start }?.value?.value.orEmpty()
+        if (lineCache.size >= MAX_CACHED_LINES) {
+            val oldest = lineCache.entries.iterator()
+            oldest.next()
+            oldest.remove()
+        }
+        val content = mutableStateOf(previousText)
+        lineCache[range] = content
+        viewModelScope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) {
+                    RandomAccessFile(path, "r").use { input ->
+                        val buffer = ByteArray((range.end - range.start).toInt())
+                        input.seek(range.start)
+                        input.readFully(buffer)
+                        buffer.toString(Charsets.UTF_8).removeSuffix("\n").removeSuffix("\r")
+                    }
+                }
+                if (currentFilePath == path && lineCache[range] === content) {
+                    content.value = text
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.printStackTrace(tag, "读取日志行失败: $path", e)
+            }
+        }
+        return content.value
     }
 
     private fun startFileObserver(path: String) {
@@ -337,29 +398,22 @@ class LogViewerViewModel(
             _uiState.update { it.copy(isExporting = true) }
             ModuleDiagnostics.event("export_log", "requested", "file=${File(path).name}")
             try {
-                if (!PermissionUtil.checkFilePermissions(context)) {
-                    ModuleDiagnostics.event("export_log", "permission_denied", "file=${File(path).name}")
-                    ToastUtil.showUiToast(context, "导出失败：缺少文件访问权限")
-                    return@launch
-                }
                 val sourceFile = File(path)
                 if (!sourceFile.exists()) {
                     ModuleDiagnostics.event("export_log", "source_missing", "file=${sourceFile.name}")
                     ToastUtil.showUiToast(context, "源文件不存在")
                     return@launch
                 }
-                val exportFile = withContext(Dispatchers.IO) {
-                    Files.exportFile(sourceFile, true)
-                }
-
-                ModuleDiagnostics.event("export_log", if (exportFile != null && exportFile.exists()) "completed" else "failed",
-                    "file=${sourceFile.name} size=${exportFile?.length() ?: 0}")
-                if (exportFile != null && exportFile.exists()) {
-                    val msg = "${context.getString(R.string.file_exported)} ${exportFile.path}"
-                    ToastUtil.showUiToast(context, msg)
-                } else {
-                    ToastUtil.showUiToast(context, "导出失败")
-                }
+                val exportedFile = withContext(Dispatchers.IO) {
+                    Files.exportFile(context, sourceFile, hasTime = true)
+                } ?: error("无法保存到下载目录")
+                ModuleDiagnostics.event("export_log", "completed", "file=${exportedFile.name}")
+                val relativePath = exportedFile.relativeTo(android.os.Environment.getExternalStorageDirectory())
+                ToastUtil.makeText(
+                    context,
+                    "${context.getString(R.string.file_exported)}：${relativePath.parent}/\n${relativePath.name}",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -406,7 +460,6 @@ class LogViewerViewModel(
     }
 
     fun toggleAutoScroll(enabled: Boolean) {
-        if (_uiState.value.autoScroll == enabled) return
         _uiState.update { it.copy(autoScroll = enabled) }
         if (enabled) viewModelScope.launch {
             val size = _uiState.value.totalCount
@@ -429,12 +482,11 @@ class LogViewerViewModel(
         searchJob = null
         updateJob = null
         fileUpdateChannel.tryReceive()
-        synchronized(lineLock) {
-            allLines.clear()
-            displayLines = emptyList()
-        }
+        allLines.clear()
+        displayLines = emptyList()
+        lineCache.clear()
         readOffset = 0L
-        pendingLine = ""
+        pendingLineOffset = 0L
         knownContentMarker = null
         forceFullReload.set(true)
         _uiState.update {
@@ -473,6 +525,8 @@ class LogViewerViewModel(
     companion object {
         private const val STATE_SEARCH_QUERY = "log_viewer_search_query"
         private const val DEFAULT_READ_BUFFER_SIZE = 8192
+        private const val MAX_DISPLAY_LINE_BYTES = 16 * 1024
+        private const val MAX_CACHED_LINES = 512
         private const val CONTENT_MARKER_SAMPLE_BYTES = 1024
 
         fun factory(application: Application): ViewModelProvider.Factory = viewModelFactory {

@@ -12,9 +12,6 @@ import org.json.JSONObject
 
 /**
  * 用于发送Hook数据到DEBUG服务器
- * @author Byseven
- * @date 2025/1/17
- * @apiNote 修复 R8 编译器崩溃问题，改为协程同步调用
  */
 object HookSender {
     private const val TAG = "HookSender"

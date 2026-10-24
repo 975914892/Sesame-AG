@@ -93,6 +93,16 @@ internal object GoldenBeanRpcCall {
             },
         )
 
+    fun fortuneDraw(): String = request(
+        "com.alipay.goldenbean.fortuneDraw",
+        JSONObject().apply {
+            put("bizType", MASTER_ENTRY.bizType)
+            put("source", MASTER_ENTRY.source)
+            put("taskId", "FORTUNE_DRAW")
+            put("version", VERSION)
+        },
+    )
+
     fun manureExchange(
         exchangeBeanAmount: Int,
         entry: GoldenBeanEntry = MASTER_ENTRY,

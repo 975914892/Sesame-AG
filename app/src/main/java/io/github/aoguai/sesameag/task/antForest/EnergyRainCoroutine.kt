@@ -110,9 +110,8 @@ object EnergyRainCoroutine {
             val timeSinceLastExec = currentTime - lastExecuteTime
             val cooldownSeconds = 3 // 冷却时间：3秒
 
-            if (timeSinceLastExec < cooldownSeconds * 1000) {
-                // 粗放点，delay 3秒
-                delay(cooldownSeconds * 1000.toLong())
+            if (timeSinceLastExec < cooldownSeconds * 1000L) {
+                delay(cooldownSeconds * 1000L - timeSinceLastExec)
             }
 
             val executed = energyRain(isManual, gameTaskCloser)
@@ -197,7 +196,7 @@ object EnergyRainCoroutine {
                             var matchedConfiguredTarget = false
                             var retryableGrantFailure = false
 
-                            for (j in 0 until grantInfos.length()) {
+                            for (j in (0 until grantInfos.length()).shuffled()) {
                                 val grantInfo = grantInfos.getJSONObject(j)
                                 if (!grantInfo.optBoolean("canGrantedStatus", false)) {
                                     continue

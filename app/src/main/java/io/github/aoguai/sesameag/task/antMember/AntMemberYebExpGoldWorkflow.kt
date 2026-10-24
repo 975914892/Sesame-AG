@@ -106,7 +106,7 @@ internal fun AntMember.handleYebExpGoldTasks() {
         var handledTask = trySignInYebExpGold(queryResponse, manualTaskTitles)
         if (ApplicationHookConstants.isOffline()) return
         val adapter = YebExpGoldTaskFlowAdapter(this)
-        val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+        val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
         handledTask = runResult.progressChanged || handledTask
         if (runResult.interrupted || ApplicationHookConstants.isOffline()) return
 
@@ -238,7 +238,7 @@ private class YebExpGoldTaskFlowAdapter(private val member: AntMember) : TaskFlo
     }
 
     override fun onQueryFailed(response: JSONObject) {
-        logError("查询失败 rpc=$queryRpc raw=$response")
+        logError("$flowName[任务查询失败] rpc=$queryRpc raw=$response")
     }
 
     override fun logInfo(message: String) = Log.member(message)

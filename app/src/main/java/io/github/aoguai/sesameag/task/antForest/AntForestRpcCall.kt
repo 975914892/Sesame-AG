@@ -14,6 +14,29 @@ import java.util.UUID
  * 森林 RPC 调用类
  */
 object AntForestRpcCall {
+    fun welfareForestHome(activityId: String): String = RequestManager.requestString(
+        "alipay.antforest.forest.h5.welfareForestHome",
+        JSONArray().put(JSONObject().put("activityId", activityId).put("source", "chInfo_ch_appid-20000067")).toString(),
+    )
+
+    fun welfareForestWater(activityId: String): String = RequestManager.requestString(
+        "alipay.antforest.forest.h5.welfareForestWater",
+        JSONArray().put(JSONObject().put("activityId", activityId).put("activityParam", JSONObject())
+            .put("energy", 15).put("waterWay", "water").put("source", "chInfo_ch_appid-20000067")).toString(),
+    )
+
+    fun listUserDressForBackpack(positionType: String): String = RequestManager.requestString(
+        "alipay.antforest.forest.h5.listUserDressForBackpack",
+        JSONArray().put(JSONObject().put("pageQuery", false).put("positionType", positionType)
+            .put("source", "chInfo_ch_appid-60000002").put("version", "20230501")).toString(),
+    )
+
+    fun wearDress(dressTypeList: JSONArray): String = RequestManager.requestString(
+        "alipay.antforest.forest.h5.wearDress",
+        JSONArray().put(JSONObject().put("dressTypeList", dressTypeList)
+            .put("outBizNo", UUID.randomUUID().toString()).put("source", "chInfo_ch_appid-60000002")).toString(),
+    )
+
     fun memberForestSignin(version: String = "plant_black_v2"): String = RequestManager.requestString(
         "com.alipay.amic.commonmodule.rpc.MemberForestSigninFacade.memberForestSignin",
         JSONArray().put(JSONObject().put("chInfo", "forestWater").put("scene", "promote")
@@ -24,6 +47,23 @@ object AntForestRpcCall {
         "com.alipay.ugshopping.biz.service.rpc.plant.PlantFacade.plantAward",
         JSONArray().put(JSONObject().put("awardType", "WATER").put("awardSpeed", awardSpeed)
             .put("source", "forestWater")).toString(),
+    )
+
+    fun queryPlantTaskList(): String = RequestManager.requestString(
+        "com.alipay.ugshopping.biz.service.rpc.plant.PlantFacade.queryPlantTaskList",
+        JSONArray().put(JSONObject().put("bizType", "forestMemberCorp").put("chInfo", "forestWater")).toString(),
+    )
+
+    fun queryPlantFeeds(page: Int): String = RequestManager.requestString(
+        "com.alipay.ugshopping.biz.service.rpc.plant.PlantFacade.queryPlantFeedsItemList",
+        JSONArray().put(JSONObject().put("bizType", "forestMemberCorp").put("blackItemIds", JSONArray())
+            .put("chInfo", "forestWater").put("pageNum", page).put("pageSize", 20)
+            .put("sessionId", "forestWater").put("version", "forest_oasis_v2")).toString(),
+    )
+
+    fun receivePlantTaskAward(taskCode: String): String = RequestManager.requestString(
+        "com.alipay.ugshopping.biz.service.rpc.plant.PlantFacade.plantAward",
+        JSONArray().put(JSONObject().put("awardType", taskCode).put("source", "forestWater")).toString(),
     )
 
     private const val DEFAULT_SOURCE = "chInfo_ch_appcenter__chsub_9patch"
@@ -85,7 +125,7 @@ object AntForestRpcCall {
     @JvmStatic
     fun init() {
         val alipayVersion = io.github.aoguai.sesameag.hook.ApplicationHook.alipayVersion
-        Log.forest("当前支付宝版本: $alipayVersion")
+        Log.forest("当前目标应用版本: $alipayVersion")
         try {
             when (alipayVersion.versionString) {
                 "10.8.20.8000" -> {
@@ -1312,6 +1352,17 @@ object AntForestRpcCall {
         RequestManager.requestString(
             "alipay.antforest.forest.h5.protectBubble",
             "[{\"source\":\"$PROTECT_BUBBLE_SOURCE\",\"targetUserId\":\"$targetUserId\",\"version\":\"$PROTECT_BUBBLE_VERSION\"}]",
+        )
+
+    @JvmStatic
+    fun collectGiftBox(targetId: String, targetUserId: String): String =
+        RequestManager.requestString(
+            "alipay.antforest.forest.h5.collectGiftBox",
+            JSONArray().put(JSONObject().apply {
+                put("source", "chInfo_ch_appcenter__chsub_9patch")
+                put("targetId", targetId)
+                put("targetUserId", targetUserId)
+            }).toString(),
         )
 
     @JvmStatic

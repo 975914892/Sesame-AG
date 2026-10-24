@@ -3,6 +3,7 @@ package io.github.aoguai.sesameag.task
 import android.annotation.SuppressLint
 import io.github.aoguai.sesameag.data.RuntimeInfo
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.AccountSessionIdentity
 import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
@@ -23,8 +24,6 @@ import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONException
@@ -44,29 +43,26 @@ import org.json.JSONObject
  * 主要组件：
  * - taskScope: 任务协程作用域
  * - childTaskMap: 子任务映射表
- * - executionMutex: 执行互斥锁
+ * - executionQueue: 完整任务按提交顺序执行
  * - runCents: 任务运行次数计数器
  *
  * 使用方式：
  * 继承此类并实现抽象方法：getName(), getFields(), check(), run()
  *
- * @author Sesame-AG
  */
 abstract class ModelTask : Model() {
-    /** 任务协程作用域 */
-    private var taskScope: CoroutineScope? = null
-    
+    private data class TaskState(
+        val scope: CoroutineScope? = null,
+        val startJob: Deferred<TaskExecutionOutcome>? = null,
+        val predecessors: List<Job> = emptyList(),
+    )
+    private val taskState = java.util.concurrent.atomic.AtomicReference(TaskState())
+    private val currentStartJob: Deferred<TaskExecutionOutcome>?
+        get() = taskState.get().startJob
+    private val executionQueue = io.github.aoguai.sesameag.util.SerialTaskQueue()
+
     /** 子任务映射表，存储当前任务的所有子任务 */
     private val childTaskMap: MutableMap<String, ChildModelTask> = ConcurrentHashMap()
-    
-    /** 执行互斥锁，防止重复执行 */
-    private val executionMutex = Mutex()
-
-    /** 当前已提交的启动 Job，覆盖“等待互斥锁”和“正在运行”两个阶段 */
-    @Volatile
-    private var currentStartJob: Deferred<TaskExecutionOutcome>? = null
-
-    private val startJobLock = Any()
     
     /** 任务运行次数计数器 */
     var runCents: Int = 0
@@ -78,7 +74,7 @@ abstract class ModelTask : Model() {
         protected set
 
     /** 连续执行失败计数（内存，进程重启清零），达到阈值后自动挂起本任务 */
-    private var consecutiveFailures = 0
+    private val consecutiveFailures = AtomicInteger(0)
 
     /** 增加任务运行次数 */
     fun addRunCents() {
@@ -89,22 +85,18 @@ abstract class ModelTask : Model() {
      * 准备任务执行环境
      */
     override fun prepare() {
-        if (taskScope == null) {
-            taskScope = CoroutineScope(
-                Dispatchers.Default + 
-                SupervisorJob() + 
-                CoroutineName("ModelTask-${getName()}")
-            )
-        }
+        ensureTaskScope()
     }
 
-    /**
-     * 确保协程作用域初始化
-     */
-    private fun ensureTaskScope() {
-        if (taskScope == null || !taskScope!!.isActive) {
-            taskScope =
-                CoroutineScope(Dispatchers.Default + SupervisorJob() + CoroutineName("Task-$id"))
+    private fun ensureTaskScope(): TaskState {
+        TaskExecutionReport.current()?.ensureCurrent()
+        while (true) {
+            val state = taskState.get()
+            if (state.scope?.isActive == true) return state
+            val scope = CoroutineScope(Dispatchers.Default + SupervisorJob() + CoroutineName("Task-$id"))
+            val next = state.copy(scope = scope, predecessors = state.predecessors.filterNot { it.isCompleted })
+            if (taskState.compareAndSet(state, next)) return next
+            scope.cancel()
         }
     }
 
@@ -192,33 +184,29 @@ abstract class ModelTask : Model() {
     }
 
     /** 任务级异常暂停：写入持久化暂停表（按用户隔离），基类 check() 与常驻通知据此拦截/展示 */
-    protected fun pauseSelfUntil(untilMs: Long) {
-        val name = getName() ?: return
-        synchronized(taskPauseLock) {
-            val runtimeInfo = RuntimeInfo.getInstance()
-            val jo = try {
-                JSONObject(runtimeInfo.getString(RuntimeInfo.RuntimeInfoKey.TaskPauseMap))
-            } catch (e: JSONException) {
-                JSONObject()
-            }
-            jo.put(name, untilMs)
-            runtimeInfo.put(RuntimeInfo.RuntimeInfoKey.TaskPauseMap, jo.toString())
+    protected fun pauseSelfUntil(untilMs: Long): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        val name = getName() ?: return@transaction
+        val runtimeInfo = RuntimeInfo.getInstance()
+        val jo = try {
+            JSONObject(runtimeInfo.getString(RuntimeInfo.RuntimeInfoKey.TaskPauseMap))
+        } catch (e: JSONException) {
+            JSONObject()
         }
+        jo.put(name, untilMs)
+        runtimeInfo.put(RuntimeInfo.RuntimeInfoKey.TaskPauseMap, jo.toString())
     }
 
     /** 连续执行失败达到阈值后自动挂起本任务，避免反复异常空转 */
-    @Synchronized
     private fun onTaskRunFailure() {
         val name = getName() ?: return
-        consecutiveFailures++
+        val failures = consecutiveFailures.incrementAndGet()
         val threshold = BaseModel.exceptionPauseThreshold.value ?: 0
         val waitMs = (BaseModel.waitWhenException.value ?: 0).toLong()
-        if (threshold >= 1 && consecutiveFailures >= threshold && waitMs > 0) {
+        if (threshold >= 1 && failures >= threshold && waitMs > 0 && consecutiveFailures.compareAndSet(failures, 0)) {
             val until = System.currentTimeMillis() + waitMs
             pauseSelfUntil(until)
-            Log.record(TAG, name + " 连续失败 " + consecutiveFailures + " 次，已自动挂起至 " + TimeUtil.getCommonDate(until))
-            sendAlert("任务连续异常挂起", "「" + name + "」连续失败 " + consecutiveFailures + " 次，已挂起至 " + TimeUtil.getCommonDate(until))
-            consecutiveFailures = 0
+            Log.record(TAG, name + " 连续失败 " + failures + " 次，已自动挂起至 " + TimeUtil.getCommonDate(until))
+            sendAlert("任务连续异常挂起", "「" + name + "」连续失败 " + failures + " 次，已挂起至 " + TimeUtil.getCommonDate(until))
         }
     }
 
@@ -246,6 +234,8 @@ abstract class ModelTask : Model() {
      * 子类不应该直接覆盖此方法
      */
     suspend fun run() {
+        currentCoroutineContext().ensureActive()
+        TaskExecutionReport.current()?.ensureCurrent()
         if (!WorkflowRootGuard.isExecutionAllowed()) {
             throw CancellationException("必需权限或使用协议未就绪，任务已取消")
         }
@@ -267,15 +257,10 @@ abstract class ModelTask : Model() {
      * @param childTask 要添加的子任务
      */
     private suspend fun addChildTaskSuspend(childTask: ChildModelTask) {
-        ensureTaskScope()
+        currentCoroutineContext().ensureActive()
         val childId = childTask.id
-        
-        // 取消已存在的同ID任务
-        childTaskMap[childId]?.cancel()
-        
-        // 设置父任务引用
         childTask.modelTask = this
-        childTaskMap[childTask.id] = childTask
+        childTaskMap.put(childId, childTask)?.cancel()
 
         // 在协程作用域中启动子任务
         val job = CoroutineScope(currentCoroutineContext()).launch {
@@ -323,8 +308,13 @@ abstract class ModelTask : Model() {
      * @return 始终返回true
      */
     fun addChildTask(childTask: ChildModelTask): Boolean {
-        ensureTaskScope()
-        taskScope!!.launch(start = CoroutineStart.UNDISPATCHED) {
+        childTask.executionReport.ensureCurrent()
+        val state = ensureTaskScope()
+        val scope = checkNotNull(state.scope)
+        childTask.parentJob = scope.coroutineContext[Job]
+        scope.launch(childTask.executionReport.context, start = CoroutineStart.UNDISPATCHED) {
+            childTask.executionReport.executionJob = currentCoroutineContext()[Job]
+            state.predecessors.joinAll()
             addChildTaskSuspend(childTask)
         }
         return true
@@ -336,7 +326,7 @@ abstract class ModelTask : Model() {
         ownerUserId: String,
         sessionEpoch: Long,
         source: String,
-        workflowMutex: Mutex,
+        workflowQueue: io.github.aoguai.sesameag.util.SerialTaskQueue,
         persistent: Boolean = true,
         afterExecution: suspend (TaskExecutionOutcome) -> Unit = {},
         block: suspend () -> TaskExecutionOutcome,
@@ -347,15 +337,18 @@ abstract class ModelTask : Model() {
             (schedule.ownerUserId != ownerUserId || schedule.sessionEpoch != sessionEpoch ||
                 !PersistentScheduleRegistry.markRunning(scheduleId, source = source, expected = schedule))
         ) return false
+        val report = TaskExecutionReport(AccountSessionIdentity(ownerUserId, sessionEpoch))
         val worker = runCatching {
-            ensureTaskScope()
-            taskScope!!.launch(start = CoroutineStart.LAZY) {
-                val report = TaskExecutionReport()
+            report.ensureCurrent()
+            val state = ensureTaskScope()
+            checkNotNull(state.scope).launch(report.context, start = CoroutineStart.LAZY) {
+                state.predecessors.joinAll()
+                report.executionJob = currentCoroutineContext()[Job]
                 var lease: WakeLockManager.WakeLockLease? = null
                 try {
                     lease = WakeLockManager.acquire(context, PersistentScheduleDefaults.TASK_EXECUTION_WAKELOCK_MS,
                         source = source, scheduleId = scheduleId)
-                    workflowMutex.withLock {
+                    workflowQueue.submit {
                         ensureActive()
                         if (!AccountSessionCoordinator.isCurrentSession(ownerUserId, sessionEpoch) ||
                             ApplicationHookConstants.isOffline() || !WorkflowRootGuard.isExecutionAllowed()
@@ -363,7 +356,7 @@ abstract class ModelTask : Model() {
                         if (schedule != null && System.currentTimeMillis() > schedule.deadlineAtMs()) {
                             PersistentScheduleRegistry.markFailed(context, scheduleId, "worker_start_after_deadline", source = source)
                             Log.error(TAG, "持久任务等待执行时超过截止时间[${getName()}] id=$scheduleId")
-                            return@withLock
+                            return@submit
                         }
                         val result = withContext(report.context) { block() }
                         ensureActive()
@@ -464,79 +457,73 @@ abstract class ModelTask : Model() {
         bypassExecutionChecks: Boolean,
         rejectExisting: Boolean,
     ): Deferred<TaskExecutionOutcome>? {
-        ensureTaskScope()
-
-        val startJob = synchronized(startJobLock) {
-            val existingJob = currentStartJob
+        val report = TaskExecutionReport()
+        while (true) {
+            report.ensureCurrent()
+            val state = ensureTaskScope()
+            val existingJob = state.startJob
             if (!force && existingJob != null && !existingJob.isCompleted) {
-                if (rejectExisting) {
-                    Log.record(TAG, "任务 ${getName()} 正在运行或等待启动，跳过手动启动")
-                    null
-                } else {
-                    Log.record(TAG, "任务 ${getName()} 正在运行或等待启动，跳过重复启动")
-                    existingJob
-                }
-            } else {
-                taskScope!!.async(start = CoroutineStart.LAZY) {
-                    executionMutex.withLock {
-                        if (!WorkflowRootGuard.isExecutionAllowed()) {
-                            Log.record(TAG, "必需权限或使用协议未就绪，拒绝启动任务 ${getName()}")
-                            return@withLock TaskExecutionOutcome.SKIPPED
-                        }
-                        if (isRunning && !force) {
-                            Log.record(TAG, "任务 ${getName()} 正在运行，跳过启动")
-                            return@withLock TaskExecutionOutcome.SKIPPED
-                        }
-                        if (isRunning && force) {
-                            Log.record(TAG, "强制重启任务 ${getName()}")
-                            stopTask()
-                        }
-                        if (!bypassExecutionChecks && (!isEnable() || !check())) {
-                            Log.record(TAG, "任务 ${getName()} 不满足执行条件")
-                            return@withLock TaskExecutionOutcome.SKIPPED
-                        }
-                        val runningName = runningStatusName()
-                        val report = TaskExecutionReport()
-                        try {
-                            isRunning = true
-                            addRunCents()
-                            startTaskRunning(runningName)
-                            withContext(report.context) {
-                                executeMultiRoundTask(rounds)
-                                ensureActive()
-                            }
-                        } catch (e: CancellationException) {
-                            Log.record(TAG, "任务被取消: ${getName()}")
-                            throw e
-                        } catch (e: Exception) {
-                            Log.printStackTrace("startTask err: ${getName()}", e)
-                            report.recordException()
-                        } finally {
-                            isRunning = false
-                            finishTaskRunning(runningName)
-                            updateRunningNextExec(-1)
-                        }
-                        if (report.hasException) {
-                            onTaskRunFailure()
-                        } else {
-                            synchronized(this@ModelTask) { consecutiveFailures = 0 }
-                        }
-                        report.outcome()
+                Log.record(TAG, "任务 ${getName()} 正在运行或等待启动，跳过${if (rejectExisting) "手动" else "重复"}启动")
+                return if (rejectExisting) null else existingJob
+            }
+            val scope = if (force) {
+                CoroutineScope(Dispatchers.Default + SupervisorJob() + CoroutineName("Task-$id"))
+            } else checkNotNull(state.scope)
+            val stopping = if (force) state.scope?.coroutineContext?.get(Job) else null
+            val predecessors = (state.predecessors + listOfNotNull(stopping)).filterNot { it.isCompleted }
+            val job = scope.async(report.context, start = CoroutineStart.LAZY) {
+                report.executionJob = currentCoroutineContext()[Job]
+                predecessors.joinAll()
+                executionQueue.submit {
+                    report.ensureCurrent()
+                    if (!WorkflowRootGuard.isExecutionAllowed()) {
+                        Log.record(TAG, "必需权限或使用协议未就绪，拒绝启动任务 ${getName()}")
+                        return@submit TaskExecutionOutcome.SKIPPED
                     }
-                }.also { job ->
-                    currentStartJob = job
-                    job.invokeOnCompletion {
-                        synchronized(startJobLock) {
-                            if (currentStartJob === job) {
-                                currentStartJob = null
-                            }
-                        }
+                    if (!bypassExecutionChecks && (!isEnable() || !check())) {
+                        Log.record(TAG, "任务 ${getName()} 不满足执行条件")
+                        return@submit TaskExecutionOutcome.SKIPPED
                     }
+                    val runningName = runningStatusName()
+                    try {
+                        isRunning = true
+                        addRunCents()
+                        startTaskRunning(runningName)
+                        withContext(report.context) {
+                            executeMultiRoundTask(rounds)
+                            ensureActive()
+                        }
+                    } catch (e: CancellationException) {
+                        Log.record(TAG, "任务被取消: ${getName()}")
+                        throw e
+                    } catch (e: Exception) {
+                        Log.printStackTrace("startTask err: ${getName()}", e)
+                        report.recordException()
+                    } finally {
+                        isRunning = false
+                        finishTaskRunning(runningName)
+                        updateRunningNextExec(-1)
+                    }
+                    if (report.hasException) onTaskRunFailure() else consecutiveFailures.set(0)
+                    report.outcome()
                 }
             }
+            if (!taskState.compareAndSet(state, TaskState(scope, job, predecessors))) {
+                job.cancel()
+                if (force) scope.cancel()
+                continue
+            }
+            job.invokeOnCompletion {
+                taskState.updateAndGet { current -> if (current.startJob === job) current.copy(startJob = null) else current }
+            }
+            if (stopping != null) {
+                stoppingJobs.add(stopping)
+                stopping.invokeOnCompletion { stoppingJobs.remove(stopping) }
+                stopping.cancel()
+            }
+            job.start()
+            return job
         }
-        startJob?.start()
-        return startJob
     }
 
     /**
@@ -591,40 +578,29 @@ abstract class ModelTask : Model() {
      * 注意：此方法只负责发出取消信号；如需等待退出，请调用 stopTaskAndWait。
      */
     open fun stopTask() {
-        // 立即标记为非运行状态
         isRunning = false
-
-        // 取消协程作用域（这会自动取消所有子协程）
-        taskScope?.cancel()
-        taskScope = null
-
-        try {
-            childTaskMap.values.forEach { childTask ->
-                try {
-                    childTask.cancel()
-                } catch (e: Exception) {
-                    Log.printStackTrace("stopTask err", e)
-                }
+        val previous = taskState.getAndUpdate { state ->
+            TaskState(predecessors = (state.predecessors + listOfNotNull(state.scope?.coroutineContext?.get(Job)))
+                .filterNot { it.isCompleted })
+        }
+        val stopping = previous.scope?.coroutineContext?.get(Job)
+        if (stopping != null) {
+            stoppingJobs.add(stopping)
+            stopping.invokeOnCompletion { stoppingJobs.remove(stopping) }
+            stopping.cancel()
+            childTaskMap.values.filter { it.parentJob === stopping }.forEach { childTask ->
+                try { childTask.cancel() }
+                catch (e: Exception) { Log.printStackTrace("stopTask err", e) }
+                finally { childTaskMap.remove(childTask.id, childTask) }
             }
-        } finally {
-            childTaskMap.clear()
         }
     }
 
     suspend fun stopTaskAndWait(timeoutMs: Long = 5_000L): Boolean {
-        val runningJob = synchronized(startJobLock) { currentStartJob }
+        val state = taskState.get()
         stopTask()
-        if (runningJob == null) {
-            return true
-        }
-        return withTimeoutOrNull(timeoutMs) {
-            try {
-                runningJob.join()
-                true
-            } catch (_: CancellationException) {
-                true
-            }
-        } ?: false
+        val jobs = state.predecessors + listOfNotNull(state.scope?.coroutineContext?.get(Job))
+        return withTimeoutOrNull(timeoutMs) { jobs.joinAll(); true } ?: false
     }
 
     /**
@@ -690,7 +666,9 @@ abstract class ModelTask : Model() {
         // 任务结束时的回调（isSuccess 代表是否正常执行完）
         var onCompleted: ((isSuccess: Boolean) -> Unit)? = null
     ) {
+        internal val executionReport = TaskExecutionReport()
         var modelTask: ModelTask? = null
+        internal var parentJob: Job? = null
         
         /** 协程任务Job */
         var job: Job? = null
@@ -766,6 +744,7 @@ abstract class ModelTask : Model() {
                     throw CancellationException("必需权限或使用协议未就绪，子任务已取消")
                 }
 
+                executionReport.ensureCurrent()
                 // 执行任务逻辑
                 suspendRunnable?.invoke() ?: defaultRun()
                 isSuccess = true // 标记为成功执行
@@ -830,39 +809,34 @@ abstract class ModelTask : Model() {
         /** 日志标签 */
         private const val TAG = "ModelTask"
 
-        /** 任务级异常暂停表的读写锁，保护 JSON 解析与写回 */
-        private val taskPauseLock = Any()
-
         /**
          * 读取未过期的任务级异常暂停表（任务名 → 恢复时间），顺手移除已过期项。
          */
         @JvmStatic
-        fun activeTaskPauseMap(): Map<String, Long> {
+        fun activeTaskPauseMap(): Map<String, Long> = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             val runtimeInfo = RuntimeInfo.getInstance()
-            synchronized(taskPauseLock) {
-                val raw = runtimeInfo.getString(RuntimeInfo.RuntimeInfoKey.TaskPauseMap)
-                if (raw.isBlank()) return emptyMap()
-                val jo = try {
-                    JSONObject(raw)
-                } catch (e: JSONException) {
-                    return emptyMap()
-                }
-                val now = System.currentTimeMillis()
-                val active = mutableMapOf<String, Long>()
-                var expired = false
-                for (key in jo.keys()) {
-                    val until = jo.optLong(key, 0L)
-                    if (until > now) {
-                        active[key] = until
-                    } else {
-                        expired = true
-                    }
-                }
-                if (expired) {
-                    runtimeInfo.put(RuntimeInfo.RuntimeInfoKey.TaskPauseMap, JSONObject(active).toString())
-                }
-                return active
+            val raw = runtimeInfo.getString(RuntimeInfo.RuntimeInfoKey.TaskPauseMap)
+            if (raw.isBlank()) return@transaction emptyMap()
+            val jo = try {
+                JSONObject(raw)
+            } catch (e: JSONException) {
+                return@transaction emptyMap()
             }
+            val now = System.currentTimeMillis()
+            val active = mutableMapOf<String, Long>()
+            var expired = false
+            for (key in jo.keys()) {
+                val until = jo.optLong(key, 0L)
+                if (until > now) {
+                    active[key] = until
+                } else {
+                    expired = true
+                }
+            }
+            if (expired) {
+                runtimeInfo.put(RuntimeInfo.RuntimeInfoKey.TaskPauseMap, JSONObject(active).toString())
+            }
+            return@transaction active
         }
         
         /** 全局任务管理器协程作用域 */
@@ -875,17 +849,28 @@ abstract class ModelTask : Model() {
          */
         @JvmStatic
         fun stopAllTask() {
-            globalTaskScope.launch {
-                for (model in modelArray) {
-                    if (model is ModelTask) {
-                        try {
-                            model.stopTask()
-                        } catch (e: Exception) {
-                            Log.printStackTrace("停止任务异常", e)
-                        }
-                    }
+            modelArray.filterIsInstance<ModelTask>().forEach { model ->
+                try {
+                    model.stopTask()
+                } catch (e: Exception) {
+                    Log.printStackTrace("停止任务异常", e)
                 }
             }
+        }
+
+        private val stoppingJobs = ConcurrentHashMap.newKeySet<Job>()
+
+        /** 仅发出取消信号；所有父作用域（含独立子任务）退出后异步续接。 */
+        internal fun stopAllTaskAndNotify(mainTask: ModelTask?, onStopped: () -> Unit): Boolean {
+            mainTask?.stopTask()
+            stopAllTask()
+            val jobs = stoppingJobs.toList()
+            if (jobs.all { it.isCompleted }) return true
+            globalTaskScope.launch {
+                jobs.joinAll()
+                onStopped()
+            }
+            return false
         }
 
         @JvmStatic
@@ -895,11 +880,10 @@ abstract class ModelTask : Model() {
             for (model in modelArray) {
                 if (model is ModelTask) {
                     val stopped = try {
-                        val runningJob = synchronized(model.startJobLock) { model.currentStartJob }
+                        val state = model.taskState.get()
+                        val jobs = state.predecessors + listOfNotNull(state.scope?.coroutineContext?.get(Job))
                         model.stopTask()
-                        if (runningJob != null) {
-                            runningJobs += runningJob
-                        }
+                        runningJobs += jobs
                         true
                     } catch (e: Exception) {
                         Log.printStackTrace("停止任务异常", e)

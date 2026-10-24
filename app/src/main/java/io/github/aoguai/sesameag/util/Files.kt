@@ -3,19 +3,122 @@
 package io.github.aoguai.sesameag.util
 
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.os.Environment
+import android.provider.MediaStore
 import com.fasterxml.jackson.core.type.TypeReference
 import io.github.aoguai.sesameag.data.General
+import io.github.aoguai.sesameag.storage.PrivateStorage
+import io.github.aoguai.sesameag.storage.StoreAccess
+import io.github.aoguai.sesameag.storage.StoreFile
 import io.github.aoguai.sesameag.entity.UserEntity
 import java.io.File
 import java.io.FileWriter
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.io.IOException
+import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
 import java.util.Date
+import org.json.JSONArray
+import org.json.JSONObject
 
 object Files {
     private val TAG = Files::class.java.simpleName
+    private val lockedAccounts = ThreadLocal.withInitial { mutableSetOf<String>() }
+
+    /** 同一进程可重入，跨进程覆盖账号数据的整个读改写过程。 */
+    fun <T> withAccountLock(userId: String, action: () -> T): T = StoreAccess.transaction {
+        require(userId.isNotBlank()) { "账号为空" }
+        io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
+        val held = checkNotNull(lockedAccounts.get())
+        if (userId in held) return@transaction action()
+        held.add(userId)
+        try { recoverAccountTransaction(userId); action() }
+        finally { held.remove(userId) }
+    }
+
+    /** 备份先落盘；未提交的多文件变更在下次账号读取前恢复。 */
+    fun <T> withAccountTransaction(userId: String, files: Collection<File>, action: () -> T): T =
+        withAccountLock(userId) {
+            val directory = getUserConfigDir(userId).canonicalFile
+            val journal = child(directory, ".account-transaction.json")
+            val committed = child(directory, ".account-transaction.committed")
+            check(!journal.exists() && !committed.exists()) { "账号存在未恢复的事务" }
+            val backup = JSONObject()
+            files.distinctBy { it.canonicalPath }.forEach { file ->
+                require(file.canonicalFile.parentFile == directory && !file.name.startsWith(".")) { "事务文件不属于目标账号" }
+                backup.put(file.name, if (file.exists()) readText(file) else JSONObject.NULL)
+            }
+            check(writeAtomically(backup.toString(), journal)) { "保存账号事务备份失败" }
+            val result = try {
+                action().also {
+                    io.github.aoguai.sesameag.task.TaskExecutionReport.current()?.ensureCurrent(userId)
+                    check(writeAtomically("committed", committed)) { "提交账号事务失败" }
+                }
+            } catch (failure: Throwable) {
+                try {
+                    recoverAccountTransaction(userId)
+                } catch (rollback: Throwable) {
+                    throw IOException("操作失败且恢复不完整：${rollback.message}", failure).also {
+                        it.addSuppressed(rollback)
+                    }
+                }
+                throw failure
+            }
+            runCatching { recoverAccountTransaction(userId) }.onFailure {
+                Log.printStackTrace(TAG, "事务已提交，清理记录将在下次账号读取时重试", it)
+            }
+            result
+        }
+
+    private fun recoverAccountTransaction(userId: String) {
+        val directory = getUserConfigDir(userId)
+        val journal = child(directory, ".account-transaction.json")
+        val committed = child(directory, ".account-transaction.committed")
+        if (journal.exists() && !committed.exists()) {
+            val backup = JSONObject(readText(journal))
+            val names = backup.keys()
+            val failed = mutableListOf<String>()
+            while (names.hasNext()) {
+                val name = names.next()
+                val file = child(directory, name)
+                require(file.canonicalFile.parentFile == directory.canonicalFile && !name.startsWith(".")) { "事务备份路径无效" }
+                val restored = if (backup.isNull(name)) !file.exists() || file.delete()
+                    else writeAtomically(backup.getString(name), file)
+                if (!restored) failed.add(name)
+            }
+            check(failed.isEmpty()) { "无法恢复文件：${failed.joinToString()}" }
+            Log.record(TAG, "已恢复未完成的账号文件事务")
+        }
+        check(!journal.exists() || journal.delete()) { "无法清理账号事务备份" }
+        check(!committed.exists() || committed.delete()) { "无法清理账号事务提交记录" }
+    }
+
+    fun writeAtomically(text: String, file: File): Boolean {
+        if (file is StoreFile) { StoreAccess.write(file, text); return true }
+        var temporary: File? = null
+        return try {
+            val parent = requireNotNull(file.parentFile)
+            check(parent.isDirectory || parent.mkdirs()) { "无法创建目录: $parent" }
+            temporary = File.createTempFile(".${file.name}.", ".tmp", parent)
+            FileOutputStream(temporary).use { output ->
+                output.write(text.toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+            java.nio.file.Files.move(
+                temporary.toPath(), file.toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING
+            )
+            true
+        } catch (e: Exception) {
+            Log.printStackTrace(TAG, "原子保存失败: ${file.name}", e)
+            false
+        } finally {
+            runCatching { temporary?.delete() }
+        }
+    }
 
     data class ClearAllResult(
         val failedPaths: List<String>
@@ -26,14 +129,32 @@ object Files {
 
     const val CONFIG_DIR_NAME = "sesame-AG"
 
-    @JvmField
-    val MAIN_DIR: File = getMainDir()
+    @JvmField val MAIN_DIR: File = StoreFile.root
+    @JvmField val CONFIG_DIR: File = StoreFile(StoreFile.root, "config")
+    val LOG_DIR: File get() { PrivateStorage.requireReady(); return File(PrivateStorage.root, "log").apply { mkdirs() } }
 
-    @JvmField
-    val CONFIG_DIR: File = getConfigDir()
+    fun child(parent: File, name: String): File = if (parent is StoreFile) StoreFile(parent, name) else File(parent, name)
 
-    @JvmField
-    val LOG_DIR: File = getLogDir()
+    fun localFile(file: File): File = if (file is StoreFile) {
+        check(!StoreAccess.isRemote) { "宿主不能访问模块私有路径" }
+        PrivateStorage.requireReady()
+        file.localFile()
+    } else file
+
+    fun <T> withInputStream(file: File, block: (java.io.InputStream) -> T): T =
+        if (file is StoreFile) StoreAccess.input(file, block) else file.inputStream().use(block)
+
+    fun appendSynced(file: File, text: String) {
+        if (file is StoreFile) StoreAccess.write(file, text, append = true)
+        else FileOutputStream(file, true).use { it.write(text.toByteArray(Charsets.UTF_8)); it.fd.sync() }
+    }
+
+    fun truncate(file: File, length: Long) {
+        if (file is StoreFile) StoreAccess.truncate(file, length)
+        else RandomAccessFile(file, "rw").use { it.setLength(length); it.fd.sync() }
+    }
+
+    fun readText(file: File): String = if (file is StoreFile) StoreAccess.read(file) else file.readText(Charsets.UTF_8)
 
     /**
      * 确保指定的目录存在且不是一个文件。
@@ -58,30 +179,9 @@ object Files {
         }
     }
 
-    private fun getMainDir(): File {
-        val storageDirStr = Environment.getExternalStorageDirectory().toString() +
-                File.separator + "Android" + File.separator + "media" + File.separator + General.PACKAGE_NAME
-        val storageDir = File(storageDirStr)
-        val mainDir = File(storageDir, CONFIG_DIR_NAME)
-        ensureDir(mainDir)
-        return mainDir
-    }
-
-    private fun getLogDir(): File {
-        val logDir = File(MAIN_DIR, "log")
-        ensureDir(logDir)
-        return logDir
-    }
-
-    private fun getConfigDir(): File {
-        val configDir = File(MAIN_DIR, "config")
-        ensureDir(configDir)
-        return configDir
-    }
-
     @JvmStatic
     fun getUserConfigDir(userId: String): File {
-        val configDir = File(CONFIG_DIR, userId)
+        val configDir = child(CONFIG_DIR, userId)
         ensureDir(configDir)
         return configDir
     }
@@ -95,7 +195,7 @@ object Files {
         } else null)
             ?.asSequence()
             ?.filter { directory ->
-                directory.isDirectory && File(directory, "config_v2.json").isFile
+                directory.isDirectory && child(directory, "config_v2.json").isFile
             }
             ?.map { directory -> directory.name }
             ?.toList()
@@ -103,22 +203,20 @@ object Files {
 
     @JvmStatic
     fun getDefaultConfigV2File(): File {
-        return File(CONFIG_DIR, "config_v2.json")
+        return child(CONFIG_DIR, "config_v2.json")
     }
 
     @JvmStatic
-    @Synchronized
     fun setDefaultConfigV2File(json: String): Boolean {
-        return write2File(json, File(CONFIG_DIR, "config_v2.json"))
+        return write2File(json, child(CONFIG_DIR, "config_v2.json"))
     }
 
     @JvmStatic
-    @Synchronized
     fun getConfigV2File(userId: String): File {
-        var confV2File = File(CONFIG_DIR.toString() + File.separator + userId, "config_v2.json")
+        var confV2File = child(child(CONFIG_DIR, userId), "config_v2.json")
         // 如果新配置文件不存在，则尝试从旧配置文件迁移
         if (!confV2File.exists()) {
-            val oldFile = File(CONFIG_DIR, "config_v2-$userId.json")
+            val oldFile = child(CONFIG_DIR, "config_v2-$userId.json")
             if (oldFile.exists()) {
                 val content = readFromFile(oldFile)
                 if (write2File(content, confV2File)) {
@@ -135,9 +233,8 @@ object Files {
     }
 
     @JvmStatic
-    @Synchronized
     fun setConfigV2File(userId: String, json: String): Boolean {
-        return write2File(json, File(CONFIG_DIR.toString() + File.separator + userId, "config_v2.json"))
+        return write2File(json, child(child(CONFIG_DIR, userId), "config_v2.json"))
     }
 
     @JvmStatic
@@ -146,15 +243,14 @@ object Files {
     }
 
     @JvmStatic
-    @Synchronized
     fun getTargetFileofUser(userId: String?, fullTargetFileName: String): File? {
         if (userId.isNullOrEmpty()) {
             Log.error(TAG, "Invalid userId for target file: $fullTargetFileName")
             return null
         }
-        val userDir = File(CONFIG_DIR, userId)
+        val userDir = child(CONFIG_DIR, userId)
         ensureDir(userDir)
-        val targetFile = File(userDir, fullTargetFileName)
+        val targetFile = child(userDir, fullTargetFileName)
         if (!targetFile.exists()) {
             try {
                 targetFile.createNewFile()
@@ -176,10 +272,9 @@ object Files {
     }
 
     @JvmStatic
-    @Synchronized
     fun getTargetFileofDir(dir: File, fullTargetFileName: String): File {
         ensureDir(dir)
-        val targetFile = File(dir, fullTargetFileName)
+        val targetFile = child(dir, fullTargetFileName)
 
         if (!targetFile.exists()) {
             try {
@@ -227,84 +322,100 @@ object Files {
     }
 
     @JvmStatic
-    fun exportFile(file: File, hasTime: Boolean): File? {
-        val exportFile = createExportTargetFile(file, hasTime) ?: return null
-        val sensitiveKeywords = collectLogSensitiveKeywords()
-        if (sensitiveKeywords.isEmpty()) {
-            if (!copy(file, exportFile)) {
-                Log.error(TAG, "Failed to copy file: ${file.absolutePath} to ${exportFile.absolutePath}")
-                return null
-            }
-            return exportFile
-        }
-
-        if (!copyMaskedText(file, exportFile, sensitiveKeywords)) {
-            Log.error(TAG, "Failed to export masked log: ${file.absolutePath} to ${exportFile.absolutePath}")
-            return null
-        }
-        return exportFile
-    }
-
-    private fun createExportTargetFile(file: File, hasTime: Boolean): File? {
-        val exportDir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            CONFIG_DIR_NAME
-        )
-        if (!exportDir.exists() && !exportDir.mkdirs()) {
-            Log.error(TAG, "Failed to create export directory: ${exportDir.absolutePath}")
-            return null
-        }
-
+    fun exportFile(context: Context, file: File, hasTime: Boolean): File? {
         val fileName = file.name
         val dotIndex = fileName.lastIndexOf('.')
         val fileNameWithoutExtension = if (dotIndex != -1) fileName.take(dotIndex) else fileName
         val fileExtension = if (dotIndex != -1) fileName.substring(dotIndex) else ""
-
         val newFileName = if (hasTime) {
             @SuppressLint("SimpleDateFormat")
-            val simpleDateFormat = SimpleDateFormat("yyyy-MM-dd_HH.mm.ss")
-            val dateTimeString = simpleDateFormat.format(Date())
+            val dateTimeString = SimpleDateFormat("yyyy-MM-dd_HH.mm.ss").format(Date())
             "${fileNameWithoutExtension}_$dateTimeString$fileExtension"
-        } else {
-            "$fileNameWithoutExtension$fileExtension"
-        }
-
-        val exportFile = File(exportDir, newFileName)
-        if (exportFile.exists() && exportFile.isDirectory) {
-            if (!exportFile.delete()) {
-                Log.error(TAG, "Failed to delete existing directory: ${exportFile.absolutePath}")
-                return null
-            }
-        }
-        return exportFile
-    }
-
-    private fun copyMaskedText(source: File, dest: File, sensitiveKeywords: List<String>): Boolean {
-        val target = createFile(dest) ?: return false
+        } else fileName
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$CONFIG_DIR_NAME/"
+        val resolver = context.contentResolver
+        var target: android.net.Uri? = null
         return try {
-            source.bufferedReader(Charsets.UTF_8).use { reader ->
-                target.bufferedWriter(Charsets.UTF_8).use { writer ->
-                    var isFirstLine = true
-                    reader.forEachLine { line ->
-                        if (!isFirstLine) {
-                            writer.newLine()
+            val sensitiveKeywords = if (LogCatalog.findByFileName(file.name)?.techKind == LogTechKind.CAPTURE) {
+                emptyList()
+            } else collectLogSensitiveKeywords()
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, newFileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("无法创建下载文件")
+            target = uri
+            val output = resolver.openOutputStream(uri, "w") ?: throw IOException("无法打开下载文件")
+            output.use { stream ->
+                if (sensitiveKeywords.isEmpty()) {
+                    file.inputStream().use { it.copyTo(stream) }
+                } else {
+                    stream.bufferedWriter(Charsets.UTF_8).use { writer ->
+                        file.bufferedReader(Charsets.UTF_8).use { reader ->
+                            var firstLine = true
+                            reader.forEachLine { line ->
+                                if (!firstLine) writer.newLine()
+                                writer.write(maskSensitiveText(line, sensitiveKeywords))
+                                firstLine = false
+                            }
                         }
-                        writer.write(maskSensitiveText(line, sensitiveKeywords))
-                        isFirstLine = false
                     }
                 }
             }
-            true
-        } catch (e: Exception) {
-            if (target.exists()) {
-                target.delete()
+            val exportedFile = resolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.DISPLAY_NAME),
+                null, null, null,
+            ).use { cursor ->
+                if (cursor == null || !cursor.moveToFirst()) throw IOException("无法确认导出位置")
+                File(Environment.getExternalStorageDirectory(), cursor.getString(0) + cursor.getString(1))
             }
-            Log.printStackTrace(TAG, "copyMaskedText failed", e)
-            false
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            check(resolver.update(uri, values, null, null) == 1) { "无法完成下载文件导出" }
+            exportedFile
+        } catch (e: Exception) {
+            target?.let { uri -> runCatching { resolver.delete(uri, null, null) } }
+            Log.printStackTrace(TAG, "日志导出到下载目录失败", e)
+            null
         }
     }
 
     internal fun maskSensitiveText(text: String, sensitiveKeywords: List<String>): String {
+        val capture = if (text.firstOrNull() == '{') {
+            runCatching { JSONObject(text) }.getOrNull()
+        } else null
+        if (capture?.optString("schema") == "rpc-capture") {
+            fun maskValue(value: Any?): Any? = when (value) {
+                is JSONObject -> {
+                    // 编码字节不属于文本，替换其中的字符会破坏字节长度与流偏移。
+                    if (value.optString("encoding") == "base64" &&
+                        value.opt("size") is Number && value.opt("data") is String
+                    ) {
+                        value
+                    } else {
+                        val keys = value.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            value.put(key, maskValue(value.opt(key)))
+                        }
+                        value
+                    }
+                }
+                is JSONArray -> {
+                    for (index in 0 until value.length()) {
+                        value.put(index, maskValue(value.opt(index)))
+                    }
+                    value
+                }
+                is String -> sensitiveKeywords.fold(value) { result, keyword -> result.replace(keyword, "***") }
+                else -> value
+            }
+            return maskValue(capture).toString()
+        }
         var sanitized = text
         sensitiveKeywords.forEach { keyword ->
             sanitized = sanitized.replace(keyword, "***")
@@ -315,8 +426,8 @@ object Files {
     internal fun collectLogSensitiveKeywords(): List<String> {
         val keywords = linkedSetOf<String>()
         CONFIG_DIR.listFiles()?.filter { it.isDirectory }?.forEach { userDir ->
-            collectKeywordsFromSelfFile(File(userDir, "self.json"), keywords)
-            collectKeywordsFromFriendFile(File(userDir, "friend.json"), keywords)
+            collectKeywordsFromSelfFile(child(userDir, "self.json"), keywords)
+            collectKeywordsFromFriendFile(child(userDir, "friend.json"), keywords)
         }
         return keywords.sortedByDescending { it.length }
     }
@@ -398,7 +509,7 @@ object Files {
 
     @JvmStatic
     fun getCityCodeFile(): File {
-        val cityCodeFile = File(MAIN_DIR, "cityCode.json")
+        val cityCodeFile = child(MAIN_DIR, "cityCode.json")
         if (cityCodeFile.exists() && cityCodeFile.isDirectory) {
             if (!cityCodeFile.delete()) {
                 Log.error(TAG, "Failed to delete directory: ${cityCodeFile.absolutePath}")
@@ -437,6 +548,7 @@ object Files {
 
     @JvmStatic
     fun readFromFile(f: File): String {
+        if (f is StoreFile) return if (f.exists()) StoreAccess.read(f) else ""
         if (!f.exists()) return ""
         if (!f.canRead()) {
             ToastUtil.showToast("${f.name}没有读取权限！")
@@ -474,8 +586,8 @@ object Files {
     }
 
     @JvmStatic
-    @Synchronized
     fun write2File(s: String, f: File): Boolean {
+        if (f is StoreFile) return writeAtomically(s, f)
         if (beforeWrite(f)) return false
         var fw: FileWriter? = null
         try {
@@ -528,6 +640,7 @@ object Files {
 
     @JvmStatic
     fun clearFile(file: File): Boolean {
+        if (file is StoreFile) return writeAtomically("", file)
         if (!file.exists()) return false
         return try {
             // Kotlin 扩展方法
@@ -566,16 +679,16 @@ object Files {
 
     /**
      * 清理模块自有的全部持久化文件，但保留静态目录对象及其根目录本身。
-     * 用户主动导出的备份位于 Downloads，不属于这里的模块存储范围。
+     * 用户主动导出的备份由系统文件选择器保存，不属于模块存储范围。
      */
     @JvmStatic
-    @Synchronized
     fun clearAllModuleData(context: Context): ClearAllResult {
         val failedPaths = linkedSetOf<String>()
         val targets = linkedSetOf<File>()
 
-        targets += MAIN_DIR
-        context.getExternalFilesDir("logs")?.let { targets += it }
+        runCatching { PrivateStorage.clearContents() }
+            .onSuccess { failedPaths.addAll(it) }
+            .onFailure { failedPaths += PrivateStorage.root.absolutePath }
         targets += File(context.filesDir, "logs")
 
         targets.forEach { directory ->
@@ -617,8 +730,10 @@ object Files {
                 return true
             }
             retryCount--
-            Log.record(TAG, "删除失败，重试中: ${file.absolutePath}")
-            CoroutineUtils.sleepCompat(500)
+            if (retryCount > 0) {
+                Log.record(TAG, "删除失败，重试中: ${file.absolutePath}")
+                CoroutineUtils.sleepCompat(500)
+            }
         }
         Log.error(TAG, "删除失败: ${file.absolutePath}")
         return false

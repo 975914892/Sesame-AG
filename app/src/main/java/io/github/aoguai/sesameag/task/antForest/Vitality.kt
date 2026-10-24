@@ -17,11 +17,6 @@ import io.github.aoguai.sesameag.hook.ExchangeOptionsRefreshBridge
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.TimeUtil
 
-/**
- * @author Byseven
- * @apiNote
- * @see 2025/1/20
- */
 object Vitality {
     private val TAG = Vitality::class.java.simpleName
     private var skuInfoLoadedAt = 0L

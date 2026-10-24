@@ -6,10 +6,12 @@ import io.github.aoguai.sesameag.entity.RpcEntity
 import io.github.aoguai.sesameag.hook.rpc.RpcDailyCircuit
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
 import io.github.aoguai.sesameag.model.BaseModel
+import io.github.aoguai.sesameag.task.TaskExecutionReport
 import io.github.aoguai.sesameag.util.CoroutineUtils
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.NetworkUtils
 import io.github.aoguai.sesameag.util.RpcOfflineRisk
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -107,7 +109,7 @@ object RequestManager {
         // 2. 获取 Bridge (包含网络检查)
         // 如果这里获取失败，也视为一次错误
         val bridge = getRpcBridge()
-        if (!RpcDailyCircuit.isCurrent(identity)) {
+        if (!RpcDailyCircuit.isSameSession(identity)) {
             return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("账号会话已变化", methodLog))
         }
         if (bridge == null) {
@@ -123,13 +125,20 @@ object RequestManager {
         // 3. 执行请求
         val result = try {
             block(bridge)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw CancellationException("RPC 执行已取消").apply { initCause(e) }
         } catch (e: Throwable) {
             Log.printStackTrace(TAG, "RPC 执行异常: $methodLog", e)
             null // 异常视为 null，触发失败逻辑
         }
 
+        // 在途请求可能触发本轮取消，先退出任务，再判断账号与业务结果。
+        TaskExecutionReport.current()?.ensureSessionActive()
         // 4. 结果校验与状态维护
-        if (!RpcDailyCircuit.isCurrent(identity)) {
+        if (!RpcDailyCircuit.isSameSession(identity)) {
             return RpcRequestOutcome.Stopped(RpcFallbackJsonFactory.build("账号会话已变化", methodLog))
         }
         if (result.isNullOrBlank()) {
@@ -143,6 +152,7 @@ object RequestManager {
         } else {
             val response = runCatching { JSONObject(result) }.getOrNull()
             if (response != null && (RpcDailyCircuit.isStopResponse(response) || RpcOfflineRisk.isHardBlocked(response))) {
+                if (RpcDailyCircuit.isStopResponse(response)) rpcBlockedCount.incrementAndGet()
                 return RpcRequestOutcome.Stopped(result)
             }
             // 成功：重置计数器
@@ -236,6 +246,7 @@ object RequestManager {
         tryCount: Int,
         retryInterval: Int,
     ): String {
+        TaskExecutionReport.current()?.ensureSessionActive()
         rpcRequestCount.incrementAndGet()
         val method = rpcEntity.requestMethod
         val identity = RpcDailyCircuit.captureIdentity()
@@ -244,13 +255,9 @@ object RequestManager {
         rpcEntity.requestIdentity = identity
         rpcEntity.settingsRefresh = refresh
 
-        if (!RpcDailyCircuit.isCurrent(identity) || (refresh != null && !RpcDailyCircuit.isCurrent(refresh.identity))) {
+        if (!RpcDailyCircuit.isSameSession(identity) || (refresh != null && !RpcDailyCircuit.isSameSession(refresh.identity))) {
             refresh?.failed = true
             return RpcFallbackJsonFactory.build("账号会话已变化或未就绪", method)
-        }
-        if (refresh == null && RpcDailyCircuit.isBlockedToday(identity.userId, method)) {
-            rpcBlockedCount.incrementAndGet()
-            return RpcFallbackJsonFactory.buildDailyRiskStop(method)
         }
         val blocked = tryBlockByOffline(method)
         if (blocked != null) {

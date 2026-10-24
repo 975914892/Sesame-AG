@@ -203,6 +203,8 @@ class AccountSettingsViewModel(
         FieldKey("AntForest", "vitalityExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_FOREST_VITALITY
         FieldKey("AntSesameCredit", "sesameGrainExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_SESAME_GRAIN
         FieldKey("GoldenBeanTreasure", "goldenBeanMallExchangeList") -> ExchangeOptionsRefreshBridge.TARGET_GOLDEN_BEAN_MALL
+        FieldKey("Reserve", "reserveList"),
+        FieldKey("Reserve", "certificateTargets") -> ExchangeOptionsRefreshBridge.TARGET_RESERVE
         else -> null
     }
 
@@ -274,10 +276,12 @@ class AccountSettingsViewModel(
         _uiState.update { it.copy(isSaving = true, operationMessage = null) }
         val result = runCatching {
             withContext(Dispatchers.IO) {
-                validateDrafts(snapshot.drafts)
-                applyDrafts(snapshot.drafts)
-                Config.sanitizeFriendSelectionFieldsForUser(userId)
-                check(Config.save(userId, true)) { "配置文件保存失败" }
+                Config.withLoadedAccount(userId) {
+                    validateDrafts(snapshot.drafts)
+                    applyDrafts(snapshot.drafts)
+                    Config.sanitizeFriendSelectionFieldsForUser(userId)
+                    check(Config.save(userId, true)) { "配置文件保存失败" }
+                }
             }
             LocaleSettingsApplier.apply(context)
             runCatching {
@@ -291,7 +295,6 @@ class AccountSettingsViewModel(
                 Log.printStackTrace(TAG, "Failed to send config reload broadcast", throwable)
             }
             withContext(Dispatchers.IO) {
-                UserMap.save(userId)
                 IdMapManager.getInstance(CooperateMap::class.java).save(userId)
                 currentConfigValues()
             }
@@ -332,13 +335,16 @@ class AccountSettingsViewModel(
     suspend fun import(context: Context, uri: Uri?): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val json = PortUtil.readImportText(context, uri) ?: error("无法读取导入文件")
-            val resolved = SettingsTransferImporter.resolve(json, userId)
+            val resolved = Config.withLoadedAccount(userId) { SettingsTransferImporter.resolve(json, userId) }
             val applied = PortUtil.applyImport(context, userId, resolved)
             check(applied.success) { applied.message }
-            loadAccount()
-        }.onSuccess { loaded ->
             clearSavedDrafts()
-            _uiState.value = loaded.copy(operationMessage = "导入成功")
+            val loaded = runCatching { loadAccount() }.getOrElse {
+                throw IllegalStateException("设置已保存，但页面加载失败：${it.message}", it)
+            }
+            loaded.copy(operationMessage = applied.message)
+        }.onSuccess { loaded ->
+            _uiState.value = loaded
         }
     }.map { Unit }
 
@@ -439,15 +445,19 @@ class AccountSettingsViewModel(
         }
     }
 
-    private fun loadAccount(): AccountSettingsUiState {
+    private fun loadAccount(): AccountSettingsUiState = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        loadAccountLocked()
+    }
+
+    private fun loadAccountLocked(): AccountSettingsUiState {
         val normalizedUserId = AccountSlotRegistry.normalizeUserId(userId)
         require(normalizedUserId != null && normalizedUserId in Files.listExistingUserConfigIds()) {
             "账号配置不存在或账号标识无效"
         }
         Model.initAllModel()
         UserMap.setCurrentUserId(normalizedUserId)
-        UserMap.load(normalizedUserId)
-        FriendRepository.mergeFromUserMap(normalizedUserId, allowPruneMissing = true)
+        val friends = UserMap.load(normalizedUserId)
+        FriendRepository.mergeFromUserMap(normalizedUserId, currentUsers = friends)
         Status.load(normalizedUserId)
         Config.load(normalizedUserId)
 
@@ -532,13 +542,10 @@ class AccountSettingsViewModel(
                 "CHOICE", "INTEGER", "MULTIPLY_INTEGER" -> require(value.trim().toIntOrNull() != null) {
                     "${field.name} 需要有效整数"
                 }
-                "SELECT_ONE" -> require(value.isBlank() || JsonUtil.toNode(value)?.isTextual == true) {
-                    "${field.name} 需要有效单选值"
-                }
-                "LIST", "SELECT" -> require(value.isBlank() || io.github.aoguai.sesameag.util.JsonUtil.toNode(value)?.isArray == true) {
+                "SELECT" -> require(value.isBlank() || io.github.aoguai.sesameag.util.JsonUtil.toNode(value)?.isArray == true) {
                     "${field.name} 需要有效数组"
                 }
-                "SELECT_AND_COUNT", "SELECT_AND_COUNT_ONE" ->
+                "SELECT_AND_COUNT" ->
                     require(value.isBlank() || io.github.aoguai.sesameag.util.JsonUtil.toNode(value)?.isObject == true) {
                         "${field.name} 需要有效对象"
                     }
@@ -687,17 +694,14 @@ private fun Any?.asMapperList(): List<MapperEntity> = when (this) {
 internal val SUPPORTED_FIELD_TYPES = setOf(
     "BOOLEAN",
     "CHOICE",
-    "SELECT_ONE",
     "INTEGER",
     "MULTIPLY_INTEGER",
     "STRING",
-    "LIST",
     "TEXT",
     "READ_TEXT",
     "URL_TEXT",
     "SELECT",
     "SELECT_AND_COUNT",
-    "SELECT_AND_COUNT_ONE",
     "FRIEND_SELECTION",
     "FRIEND_SELECTION_COUNT",
     "TIME_POINT",

@@ -344,7 +344,7 @@ object ExchangeFetchPacing {
     /**
      * 兑换列表翻页间隔：固定基数加随机抖动，避免匀速翻页节奏
      */
-    fun pageTurnDelay(baseMillis: Long = 1000L, jitterMillis: Long = 1200L) {
+    fun pageTurnDelay(baseMillis: Long = 850L, jitterMillis: Long = 1020L) {
         GlobalThreadPools.sleepCompat(baseMillis + Random.nextLong(0, jitterMillis + 1))
     }
 
@@ -352,7 +352,7 @@ object ExchangeFetchPacing {
      * 兑换域刷新启动错开：多域同批刷新时打乱各域起跑时刻
      */
     fun domainStartDelay() {
-        GlobalThreadPools.sleepCompat(800L + Random.nextLong(0, 1701L))
+        GlobalThreadPools.sleepCompat(680L + Random.nextLong(0, 1446L))
     }
 }
 
@@ -367,7 +367,7 @@ object ExchangeOptionsCache {
     private const val FILE_SUFFIX = ".json"
     private const val CACHE_REASON = "本地缓存，未经过本次目标应用刷新复核"
 
-    private val fetchLocks = ConcurrentHashMap<Pair<String, String>, java.util.concurrent.locks.ReentrantLock>()
+    private val fetchQueues = ConcurrentHashMap<Pair<String, String>, io.github.aoguai.sesameag.util.SerialTaskQueue>()
 
     fun getOrFetch(
         userId: String?,
@@ -387,12 +387,7 @@ object ExchangeOptionsCache {
             check(TimeUtil.isSameDay(startedAt, System.currentTimeMillis())) { "兑换列表查询已跨天，下轮重新获取" }
         }
         checkCurrent()
-        val lock = fetchLocks.getOrPut(normalizedUserId to target) { java.util.concurrent.locks.ReentrantLock() }
-        if (!lock.tryLock()) {
-            ExchangeFetchProgress.report(normalizedUserId, target, "等待同目标查询，复用其已保存进度", advances = false)
-            lock.lockInterruptibly()
-        }
-        try {
+        return fetchQueues.computeIfAbsent(normalizedUserId to target) { io.github.aoguai.sesameag.util.SerialTaskQueue() }.execute {
             checkCurrent()
             val queryContext = context()
             checkCurrent()
@@ -405,7 +400,7 @@ object ExchangeOptionsCache {
                 loadTodaySnapshot(normalizedUserId, target, queryContext)?.let {
                     checkCurrent()
                     if (pending.exists()) pending.delete()
-                    return it
+                    return@execute it
                 }
             }
             val session = ExchangeFetchSession.open(pending, normalizedUserId, target, queryContext, checkCurrent)
@@ -423,9 +418,7 @@ object ExchangeOptionsCache {
                     throw t
                 }
             }
-            return if (forceRefresh) RequestManager.withExchangeSettingsRefresh(refresh) else refresh()
-        } finally {
-            lock.unlock()
+            if (forceRefresh) RequestManager.withExchangeSettingsRefresh(refresh) else refresh()
         }
     }
 
@@ -446,9 +439,7 @@ object ExchangeOptionsCache {
             }
         }
         checkCurrent()
-        val lock = fetchLocks.getOrPut(normalizedUserId to target) { java.util.concurrent.locks.ReentrantLock() }
-        lock.lockInterruptibly()
-        try {
+        return fetchQueues.computeIfAbsent(normalizedUserId to target) { io.github.aoguai.sesameag.util.SerialTaskQueue() }.execute {
             checkCurrent()
             val snapshot = fetch(checkCurrent)
             checkCurrent()
@@ -457,9 +448,7 @@ object ExchangeOptionsCache {
                 ?.takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString()
             saveComplete(normalizedUserId, target, snapshot, context, runId, checkCurrent)
             pending?.delete()
-            return snapshot
-        } finally {
-            lock.unlock()
+            snapshot
         }
     }
 
@@ -469,20 +458,11 @@ object ExchangeOptionsCache {
     ) {
         checkCurrent()
         val file = Files.getTargetFileofUser(userId, fileName(target)) ?: error("无法获取兑换列表缓存路径")
-        val temporary = File(file.parentFile, "${file.name}.tmp")
-        try {
-            val body = JSONObject().put("rows", org.json.JSONArray(JsonUtil.formatJson(snapshot.rows, false)))
-                .put("payload", snapshot.payload).put("context", context).put("runId", runId)
-                .put("userId", userId).put("savedAt", System.currentTimeMillis()).toString()
-            temporary.outputStream().use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
-                output.fd.sync()
-            }
-            checkCurrent()
-            android.system.Os.rename(temporary.absolutePath, file.absolutePath)
-        } finally {
-            temporary.delete()
-        }
+        val body = JSONObject().put("rows", org.json.JSONArray(JsonUtil.formatJson(snapshot.rows, false)))
+            .put("payload", snapshot.payload).put("context", context).put("runId", runId)
+            .put("userId", userId).put("savedAt", System.currentTimeMillis()).toString()
+        checkCurrent()
+        check(Files.writeAtomically(body, file)) { "保存完整兑换列表失败" }
         ExchangeFetchProgress.report(userId, target, "整轮完成，完整缓存已保存，共 ${snapshot.rows.size} 项")
     }
 

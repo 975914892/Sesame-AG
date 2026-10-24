@@ -5,20 +5,27 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Binder
+import android.os.Bundle
 import android.os.IBinder
 import android.os.RemoteException
 import io.github.aoguai.sesameag.BuildConfig
 import io.github.aoguai.sesameag.ICallback
+import io.github.aoguai.sesameag.ICaptureSession
 import io.github.aoguai.sesameag.ICommandService
 import io.github.aoguai.sesameag.IStatusListener
+import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
+import io.github.aoguai.sesameag.hook.AccountSessionIdentity
+import io.github.aoguai.sesameag.hook.ApplicationHook
+import io.github.aoguai.sesameag.hook.HookUtil
+import io.github.aoguai.sesameag.hook.RuntimeIdentityGuard
 import io.github.aoguai.sesameag.hook.keepalive.SystemWakeScheduler
 import io.github.aoguai.sesameag.service.CommandService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -53,6 +60,36 @@ object CommandUtil {
     private val _serviceStatus = MutableStateFlow<ServiceStatus>(ServiceStatus.Loading)
     val serviceStatus = _serviceStatus.asStateFlow()
 
+    fun hasStorageConnection(): Boolean = commandService?.asBinder()?.isBinderAlive == true
+
+    fun storageService(): ICommandService = commandService?.takeIf { it.asBinder().isBinderAlive }
+        ?: throw java.io.IOException("模块存储服务未连接")
+
+    suspend fun connectStorage(context: Context): Boolean {
+        val appContext = context.applicationContext ?: context
+        bindRequested = true
+        if (!ensureServiceBound(appContext, identityOnly = true)) { bindRequested = false; return false }
+        return try {
+            if (!storageService().isStoreReady) {
+                bindRequested = false
+                unbind(appContext)
+                return false
+            }
+            io.github.aoguai.sesameag.storage.StoreAccess.useRemote()
+            io.github.aoguai.sesameag.storage.StoreAccess.attachRemote()
+            // 身份确认后可能复用已有连接，不能只依赖连接回调发布主进程会话。
+            if (RuntimeIdentityGuard.isTrustedForExecution()) {
+                storageService().setCaptureSessionProvider(captureSessionProvider)
+            }
+            true
+        } catch (failure: Exception) {
+            android.util.Log.e(TAG, "模块私有存储不可用", failure)
+            bindRequested = false
+            unbind(appContext)
+            false
+        }
+    }
+
     // AIDL 接口实例
     @Volatile
     private var commandService: ICommandService? = null
@@ -74,7 +111,7 @@ object CommandUtil {
     }
 
     // 连接状态管理
-    private val bindMutex = Mutex()
+    private val bindQueue = SerialTaskQueue()
     private val isBound = AtomicBoolean(false)
     private val pendingCommands = AtomicInteger(0)
     private var connectionDeferred: CompletableDeferred<Boolean>? = null
@@ -84,6 +121,32 @@ object CommandUtil {
     private var boundContext: Context? = null
     @Volatile
     private var lastStatusType: String? = null
+    @Volatile
+    private var identityOnlyBinding = false
+
+    private val captureSessionProvider = object : ICaptureSession.Stub() {
+        override fun getCurrentSession(): Bundle? {
+            val identity = RuntimeIdentityGuard.trustedIdentity() ?: return null
+            if (Binder.getCallingUid() != identity.moduleUid) throw SecurityException("Untrusted capture session caller")
+            val token = Binder.clearCallingIdentity()
+            return try {
+                if (!RuntimeIdentityGuard.isTrustedForExecution() ||
+                    commandService?.asBinder()?.isBinderAlive != true
+                ) return null
+                val session = AccountSessionCoordinator.currentSession() ?: return null
+                val loader = ApplicationHook.classLoader ?: return null
+                if (!session.legalAccepted || HookUtil.getUserId(loader) != session.userId ||
+                    !AccountSessionCoordinator.isCurrentSession(session.userId, session.sessionEpoch)
+                ) return null
+                Bundle().apply {
+                    putString("userId", session.userId)
+                    putLong("sessionEpoch", session.sessionEpoch)
+                }
+            } finally {
+                Binder.restoreCallingIdentity(token)
+            }
+        }
+    }
 
     // --- 监听器实现 ---
     private val statusListener = object : IStatusListener.Stub() {
@@ -103,7 +166,9 @@ object CommandUtil {
             Log.d(TAG, "✅ CommandService 已连接: $name")
             ModuleDiagnostics.event("command_bind", "connected", "component=$name")
             try {
+                val identityOnly = identityOnlyBinding
                 commandService = ICommandService.Stub.asInterface(service)
+                    ?: throw IllegalStateException("CommandService binder is null")
 
                 // 1. 监听服务端死亡
                 service?.linkToDeath({
@@ -111,15 +176,34 @@ object CommandUtil {
                     handleServiceLost()
                 }, 0)
 
-                // 2. 🔥 核心：连接成功后，立即注册状态监听
-                // 服务端会在注册时立即回调一次当前状态，所以不需要手动查询
-                commandService?.registerListener(statusListener)
+                // 身份确认不注册执行器监听，也不触发宿主的任务调度。
+                if (!identityOnly) {
+                    commandService?.registerListener(statusListener)
+                }
+                // 抓包会话与执行器监听独立，身份/存储连接也需要恢复主进程提供者。
+                if (RuntimeIdentityGuard.isTrustedForExecution()) {
+                    commandService?.setCaptureSessionProvider(captureSessionProvider)
+                }
 
+                if (io.github.aoguai.sesameag.storage.StoreAccess.isRemote) {
+                    val storage = checkNotNull(commandService)
+                    scope.launch {
+                        try {
+                            check(storage.isStoreReady) { "模块私有存储尚未就绪" }
+                            io.github.aoguai.sesameag.storage.StoreAccess.attachRemote()
+                            io.github.aoguai.sesameag.util.Logback.reloadFileLogging()
+                        } catch (failure: Exception) {
+                            android.util.Log.e(TAG, "恢复私有存储连接失败", failure)
+                        }
+                    }
+                }
                 isBound.set(true)
                 connectionDeferred?.complete(true)
-                boundContext?.let { appContext ->
-                    scope.launch {
-                        SystemWakeScheduler.refresh(appContext)
+                if (!identityOnly) {
+                    boundContext?.let { appContext ->
+                        scope.launch {
+                            SystemWakeScheduler.refresh(appContext)
+                        }
                     }
                 }
                 if (!bindRequested && pendingCommands.get() == 0) {
@@ -147,6 +231,7 @@ object CommandUtil {
         commandService = null
         alarmIntents.clear()
         isBound.set(false)
+        connectionDeferred?.complete(false)
         connectionDeferred = null
         lastStatusType = null
         if (updateStatus) {
@@ -173,7 +258,7 @@ object CommandUtil {
 
     private fun startCommandService(context: Context, intent: Intent) {
         try {
-            context.applicationContext.startForegroundService(intent)
+            (context.applicationContext ?: context).startForegroundService(intent)
         } catch (e: Exception) {
             Log.w(TAG, "startService 失败: ${e.message}")
         }
@@ -197,14 +282,32 @@ object CommandUtil {
     /**
      * 绑定服务 (线程安全)
      */
-    private suspend fun ensureServiceBound(context: Context): Boolean {
-        if (isBound.get() && commandService?.asBinder()?.isBinderAlive == true) {
+    private suspend fun ensureServiceBound(context: Context, identityOnly: Boolean = false): Boolean {
+        if (isBound.get() && commandService?.asBinder()?.isBinderAlive == true &&
+            (identityOnly || !identityOnlyBinding)
+        ) {
             return true
         }
 
-        return bindMutex.withLock {
+        return bindQueue.submit {
             if (isBound.get() && commandService?.asBinder()?.isBinderAlive == true) {
-                return@withLock true
+                if (!identityOnly && identityOnlyBinding) {
+                    try {
+                        startCommandService(context, buildServiceIntent())
+                        commandService?.registerListener(statusListener) ?: return@submit false
+                        if (RuntimeIdentityGuard.isTrustedForExecution()) {
+                            commandService?.setCaptureSessionProvider(captureSessionProvider)
+                        }
+                        identityOnlyBinding = false
+                        val appContext = context.applicationContext ?: context
+                        scope.launch { SystemWakeScheduler.refresh(appContext) }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "启用命令服务执行器监听失败", e)
+                        handleServiceLost()
+                        return@submit false
+                    }
+                }
+                return@submit true
             }
 
             // 开始连接前，状态置为 Loading
@@ -212,7 +315,7 @@ object CommandUtil {
 
             handleServiceLost(updateStatus = false)
             connectionDeferred = CompletableDeferred()
-            val appContext = context.applicationContext
+            val appContext = context.applicationContext ?: context
             boundContext = appContext
             val intent = buildServiceIntent()
             var lastFailure = "not_attempted"
@@ -220,11 +323,10 @@ object CommandUtil {
 
             try {
                 repeat(BIND_RETRY_COUNT) { attempt ->
-                    startCommandService(appContext, intent)
+                    identityOnlyBinding = identityOnly
+                    if (!identityOnly) startCommandService(appContext, intent)
                     if (attempt > 0) {
                         delay(BIND_RETRY_DELAY_MS)
-                    } else {
-                        delay(300)
                     }
 
                     val bindResult = appContext.bindService(
@@ -239,7 +341,7 @@ object CommandUtil {
                         } ?: false
 
                         if (success) {
-                            return@withLock true
+                            return@submit true
                         }
 
                         lastFailure = "bind_timeout"
@@ -262,7 +364,7 @@ object CommandUtil {
 
                 Log.e(TAG, "command_bind failed reason=$lastFailure $bindContext")
                 _serviceStatus.value = ServiceStatus.Error("服务绑定失败")
-                return@withLock false
+                return@submit false
             } catch (e: CancellationException) {
                 runCatching { appContext.unbindService(serviceConnection) }
                 handleServiceLost()
@@ -271,7 +373,7 @@ object CommandUtil {
                 ModuleDiagnostics.event("command_bind", "exception", "$bindContext error=${e.javaClass.simpleName}")
                 Log.e(TAG, "绑定异常 $bindContext", e)
                 _serviceStatus.value = ServiceStatus.Error(e.message ?: "未知错误")
-                return@withLock false
+                return@submit false
             }
         }
     }
@@ -333,6 +435,76 @@ object CommandUtil {
         }
     }
 
+    suspend fun verifyRuntimeIdentity(
+        context: Context,
+        expectedModuleUid: Int,
+        expectedModuleSourceDir: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        pendingCommands.incrementAndGet()
+        try {
+            if (!ensureServiceBound(context, identityOnly = true)) return@withContext false
+            val service = commandService ?: return@withContext false
+            service.verifyRuntimeIdentity(expectedModuleUid, expectedModuleSourceDir)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: RemoteException) {
+            handleServiceLost()
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "模块运行身份确认失败", e)
+            false
+        } finally {
+            if (pendingCommands.decrementAndGet() == 0 && !bindRequested) unbind(context)
+        }
+    }
+
+    /** 仅在开始抓包时检查许可，Lite 使用短暂身份连接。 */
+    suspend fun authorizeCapture(
+        context: Context,
+        captureRequested: (String) -> Boolean,
+    ): String? = withContext(Dispatchers.IO) {
+        if (RuntimeIdentityGuard.trustedIdentity() == null) return@withContext null
+        pendingCommands.incrementAndGet()
+        try {
+            if (!ensureServiceBound(context, identityOnly = true)) return@withContext null
+            val session = currentCaptureSession() ?: run {
+                Log.w(TAG, "抓包未启动：实时账号会话不可用")
+                return@withContext null
+            }
+            if (!captureRequested(session.userId)) return@withContext null
+            if (!isExecutionAllowed(session.userId)) {
+                Log.w(TAG, "抓包未启动：当前账号执行条件不满足")
+                return@withContext null
+            }
+            session.userId
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "抓包启动许可检查失败: ${e.message}")
+            null
+        } finally {
+            if (pendingCommands.decrementAndGet() == 0 && !bindRequested) unbind(context)
+        }
+    }
+
+    /** 启动检查从主进程取得账号，不依赖持久化的上次登录账号。 */
+    private fun currentCaptureSession(): AccountSessionIdentity? {
+        if (RuntimeIdentityGuard.trustedIdentity() == null) return null
+        val service = commandService ?: return null
+        return try {
+            val session = service.captureSession ?: return null
+            val userId = session.getString("userId")?.takeIf { it.isNotBlank() } ?: return null
+            val epoch = session.getLong("sessionEpoch")
+            if (epoch <= 0L) null else AccountSessionIdentity(userId, epoch)
+        } catch (e: RemoteException) {
+            handleServiceLost()
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "读取抓包实时会话失败: ${e.message}")
+            null
+        }
+    }
+
     fun isExecutionAllowed(userId: String): Boolean {
         val service = commandService ?: return false
         return try {
@@ -374,13 +546,19 @@ object CommandUtil {
     fun unbind(context: Context) {
         bindRequested = false
         if (pendingCommands.get() > 0) return
-        val appContext = context.applicationContext
+        val appContext = boundContext ?: context.applicationContext ?: context
         boundContext = appContext
         if (isBound.compareAndSet(true, false)) {
             try {
-                // 尝试注销监听器 (忽略异常，因为服务可能已死)
-                try { commandService?.unregisterListener(statusListener) } catch (_: Exception) {}
+                if (RuntimeIdentityGuard.isMainProcess()) {
+                    runCatching { commandService?.setCaptureSessionProvider(null) }
+                }
+                // 身份确认连接没有注册执行器监听。
+                if (!identityOnlyBinding) {
+                    try { commandService?.unregisterListener(statusListener) } catch (_: Exception) {}
+                }
 
+                runCatching { commandService?.unregisterStoreListener(io.github.aoguai.sesameag.storage.StoreAccess.remoteListener()) }
                 appContext.unbindService(serviceConnection)
                 Log.d(TAG, "已解绑服务")
             } catch (e: Exception) {

@@ -1,6 +1,7 @@
 package io.github.aoguai.sesameag.hook.server
 
 import io.github.aoguai.sesameag.util.Log
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import fi.iki.elonen.NanoHTTPD
 
 /**
@@ -10,31 +11,31 @@ import fi.iki.elonen.NanoHTTPD
 object ModuleHttpServerManager {
     private const val TAG = "ModuleHttpServerManager"
     // 持有 Server 实例
+    private val lifecycle = SerialTaskQueue()
     private var server: ModuleHttpServer? = null
 
     /**
      * 启动服务 (如果尚未启动)
      */
-    @Synchronized
     fun startIfNeeded(
         port: Int,
         secretToken: String,
         currentProcessName: String, // 当前进程名
         mainProcessName: String     // 主进程包名
-    ) {
+    ): Unit = lifecycle.execute {
         // 1. 安全检查：仅允许在主进程启动，避免多个进程抢占端口
         if (currentProcessName != mainProcessName) {
-            return
+            return@execute
         }
 
         // 2. 如果已经运行，跳过
         if (server != null && server?.isAlive == true) {
-            return
+            return@execute
         }
 
         // 3. 启动逻辑
         try {
-            stop() // 先尝试停止旧的（如果有）
+            stopInternal() // 先尝试停止旧的（如果有）
 
             val newServer = ModuleHttpServer(port, secretToken)
             newServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) // 启动 NanoHTTPD
@@ -51,8 +52,9 @@ object ModuleHttpServerManager {
     /**
      * 停止服务
      */
-    @Synchronized
-    fun stop() {
+    fun stop(): Unit = lifecycle.execute { stopInternal() }
+
+    private fun stopInternal() {
         try {
             server?.stop()
             server = null

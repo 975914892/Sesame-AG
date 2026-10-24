@@ -21,7 +21,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 
 object SystemWakeScheduler {
     private const val TAG = "SystemWakeScheduler"
@@ -34,7 +36,7 @@ object SystemWakeScheduler {
     const val LANE_EXACT = 0
     const val LANE_FLEXIBLE = 1
     private const val PLANNER_REQUEST_CODE = 0x53534147
-    private val plannerLock = Any()
+    private val planner = SerialTaskQueue()
     private val timerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var localJob: Job? = null
     private var localSchedule: PersistentSchedule? = null
@@ -68,11 +70,11 @@ object SystemWakeScheduler {
 
     /** 两个精度通道互不阻挡；目标进程仅保留最近计划的一个轻量计时器。 */
     fun schedule(context: Context, schedule: PersistentSchedule, silent: Boolean = false): Boolean = try {
-        PersistentScheduleRegistry.withRegistryLock {
+        planner.execute {
             val appContext = context.applicationContext ?: context
-            val snapshot = PersistentScheduleRegistry.list()
+            val snapshot = PersistentScheduleRegistry.listFresh()
             val scheduled = snapshot.filter { it.state == PersistentScheduleState.SCHEDULED }
-            val localScheduled = synchronized(plannerLock) { updateLocalTimer(appContext, scheduled) }
+            val localScheduled = updateLocalTimer(appContext, scheduled)
             val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             var systemScheduled = alarmManager != null
             for (lane in listOf(LANE_EXACT, LANE_FLEXIBLE)) {
@@ -137,6 +139,8 @@ object SystemWakeScheduler {
             }
             systemScheduled || localScheduled
         }
+    } catch (e: InterruptedException) {
+        throw e
     } catch (e: Exception) {
         Log.printStackTrace(TAG, "持久调度重排失败", e)
         false
@@ -161,7 +165,7 @@ object SystemWakeScheduler {
         if (next == null) return schedules.isEmpty()
         val job = timerScope.launch(start = CoroutineStart.LAZY) {
             delay((next.triggerAtMs - System.currentTimeMillis()).coerceAtLeast(0L))
-            val current = synchronized(plannerLock) {
+            val current = planner.submit {
                 if (localSchedule != next) false else {
                     localSchedule = null
                     localJob = null
@@ -175,7 +179,7 @@ object SystemWakeScheduler {
         return true
     }
 
-    internal fun cancelLocalTimer() = synchronized(plannerLock) {
+    internal fun cancelLocalTimer() = planner.execute {
         localJob?.cancel()
         localJob = null
         localSchedule = null
@@ -213,17 +217,19 @@ object SystemWakeScheduler {
     }
 
     suspend fun launchTargetNow(context: Context, schedule: PersistentSchedule): Boolean {
-        val component = context.packageManager.getLaunchIntentForPackage(General.PACKAGE_NAME)
-            ?.resolveActivity(context.packageManager) ?: return false
+        val component = runInterruptible {
+            context.packageManager.getLaunchIntentForPackage(General.PACKAGE_NAME)
+                ?.resolveActivity(context.packageManager)
+        } ?: return false
         if (component.packageName != General.PACKAGE_NAME) return false
         val userId = android.os.Process.myUserHandle().hashCode()
         val command = listOf(
-            "am", "start", "--user", userId.toString(), "-n", component.flattenToString(),
+            "/system/bin/am", "start", "--user", userId.toString(), "-n", component.flattenToString(),
             "-a", Intent.ACTION_MAIN, "-f", Intent.FLAG_ACTIVITY_NEW_TASK.toString(),
             "--es", EXTRA_SCHEDULE_ID, schedule.id,
             "--ez", EXTRA_PERSISTENT_ALARM_LAUNCH, "true",
             "--el", EXTRA_CONFIRMATION_AT, schedule.updatedAtMs.toString(),
-        ).joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
+        ).joinToString(" ")
         return try {
             withTimeoutOrNull(5_000L) {
                 val output = CommandUtil.executeCommand(context, command)

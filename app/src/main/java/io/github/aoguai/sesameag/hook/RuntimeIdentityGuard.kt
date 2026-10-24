@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import io.github.aoguai.sesameag.data.General
+import io.github.aoguai.sesameag.util.CommandUtil
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import java.io.File
 
 /**
@@ -36,21 +38,21 @@ object RuntimeIdentityGuard {
 
     private const val PRIMARY_ANDROID_USER_ID = 0
     private const val ANDROID_PER_USER_RANGE = 100_000
+    private data class IdentityState(
+        val moduleSnapshot: ModuleSnapshot? = null,
+        val targetSnapshot: TargetSnapshot? = null,
+        val attachedIdentity: RuntimeIdentity? = null,
+        val lastDecision: RuntimeIdentityDecision = RuntimeIdentityDecision(false, "identity_not_verified"),
+    )
+    private val updates = SerialTaskQueue()
+    private val attachments = SerialTaskQueue()
+    @Volatile private var state = IdentityState()
+    private val moduleSnapshot get() = state.moduleSnapshot
+    private val targetSnapshot get() = state.targetSnapshot
+    private val attachedIdentity get() = state.attachedIdentity
+    private val lastDecision get() = state.lastDecision
 
-    @Volatile
-    private var moduleSnapshot: ModuleSnapshot? = null
-
-    @Volatile
-    private var targetSnapshot: TargetSnapshot? = null
-
-    @Volatile
-    private var attachedIdentity: RuntimeIdentity? = null
-
-    @Volatile
-    private var lastDecision = RuntimeIdentityDecision(false, "identity_not_verified")
-
-    @Synchronized
-    fun verifyModuleLoaded(applicationInfo: ApplicationInfo): RuntimeIdentityDecision {
+    fun verifyModuleLoaded(applicationInfo: ApplicationInfo): RuntimeIdentityDecision = updates.execute {
         val packageName = applicationInfo.packageName.orEmpty()
         val sourceDir = applicationInfo.sourceDir.orEmpty()
         val userId = androidUserId(applicationInfo.uid)
@@ -59,7 +61,7 @@ object RuntimeIdentityGuard {
             userId != PRIMARY_ANDROID_USER_ID -> reject("module_non_primary_user")
             sourceDir.isBlank() -> reject("module_source_missing")
             else -> {
-                moduleSnapshot = ModuleSnapshot(applicationInfo.uid, sourceDir)
+                state = state.copy(moduleSnapshot = ModuleSnapshot(applicationInfo.uid, sourceDir))
                 accept()
             }
         }
@@ -67,20 +69,19 @@ object RuntimeIdentityGuard {
             android.util.Log.e("ApplicationHook", "module=${General.MODULE_PACKAGE_NAME} instance_rejected stage=module reason=${decision.reasonCode} " +
                 "package=$packageName uid=${applicationInfo.uid} user=$userId source=$sourceDir")
         }
-        lastDecision = decision
-        return decision
+        state = state.copy(lastDecision = decision, attachedIdentity = if (decision.accepted) state.attachedIdentity else null)
+        decision
     }
 
-    @Synchronized
     fun verifyPackageReady(
         applicationInfo: ApplicationInfo,
         packageName: String?,
         processName: String?,
-    ): RuntimeIdentityDecision {
-        val module = moduleSnapshot ?: return rejectAndStore("module_identity_missing")
+    ): RuntimeIdentityDecision = updates.execute {
+        val module = moduleSnapshot ?: return@execute rejectAndStore("module_identity_missing")
         val appPackageName = applicationInfo.packageName.orEmpty()
         val appProcessName = applicationInfo.processName.orEmpty()
-        val targetProcessName = processName ?: return rejectAndStore("target_process_missing")
+        val targetProcessName = processName ?: return@execute rejectAndStore("target_process_missing")
         val sourceDir = applicationInfo.sourceDir.orEmpty()
         val userId = androidUserId(applicationInfo.uid)
         val decision = when {
@@ -93,8 +94,10 @@ object RuntimeIdentityGuard {
             sourceDir.isBlank() -> reject("target_source_missing")
             androidUserId(module.uid) != PRIMARY_ANDROID_USER_ID -> reject("module_non_primary_user")
             else -> {
-                targetSnapshot = TargetSnapshot(applicationInfo.uid, sourceDir, targetProcessName)
-                attachedIdentity = null
+                state = state.copy(
+                    targetSnapshot = TargetSnapshot(applicationInfo.uid, sourceDir, targetProcessName),
+                    attachedIdentity = null,
+                )
                 accept()
             }
         }
@@ -105,21 +108,26 @@ object RuntimeIdentityGuard {
                 "package=$packageName applicationPackage=$appPackageName uid=${applicationInfo.uid} user=$userId " +
                 "process=$targetProcessName applicationProcess=$appProcessName source=$sourceDir")
         }
-        lastDecision = decision
-        return decision
+        state = state.copy(lastDecision = decision, attachedIdentity = if (decision.accepted) state.attachedIdentity else null)
+        decision
     }
 
     @Suppress("DEPRECATION")
-    @Synchronized
-    fun verifyApplicationAttach(context: Context): RuntimeIdentityDecision {
-        val module = moduleSnapshot ?: return rejectAndStore("module_identity_missing")
-        val target = targetSnapshot ?: return rejectAndStore("target_identity_missing")
-        val contextInfo = context.applicationInfo ?: return rejectAndStore("target_context_missing")
+    suspend fun verifyApplicationAttach(context: Context): RuntimeIdentityDecision = attachments.submit {
+        val pending = updates.execute {
+            val decision = when {
+                state.moduleSnapshot == null -> reject("module_identity_missing")
+                state.targetSnapshot == null -> reject("target_identity_missing")
+                else -> RuntimeIdentityDecision(false, "module_identity_pending")
+            }
+            state.copy(attachedIdentity = null, lastDecision = decision).also { state = it }
+        }
+        val module = pending.moduleSnapshot ?: return@submit pending.lastDecision
+        val target = pending.targetSnapshot ?: return@submit pending.lastDecision
+        val contextInfo = context.applicationInfo
         var metadataStep = "query_target"
-        val decision = runCatching {
+        val decision = if (contextInfo == null) reject("target_context_missing") else runCatching {
             val targetInfo = context.packageManager.getApplicationInfo(General.PACKAGE_NAME, 0)
-            metadataStep = "query_module"
-            val moduleInfo = context.packageManager.getApplicationInfo(General.MODULE_PACKAGE_NAME, 0)
             metadataStep = "compare_identity"
             when {
                 context.packageName != General.PACKAGE_NAME -> reject("target_context_package_mismatch")
@@ -127,23 +135,11 @@ object RuntimeIdentityGuard {
                 Application.getProcessName() != target.processName -> reject("target_runtime_process_mismatch")
                 !matchesTargetIdentity(targetInfo, target) -> reject("target_package_manager_mismatch")
                 !matchesTargetSources(contextInfo, targetInfo, target) -> reject("target_source_mismatch")
-                moduleInfo.packageName != General.MODULE_PACKAGE_NAME -> reject("module_package_manager_mismatch")
-                moduleInfo.uid != module.uid -> reject("module_uid_mismatch")
-                androidUserId(moduleInfo.uid) != PRIMARY_ANDROID_USER_ID -> reject("module_non_primary_user")
-                moduleInfo.sourceDir.orEmpty() != module.sourceDir -> reject("module_source_mismatch")
-                else -> {
-                    attachedIdentity = RuntimeIdentity(
-                        moduleUid = module.uid,
-                        targetUid = target.uid,
-                        targetSourceDir = target.sourceDir,
-                        targetProcessName = target.processName,
-                    )
-                    accept()
-                }
+                else -> accept()
             }.also { result ->
                 if (!result.accepted) {
                     android.util.Log.e("ApplicationHook", "module=${General.MODULE_PACKAGE_NAME} instance_rejected stage=attach reason=${result.reasonCode} " +
-                        "modulePackage=${moduleInfo.packageName} moduleUid=${moduleInfo.uid} moduleUser=${androidUserId(moduleInfo.uid)} moduleSource=${moduleInfo.sourceDir} " +
+                        "moduleUid=${module.uid} moduleSource=${module.sourceDir} " +
                         "targetPackage=${targetInfo.packageName} targetUid=${targetInfo.uid} targetUser=${androidUserId(targetInfo.uid)} targetSource=${targetInfo.sourceDir} " +
                         "contextPackage=${context.packageName} contextUid=${contextInfo.uid} contextSource=${contextInfo.sourceDir}")
                 }
@@ -154,15 +150,36 @@ object RuntimeIdentityGuard {
                 "error=${it.javaClass.simpleName}", it)
             reject("package_metadata_unavailable")
         }
-        lastDecision = decision
-        return decision
+
+        val confirmed = decision.accepted &&
+            CommandUtil.verifyRuntimeIdentity(context, module.uid, module.sourceDir)
+        updates.execute {
+            if (state !== pending) return@execute reject("identity_changed")
+            val result = when {
+                !decision.accepted -> decision
+                !confirmed -> reject("module_identity_unverified")
+                else -> accept()
+            }
+            state = pending.copy(
+                attachedIdentity = if (result.accepted) RuntimeIdentity(
+                    moduleUid = module.uid,
+                    targetUid = target.uid,
+                    targetSourceDir = target.sourceDir,
+                    targetProcessName = target.processName,
+                ) else null,
+                lastDecision = result,
+            )
+            result
+        }
     }
 
-    fun isPackageReady(): Boolean =
-        lastDecision.accepted && targetSnapshot != null
+    fun isPackageReady(): Boolean = state.let {
+        it.lastDecision.accepted && it.targetSnapshot != null
+    }
 
-    fun isTrustedForExecution(): Boolean =
-        lastDecision.accepted && attachedIdentity?.targetProcessName == General.PACKAGE_NAME
+    fun isTrustedForExecution(): Boolean = state.let {
+        it.lastDecision.accepted && it.attachedIdentity?.targetProcessName == General.PACKAGE_NAME
+    }
 
     fun isMainProcess(): Boolean =
         targetSnapshot?.processName == General.PACKAGE_NAME
@@ -220,10 +237,9 @@ object RuntimeIdentityGuard {
             "ApplicationHook", "module=${General.MODULE_PACKAGE_NAME} instance_rejected reason=$reasonCode process=${Application.getProcessName()} " +
             "runtimeUid=${android.os.Process.myUid()} moduleUid=${moduleSnapshot?.uid} targetUid=${targetSnapshot?.uid} " +
             "moduleSource=${moduleSnapshot?.sourceDir} targetSource=${targetSnapshot?.sourceDir}")
-        attachedIdentity = null
         return RuntimeIdentityDecision(false, reasonCode)
     }
 
     private fun rejectAndStore(reasonCode: String): RuntimeIdentityDecision =
-        reject(reasonCode).also { lastDecision = it }
+        reject(reasonCode).also { state = state.copy(attachedIdentity = null, lastDecision = it) }
 }

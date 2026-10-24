@@ -13,6 +13,14 @@ import kotlinx.coroutines.CancellationException
 object ExchangeReplenisher {
     private const val TAG = "ExchangeReplenisher"
 
+    /** 每次按当前勾选集合和商品级日状态筛选，不使用模块级完成标记挡住新增选择。 */
+    fun remainingSelectedIds(
+        selectedIds: Collection<String?>?,
+        canExchangeToday: (String) -> Boolean
+    ): Set<String> = selectedIds.orEmpty().asSequence()
+        .filterNotNull().map(String::trim).filter(String::isNotEmpty)
+        .filter(canExchangeToday).toSet()
+
     fun replenish(
         need: ExchangeEffectNeed,
         reason: String,

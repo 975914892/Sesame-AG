@@ -19,11 +19,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicReference
 
 /** 模块进程的排障记录；不触发授权、不查询业务接口、不上传日志。 */
 object ModuleDiagnostics {
@@ -32,8 +32,9 @@ object ModuleDiagnostics {
     private const val CURSOR_KEY = "diagnostic_logcat_cursor"
     private const val HASHES_KEY = "diagnostic_logcat_hashes"
     private const val BOOT_KEY = "diagnostic_boot_count"
-    private val collectionMutex = Mutex()
-    private var lastState: String? = null
+    private val collectionQueue = SerialTaskQueue()
+    private val collecting = AtomicBoolean(false)
+    private val lastState = AtomicReference<String?>(null)
 
     fun account(userId: String?): String =
         userId?.trim()?.takeIf { it.isNotEmpty() }?.let(AccountSlotRegistry::shortHash) ?: "unknown"
@@ -82,7 +83,6 @@ object ModuleDiagnostics {
                 "storage=private systemFile=${Logback.systemLogFile?.absolutePath ?: "unavailable"}")
     }
 
-    @Synchronized
     fun state(
         permissions: PermissionHealthSnapshot,
         configState: String,
@@ -97,8 +97,7 @@ object ModuleDiagnostics {
             "config=$configState count=${configCount ?: "unknown"} account=${account(userId)} legal=$legalAccepted " +
             "slotState=${slots.migrationState} slotError=${slots.errorCode ?: "none"} " +
             "slots=${slots.activeUserIds.joinToString { account(it) }} pending=${account(slots.pendingRuntimeUserId)}"
-        if (value == lastState) return
-        lastState = value
+        if (value == lastState.getAndSet(value)) return
         event("home_state", "changed", value)
     }
 
@@ -126,17 +125,18 @@ object ModuleDiagnostics {
     }
 
     suspend fun collectLogcat(context: Context, reason: String) = withContext(Dispatchers.IO) {
-        if (!collectionMutex.tryLock()) return@withContext
+        if (!collecting.compareAndSet(false, true)) return@withContext
         try {
+            collectionQueue.submit {
             val executor = (CommandUtil.serviceStatus.value as? CommandUtil.ServiceStatus.Active)?.type
             if (executor == null) {
                 event("logcat", "executor_unavailable", "trigger=$reason")
-                return@withContext
+                return@submit
             }
             val result = withTimeoutOrNull(6_000) { CommandUtil.readDiagnosticLogcat() }
             if (result == null) {
                 event("logcat", "timeout", "executor=$executor limitMs=6000")
-                return@withContext
+                return@submit
             }
             val output = result.getOrElse {
                 val outcome = when (it.message) {
@@ -144,7 +144,7 @@ object ModuleDiagnostics {
                     else -> "failed"
                 }
                 event("logcat", outcome, "executor=$executor error=${it.javaClass.simpleName}")
-                return@withContext
+                return@submit
             }
             currentCoroutineContext().ensureActive()
             val now = System.currentTimeMillis()
@@ -162,7 +162,7 @@ object ModuleDiagnostics {
             val parsed = rawLines.mapNotNull(::parseLine)
             if (rawLines.isNotEmpty() && parsed.isEmpty()) {
                 event("logcat", "parse_failed", "trigger=$reason received=${rawLines.size}")
-                return@withContext
+                return@submit
             }
             val targetUid = runCatching {
                 context.packageManager.getApplicationInfo(General.PACKAGE_NAME, 0).uid
@@ -221,18 +221,19 @@ object ModuleDiagnostics {
                 "trigger=$reason executor=$executor windowMs=$WINDOW_MS recordLimit=64 byteLimit=$MAX_BYTES " +
                     "received=${parsed.size} imported=$imported duplicates=$duplicates unparsed=${rawLines.size - parsed.size} " +
                     "possiblyTruncated=$truncated targetUid=${targetUid ?: "unknown"}")
+            }
         } catch (e: CancellationException) {
             event("logcat", "cancelled")
             throw e
         } catch (e: Exception) {
             event("logcat", "failed", "error=${e.javaClass.simpleName}")
         } finally {
-            collectionMutex.unlock()
+            collecting.set(false)
         }
     }
 
     suspend fun clear(context: Context): Boolean = withContext(Dispatchers.IO) {
-        collectionMutex.withLock {
+        collectionQueue.submit {
             val cleared = runCatching { Logback.clearSystemLog() }.getOrElse {
                 event("clear_diagnostics", "failed", "error=${it.javaClass.simpleName}")
                 false
@@ -244,7 +245,7 @@ object ModuleDiagnostics {
                     remove(HASHES_KEY)
                 }
             }
-            lastState = null
+            lastState.set(null)
             event("clear_diagnostics", if (cleared) "completed" else "failed")
             cleared
         }

@@ -51,6 +51,15 @@ object AntDodoRpcCall {
         return RequestManager.requestString(METHOD_COLLECT, "[{}]")
     }
 
+    @JvmStatic
+    fun scratchCard(animalId: String, bookId: String, cardInstanceId: String): String {
+        val args = JSONObject()
+            .put("animalId", animalId)
+            .put("bookId", bookId)
+            .put("cardInstanceId", cardInstanceId)
+        return RequestManager.requestString("alipay.antdodo.rpc.h5.scratchCard", "[$args]")
+    }
+
     /**
      * 任务列表
      */

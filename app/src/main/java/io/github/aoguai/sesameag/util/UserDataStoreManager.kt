@@ -15,25 +15,25 @@ object UserDataStoreManager {
      * 采用“独占式”管理策略：仅为真实有效 UID 创建实例，且切换时自动释放。
      */
     @JvmStatic
-    @Synchronized
     fun getInstance(uid: String?): UserDataStore? {
-        // 过滤无效或占位 UID
         if (uid.isNullOrEmpty() || uid == "default") return null
-        
-        // 自动清理逻辑：如果当前缓存了其他真实 UID，则在切换时自动释放
-        val it = stores.iterator()
-        while (it.hasNext()) {
-            val entry = it.next()
-            if (entry.key != uid) {
-                entry.value.shutdown()
-                it.remove()
+        stores[uid]?.let { return it }
+        return io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            // 自动清理逻辑：如果当前缓存了其他真实 UID，则在切换时自动释放
+            val it = stores.iterator()
+            while (it.hasNext()) {
+                val entry = it.next()
+                if (entry.key != uid) {
+                    entry.value.shutdown()
+                    it.remove()
+                }
             }
-        }
 
-        return stores.getOrPut(uid) {
-            val userDir = Files.getUserConfigDir(uid)
-            val file = java.io.File(userDir, "UserDataStore.json")
-            UserDataStore(uid, file)
+            stores.getOrPut(uid) {
+                val userDir = Files.getUserConfigDir(uid)
+                val file = Files.child(userDir, "UserDataStore.json")
+                UserDataStore(uid, file)
+            }
         }
     }
 
@@ -49,9 +49,8 @@ object UserDataStoreManager {
      * 释放特定用户的 DataStore 实例。
      */
     @JvmStatic
-    @Synchronized
-    fun releaseInstance(uid: String?) {
-        if (uid.isNullOrEmpty()) return
+    fun releaseInstance(uid: String?): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+        if (uid.isNullOrEmpty()) return@transaction
         stores.remove(uid)?.shutdown()
     }
 
@@ -59,8 +58,7 @@ object UserDataStoreManager {
      * 关机/重启时释放所有实例。
      */
     @JvmStatic
-    @Synchronized
-    fun shutdownAll() {
+    fun shutdownAll(): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
         val it = stores.values.iterator()
         while (it.hasNext()) {
             it.next().shutdown()

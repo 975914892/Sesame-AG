@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.task.antFarm.AntFarmRpcCall
 
 import io.github.aoguai.sesameag.data.Status
@@ -27,7 +29,7 @@ import java.util.Locale
 /**
  * 森林寻宝任务处理类 (每天自动执行, 完成后标记)
  */
-class ForestChouChouLe {
+class ForestChouChouLe(private val charityWaterEnabled: Boolean = false) {
     companion object {
         private const val TAG = "ForestChouChouLe"
         private const val SOURCE = "task_entry"
@@ -186,7 +188,7 @@ class ForestChouChouLe {
             Log.forest("开始处理森林寻宝, 共 ${scenes.size} 个场景")
             scenes.forEach {
                 processScene(it)
-                sleepCompat(100L)
+                sleepCompat(RandomUtil.nextLong(85, 101))
             }
         }.onFailure { Log.printStackTrace(TAG, "执行异常", it) }
     }
@@ -196,7 +198,7 @@ class ForestChouChouLe {
             if (Status.hasFlagToday(s.flag)) {
                 when (inspectSceneState(s).check) {
                     CompletionFlagCheck.NO_ACTIONABLE -> {
-                        Log.forest("⏭️ ${s.name} 今天已完成, 跳过")
+                        Log.forest("⏭️ ${s.name} 当前无可执行任务且无抽奖次数，跳过")
                         return@runCatching
                     }
 
@@ -247,7 +249,7 @@ class ForestChouChouLe {
                     return@runCatching
                 }
 
-                val taskResult = TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 500L).run()
+                val taskResult = TaskFlowEngine(ChouChouLeTaskFlowAdapter(s), roundSleepMs = 425L).run()
                 val lotteryHandled =
                     if (taskResult.interrupted) {
                         Log.forest("${s.name} 任务流因离线中断，跳过本轮抽奖")
@@ -329,9 +331,16 @@ class ForestChouChouLe {
             val rightsTimes = taskRights.optInt("rightsTimes", 0)
             val rightsTimesLimit = taskRights.optInt("rightsTimesLimit", 0)
             stateParts += "$taskType:$taskStatus:$rightsTimes:$rightsTimesLimit"
-            if (!isBlockedTask(taskType) &&
-                (taskStatus in setOf("FINISHED", "COMPLETE", "WAIT_RECEIVE", "TO_RECEIVE") || isAutomatableDrawTask(baseInfo))
-            ) {
+            val blacklistMatch = TaskBlacklist.findMatch(FOREST_BLACKLIST_MODULE, taskType)
+            if (blacklistMatch != null) {
+                Log.forest(
+                    "${s.name} 任务因黑名单跳过[sceneCode=${s.code} taskType=$taskType " +
+                        "status=$taskStatus progress=$rightsTimes/$rightsTimesLimit " +
+                        "blacklistSource=${blacklistMatch.first} blacklistEntry=${blacklistMatch.second}]",
+                )
+                continue
+            }
+            if (taskStatus in setOf("FINISHED", "COMPLETE", "WAIT_RECEIVE", "TO_RECEIVE") || isAutomatableDrawTask(baseInfo)) {
                 val bizInfo = baseInfo.optString("bizInfo").toJson() ?: JSONObject()
                 val taskName = extractTaskName(bizInfo, taskType)
                 Log.forest("${s.name} 发现待处理任务: $taskName [$taskStatus]")
@@ -496,7 +505,7 @@ class ForestChouChouLe {
                     Log.forest("${s.name} 🎁 [获得: $name * $num] 剩余次数: $balance")
                 }
 
-                if (balance > 0) sleepCompat(500L)
+                if (balance > 0) sleepCompat(RandomUtil.nextLong(425, 501))
             }
             if (balance > 0) {
                 Log.error(TAG, "${s.name} 单次抽奖达到轮次上限，剩余次数: $balance")
@@ -621,6 +630,23 @@ class ForestChouChouLe {
 
         override fun complete(item: TaskFlowItem): TaskFlowActionResult {
             val taskBaseInfo = taskBaseInfo(item) ?: return missingTaskData(item, "complete")
+            val target = android.net.Uri.parse(taskBizInfo(item).optString("targetUrl"))
+            val inner = if (target.isHierarchical) target.getQueryParameter("url")?.let(android.net.Uri::parse) ?: target else target
+            if (inner.path == "/p/yuyan/180020010001279274/welfareDetail.html") {
+                if (!charityWaterEnabled) return TaskFlowActionResult.defer(
+                    DeferredReason.PREREQUISITE_PENDING, "公益林浇水未开启",
+                )
+                val activityId = inner.getQueryParameter("activityId").orEmpty()
+                if (activityId.isBlank()) return missingTaskData(item, "welfareForestWater")
+                val home = JSONObject(AntForestRpcCall.welfareForestHome(activityId)).let { it.optJSONObject("resData") ?: it }
+                if (!home.check()) return handleActionResponse(item, home, TaskFlowAction.COMPLETE, "AntForestRpcCall.welfareForestHome")
+                val extend = home.optJSONObject("welfareForestActivityVO")?.optString("extend")?.toJson()
+                if (extend?.optInt("solidWaterValue", 0) != 15 || home.optInt("currentEnergy") < 15) {
+                    return TaskFlowActionResult.defer(DeferredReason.PREREQUISITE_PENDING, "15g浇水档不可用或能量不足")
+                }
+                val watered = JSONObject(AntForestRpcCall.welfareForestWater(activityId)).let { it.optJSONObject("resData") ?: it }
+                return handleActionResponse(item, watered, TaskFlowAction.COMPLETE, "AntForestRpcCall.welfareForestWater")
+            }
             val descriptor = GameCenterPlayRpcCall.describeTask(taskBaseInfo, taskBizInfo(item), taskProdPlayParam(item))
             val playContract = forestGamePlayContract(item)
             val mappedTask = descriptor.mappedTask
@@ -740,10 +766,6 @@ class ForestChouChouLe {
         override fun onAllTasksDone(snapshot: TaskFlowSnapshot) {
             val summary = if (snapshot.totalTasks == 0) "无有效任务" else "全部完成"
             Log.forest("✅ ${scene.name} $summary (${snapshot.completedTasks}/${snapshot.totalTasks})")
-        }
-
-        override fun onQueryFailed(response: JSONObject) {
-            Log.error(TAG, "${scene.name} 任务列表查询失败 raw=$response")
         }
 
         override fun logInfo(message: String) {
@@ -880,9 +902,7 @@ class ForestChouChouLe {
 
         /** 游戏先复用已有动作合同，其他外部业务仍由所属玩法推进。 */
         private fun requiresExternalBusinessAction(item: TaskFlowItem): Boolean {
-            if (item.id == "FOREST_ACTIVITY_DRAW_GYL") {
-                return true
-            }
+
             if (isExchangeDrawTask(item)) {
                 return false
             }
@@ -894,10 +914,6 @@ class ForestChouChouLe {
             if (descriptor.isGameTask) return false
             if (taskBaseInfo.optString("taskProdPlayType") == "VISIT_FLOAT_BALL") {
                 return false
-            }
-            val bizInfo = taskBizInfo(item)
-            if (bizInfo.has("autoCompleteTask") && !bizInfo.optBoolean("autoCompleteTask")) {
-                return true
             }
             if (taskBaseInfo.optString("taskMode") != "ACC_ANTIEP") {
                 return false
@@ -946,12 +962,6 @@ class ForestChouChouLe {
             action: TaskFlowAction?,
         ): String = "sceneCode=${item.sceneCode} taskType=${item.type} taskName=${item.title} action=${action?.logName.orEmpty()}"
     }
-
-    /**
-     * 判断任务是否在屏蔽列表中
-     */
-    private fun isBlockedTask(taskType: String): Boolean =
-        taskType.isNotBlank() && TaskBlacklist.isTaskInBlacklist(FOREST_BLACKLIST_MODULE, taskType)
 
     private fun syncDrawAssetAfterTaskAward(s: Scene) {
         runCatching {

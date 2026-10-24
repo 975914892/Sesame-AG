@@ -222,7 +222,7 @@ internal suspend fun AntFarm.runFarmFinalizeWorkflow(
     }
 
     // 厨房与乐园动作可能刚推进大表鸽任务，收尾统一补收并回查 NPC 产出。
-    runZhimaPigeonTaskFlow()
+    runNpcTaskFlow()
 
     refreshFarmFeedingSchedule()
     if (isOwnerAnimalSleeping()) {

@@ -7,8 +7,8 @@ import com.niki.cmd.ShizukuShell
 import com.niki.cmd.model.bean.ShellResult
 import io.github.aoguai.sesameag.service.patch.SafeRootShell
 import io.github.aoguai.sesameag.util.Log
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.CancellationException
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import rikka.shizuku.Shizuku
 
 class ShellManager(context: Context) {
@@ -28,7 +28,7 @@ class ShellManager(context: Context) {
     private var selectedShell: Shell? = null
     @Volatile
     private var lastNotifiedType: String? = null
-    private val selectionMutex = Mutex()
+    private val selectionQueue = SerialTaskQueue()
 
     /**
      * 获取当前使用的 Shell 名称
@@ -48,9 +48,10 @@ class ShellManager(context: Context) {
     }
 
     private suspend fun selectExecutor(notifyUnavailable: Boolean = true) {
-        selectionMutex.withLock {
-            // 如果已经选中且可用，直接返回
-            if (selectedShell != null && selectedShell!!.isAvailable()) return
+        selectionQueue.submit {
+            val current = selectedShell
+            if (current?.isAvailable() == true) return@submit
+            selectedShell = null
 
             Log.d(TAG, "正在寻找可用的 Root 或 Shizuku Shell...")
 
@@ -70,12 +71,14 @@ class ShellManager(context: Context) {
                         }
                     }
 
-                    if (shell.isAvailable()) {
+                    if (isRootExecutorAvailable(shell)) {
                         selectedShell = shell
                         notifyChange() // 🔥 通知：选中了新 Shell
                         Log.i(TAG, "✅ 成功选中 Shell: ${shell.javaClass.simpleName}")
-                        return
+                        return@submit
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.w(TAG, "Shell ${shell.javaClass.simpleName} 检测失败: ${e.message}")
                 }
@@ -87,6 +90,24 @@ class ShellManager(context: Context) {
                 notifyChange() // 🔥 通知：变成 None 了
             }
         }
+    }
+
+    private suspend fun isRootExecutorAvailable(shell: Shell): Boolean = try {
+        if (shell is ShizukuShell) {
+            if (!isShizukuReady() || !shell.isAvailable()) {
+                false
+            } else {
+                val result = shell.exec("/system/bin/id -u", 5_000L)
+                result.isSuccess && result.stdout.trim() == "0"
+            }
+        } else {
+            shell.isAvailable()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "Root 执行身份确认失败: ${e.message}")
+        false
     }
 
     suspend fun refreshSelection(notifyUnavailable: Boolean = true): String {

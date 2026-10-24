@@ -40,6 +40,24 @@ internal object AntForestPatrolRpcCall {
             .put("uniqueId", RandomUtil.getRandomTag())).toString(),
     )
 
+    fun queryMonopolyMapPage(): String = RequestManager.requestString(
+        "alipay.antisle.monopoly.h5.queryMonopolyMapPage",
+        JSONArray().put(JSONObject().put("source", "monopoly_home_animal")
+            .put("uniqueId", RandomUtil.getRandomTag())).toString(),
+    )
+
+    fun queryMonopolyRanking(rankType: String): String = RequestManager.requestString(
+        "alipay.antisle.monopoly.h5.queryMonopolyRanking",
+        JSONArray().put(JSONObject().put("rankType", rankType).put("source", "monopoly_home_animal")
+            .put("uniqueId", RandomUtil.getRandomTag())).toString(),
+    )
+
+    fun switchMonopolyMap(mapCode: String, regionCode: String): String = RequestManager.requestString(
+        "alipay.antisle.monopoly.h5.switchMonopolyMap",
+        JSONArray().put(JSONObject().put("mapCode", mapCode).put("regionCode", regionCode)
+            .put("source", "monopoly_home_animal").put("uniqueId", RandomUtil.getRandomTag())).toString(),
+    )
+
     fun triggerMonopolyHomeProps(): String = RequestManager.requestString(
         "alipay.antisle.monopoly.h5.triggerHomePageProps",
         JSONArray().put(JSONObject()

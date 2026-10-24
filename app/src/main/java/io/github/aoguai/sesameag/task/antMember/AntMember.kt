@@ -83,8 +83,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -164,8 +164,6 @@ class AntMember : ModelTask() {
     private var beanExchangeRightList: SelectModelField? = null
 
 
-    /*//年度回顾
-    private var annualReview: BooleanModelField? = null*/
 
     // 黄金票配置 - 签到
     internal var enableGoldTicket: BooleanModelField? = null
@@ -238,7 +236,7 @@ class AntMember : ModelTask() {
         UNKNOWN
     }
 
-    internal val memberFloatingBallMutex = Mutex()
+    internal val memberFloatingBallQueue = SerialTaskQueue()
 
     private data class MemberFloatingBallTaskRef(
         val bizNo: String,
@@ -253,6 +251,7 @@ class AntMember : ModelTask() {
         PROCESSED,
         NO_TASK,
         RETRY_LATER,
+        STOPPED_TODAY,
         UNKNOWN
     }
 
@@ -481,10 +480,6 @@ class AntMember : ModelTask() {
             ) {
                 refreshBeanExchangeRightOptionsForSettings()
             }.withDesc("勾选允许处理的安心豆权益，需开启“安心豆 | 兑换权益”。").also { beanExchangeRightList = it })
-       /* modelFields.addField(
-            BooleanModelField(
-                "annualReview", "年度回顾", false
-            ).also { annualReview = it })*/
 
 
         modelFields.addField(
@@ -526,16 +521,13 @@ class AntMember : ModelTask() {
                 if (enableGameCenter?.value == true) {
                     deferredTasks.add(async(Dispatchers.IO) {
                         enableGameCenter()
-                        memberFloatingBallMutex.withLock { runExternalGameCenter() }
+                        memberFloatingBallQueue.submit { runExternalGameCenter() }
                     })
                 }
                 if (expressWelfare?.value == true) {
                     deferredTasks.add(async(Dispatchers.IO) { doExpressWelfare() })
                 }
 
-               /* if (annualReview!!.value) {   //年度回顾已下线
-                    deferredTasks.add(async(Dispatchers.IO) { doAnnualReview() })
-                }*/
 
                 scheduleBeanWorkflows(this, deferredTasks)
                 scheduleMerchantWorkflows(this, deferredTasks)
@@ -635,7 +627,7 @@ class AntMember : ModelTask() {
                     )
                     adapter to TaskFlowExecutionState()
                 }
-                val result = TaskFlowEngine(adapter, roundSleepMs = 500L, executionState = state).run()
+                val result = TaskFlowEngine(adapter, roundSleepMs = 425L, executionState = state).run()
                 // 子流程独立保留真实失败；父流程回查入口，不重复记同一错误。
                 if (!result.completed || result.failureCount > 0 || result.interrupted) {
                     return TaskFlowActionResult.defer(
@@ -663,7 +655,6 @@ class AntMember : ModelTask() {
             continueCurrentRoundOnFailure = true,
         )
 
-        override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "$flowName 查询失败:$response")
         override fun logInfo(message: String) = Log.member(message)
         override fun logError(message: String) = Log.error(TAG, message)
     }
@@ -718,287 +709,6 @@ class AntMember : ModelTask() {
         }
     }
 
-
-    /*
-     * 年度回顾已下线：相关 RPC/组件字段不再维护。
-     * 为保证编译通过，暂时整体注释掉这一段实现（含 RPC/组件常量未补齐部分）。
-     *
-     * 如需恢复：请先补齐 AntMemberRpcCall.annualReview* 与组件常量后再启用。
-     *
-    /**
-     * 年度回顾任务：通过 programInvoke 查询并自动完成任务
-     *
-     *
-     * 1) alipay.imasp.program.programInvoke + ..._task_reward_query 查询 playTaskOrderInfoList
-     * 2) 对于 taskStatus = "init" 的任务，使用 ..._task_reward_apply(code) 领取，得到 recordNo
-     * 3) 使用 ..._task_reward_process(code, recordNo) 上报完成，服务端自动发放成长值奖励
-     */
-    private suspend fun doAnnualReview(): Unit = CoroutineUtils.run {
-        try {
-            Log.member("年度回顾🎞[开始执行]")
-
-            val resp = AntMemberRpcCall.annualReviewQueryTasks()
-            if (resp == null || resp.isEmpty()) {
-                Log.member("年度回顾[查询返回空]")
-                return
-            }
-
-            val root: JSONObject?
-            try {
-                root = JSONObject(resp)
-            } catch (e: Throwable) {
-                Log.printStackTrace("$TAG.doAnnualReview.parseRoot", e)
-                return
-            }
-
-            if (!root.optBoolean("isSuccess", false)) {
-                Log.member("年度回顾[查询失败]#$resp")
-                return
-            }
-
-            val components = root.optJSONObject("components")
-            if (components == null || components.length() == 0) {
-                Log.member("年度回顾[components 为空]")
-                return
-            }
-
-            var queryComp = components.optJSONObject(AntMemberRpcCall.ANNUAL_REVIEW_QUERY_COMPONENT)
-            if (queryComp == null) {
-                // 兜底：取第一个组件
-                try {
-                    val it = components.keys()
-                    if (it.hasNext()) {
-                        queryComp = components.optJSONObject(it.next())
-                    }
-                } catch (_: Throwable) {
-                }
-            }
-            if (queryComp == null) {
-                Log.member("年度回顾[未找到查询组件]")
-                return
-            }
-            if (!queryComp.optBoolean("isSuccess", true)) {
-                Log.member("年度回顾[查询组件返回失败]")
-                return
-            }
-
-            val content = queryComp.optJSONObject("content")
-            if (content == null) {
-                Log.member("年度回顾[content 为空]")
-                return
-            }
-
-            val taskList = content.optJSONArray("playTaskOrderInfoList")
-            if (taskList == null || taskList.length() == 0) {
-                Log.member("年度回顾[当前无可处理任务]")
-                return
-            }
-
-            var candidate = 0
-            var applied = 0
-            var processed = 0
-            var failed = 0
-
-            for (i in 0..<taskList.length()) {
-                val task = taskList.optJSONObject(i) ?: continue
-
-                val taskStatus = task.optString("taskStatus", "")
-                if ("init" != taskStatus) {
-                    // 已完成/已领奖等状态直接跳过
-                    continue
-                }
-                candidate++
-
-                var code = task.optString("code", "")
-                if (code.isEmpty()) {
-                    val extInfo = task.optJSONObject("extInfo")
-                    if (extInfo != null) {
-                        code = extInfo.optString("taskId", "")
-                    }
-                }
-                if (code.isEmpty()) {
-                    failed++
-                    continue
-                }
-
-                var taskName = code
-                val displayInfo = task.optJSONObject("displayInfo")
-                if (displayInfo != null) {
-                    val name = displayInfo.optString(
-                        "taskName", displayInfo.optString("activityName", code)
-                    )
-                    if (!name.isEmpty()) {
-                        taskName = name
-                    }
-                }
-
-                // ========== Step 1: 领取任务 (apply) ==========
-                val applyResp = AntMemberRpcCall.annualReviewApplyTask(code)
-                if (applyResp == null || applyResp.isEmpty()) {
-                    Log.member("年度回顾[领任务失败]$taskName#响应为空")
-                    failed++
-                    continue
-                }
-
-                val applyRoot: JSONObject?
-                try {
-                    applyRoot = JSONObject(applyResp)
-                } catch (e: Throwable) {
-                    Log.printStackTrace("$TAG.doAnnualReview.parseApply", e)
-                    failed++
-                    continue
-                }
-                if (!applyRoot.optBoolean("isSuccess", false)) {
-                    Log.member("年度回顾[领任务失败]$taskName#$applyResp")
-                    failed++
-                    continue
-                }
-                val applyComps = applyRoot.optJSONObject("components")
-                if (applyComps == null) {
-                    failed++
-                    continue
-                }
-                var applyComp = applyComps.optJSONObject(AntMemberRpcCall.ANNUAL_REVIEW_APPLY_COMPONENT)
-                if (applyComp == null) {
-                    try {
-                        val it2 = applyComps.keys()
-                        if (it2.hasNext()) {
-                            applyComp = applyComps.optJSONObject(it2.next())
-                        }
-                    } catch (_: Throwable) {
-                    }
-                }
-                if (applyComp == null || !applyComp.optBoolean("isSuccess", true)) {
-                    failed++
-                    continue
-                }
-                val applyContent = applyComp.optJSONObject("content")
-                if (applyContent == null) {
-                    failed++
-                    continue
-                }
-                val claimedTask = applyContent.optJSONObject("claimedTask")
-                if (claimedTask == null) {
-                    failed++
-                    continue
-                }
-                val recordNo = claimedTask.optString("recordNo", "")
-                if (recordNo.isEmpty()) {
-                    failed++
-                    continue
-                }
-                applied++
-
-                // ========== Step 2: 提交任务完成 (process) ==========
-                val processResp = AntMemberRpcCall.annualReviewProcessTask(code, recordNo)
-                if (processResp == null || processResp.isEmpty()) {
-                    Log.member("年度回顾[提交任务失败]$taskName#响应为空")
-                    failed++
-                    continue
-                }
-
-                val processRoot: JSONObject?
-                try {
-                    processRoot = JSONObject(processResp)
-                } catch (e: Throwable) {
-                    Log.printStackTrace("$TAG.doAnnualReview.parseProcess", e)
-                    failed++
-                    continue
-                }
-                if (!processRoot.optBoolean("isSuccess", false)) {
-                    Log.member("年度回顾[提交任务失败]$taskName#$processResp")
-                    failed++
-                    continue
-                }
-                val processComps = processRoot.optJSONObject("components")
-                if (processComps == null) {
-                    failed++
-                    continue
-                }
-                var processComp = processComps.optJSONObject(AntMemberRpcCall.ANNUAL_REVIEW_PROCESS_COMPONENT)
-                if (processComp == null) {
-                    try {
-                        val it3 = processComps.keys()
-                        if (it3.hasNext()) {
-                            processComp = processComps.optJSONObject(it3.next())
-                        }
-                    } catch (_: Throwable) {
-                    }
-                }
-                if (processComp == null || !processComp.optBoolean("isSuccess", true)) {
-                    failed++
-                    continue
-                }
-                val processContent = processComp.optJSONObject("content")
-                if (processContent == null) {
-                    failed++
-                    continue
-                }
-                val processedTask = processContent.optJSONObject("processedTask")
-                if (processedTask == null) {
-                    failed++
-                    continue
-                }
-                val newStatus = processedTask.optString("taskStatus", "")
-                var rewardStatus = processedTask.optString("rewardStatus", "")
-
-                // ========== Step 3: 如仍未发奖，则调用 get_reward 领取奖励 ==========
-                if (!"success".equals(rewardStatus, ignoreCase = true)) {
-                    try {
-                        val rewardResp = AntMemberRpcCall.annualReviewGetReward(code, recordNo)
-                        if (rewardResp != null && !rewardResp.isEmpty()) {
-                            val rewardRoot = JSONObject(rewardResp)
-                            if (rewardRoot.optBoolean("isSuccess", false)) {
-                                val rewardComps = rewardRoot.optJSONObject("components")
-                                if (rewardComps != null) {
-                                    var rewardComp = rewardComps.optJSONObject(AntMemberRpcCall.ANNUAL_REVIEW_GET_REWARD_COMPONENT)
-                                    if (rewardComp == null) {
-                                        try {
-                                            val it4 = rewardComps.keys()
-                                            if (it4.hasNext()) {
-                                                rewardComp = rewardComps.optJSONObject(it4.next())
-                                            }
-                                        } catch (_: Throwable) {
-                                        }
-                                    }
-                                    if (rewardComp != null && rewardComp.optBoolean(
-                                            "isSuccess", true
-                                        )
-                                    ) {
-                                        val rewardContent = rewardComp.optJSONObject("content")
-                                        if (rewardContent != null) {
-                                            var rewardTask = rewardContent.optJSONObject("processedTask")
-                                            if (rewardTask == null) {
-                                                rewardTask = rewardContent.optJSONObject("claimedTask")
-                                            }
-                                            if (rewardTask != null) {
-                                                val rs = rewardTask.optString("rewardStatus", "")
-                                                if (!rs.isEmpty()) {
-                                                    rewardStatus = rs
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        Log.printStackTrace("$TAG.doAnnualReview.getReward", e)
-                    }
-                }
-
-                processed++
-                Log.member("年度回顾🎞[任务完成]$taskName#状态=$newStatus 奖励状态=$rewardStatus")
-            }
-
-            Log.member("年度回顾🎞[执行结束] 待处理=$candidate 已领取=$applied 已提交=$processed 失败=$failed"
-            )
-        } catch (t: Throwable) {
-            Log.printStackTrace("$TAG.doAnnualReview", t)
-        }
-    }
-
-    */
 
     /**
      * 会员积分0元兑，权益道具兑换
@@ -1059,7 +769,7 @@ class AntMember : ModelTask() {
 
     private fun refreshMemberPointExchangeOptionsFromRpc(forceRefresh: Boolean = false): List<ExchangeOptionRow> {
         val userId = UserMap.currentUid
-        val candidateMap = queryMemberExchangeCandidates(userId, null, 1000L, forceRefresh = forceRefresh)
+        val candidateMap = queryMemberExchangeCandidates(userId, null, 850L, forceRefresh = forceRefresh)
         val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
         candidateMap.values.forEach { memberBenefitMap.add(it.item.id, it.item.displayName()) }
         memberBenefitMap.save(userId)
@@ -1090,6 +800,15 @@ class AntMember : ModelTask() {
                 val uniqueId = page.getString("uniqueId")
                 addMemberExchangeCandidates(response.optJSONArray("briefConfigInfos"), candidates, pageNum, 18, uniqueId)
                 addMemberExchangeEntityCandidates(response.optJSONArray("entityInfoList"), candidates, pageNum, 18, uniqueId)
+            }
+            val navi = payload.optJSONArray("navi") ?: JSONArray()
+            for (i in 0 until navi.length()) {
+                val page = navi.getJSONObject(i)
+                addMemberExchangeEntityCandidates(
+                    page.getJSONObject("response").optJSONArray("entityInfoList"), candidates,
+                    page.getInt("pageNum"), 18, page.getString("uniqueId"),
+                    JSONObject().put("source", "mytab").put("innerSource", "").put("unid", "").put("dhNewItem", "true"),
+                )
             }
             return candidates
         }
@@ -1160,12 +879,42 @@ class AntMember : ModelTask() {
                 check(!hasNextPage || (briefConfigInfos?.length() ?: 0) + (entityInfoList?.length() ?: 0) > 0) {
                     "会员积分专区分页未返回商品: currentPage=$currentPage nextPageNum=$next"
                 }
-                session.commit(JSONObject().put("stage", "delivery").put("pageNum", next).put("done", !hasNextPage),
+                session.commit(JSONObject().put("stage", if (hasNextPage) "delivery" else "navi").put("pageNum", next),
                     (briefConfigInfos?.length() ?: 0) + (entityInfoList?.length() ?: 0),
-                    if (hasNextPage) "积分专区第 $next 页" else "积分专区结束，保存完整列表")
+                    if (hasNextPage) "积分专区第 $next 页" else "积分专区结束，准备权益导航")
                 if (hasNextPage) currentPage = next
             } while (hasNextPage)
-            val payload = JSONObject().put("shandie", shandie).put("delivery", delivery)
+            val navi = JSONArray()
+            for (naviCode in listOf("", "14", "1", "11", "12")) {
+                val naviSession = session.read("naviSession", JSONObject().put("naviCode", naviCode), "权益导航分页参数") {
+                    JSONObject().put("uniqueId", "${System.currentTimeMillis()}${naviCode}0and99999999INTELLIGENT_SORT${userId.orEmpty()}")
+                }
+                var naviUniqueId = naviSession.getString("uniqueId")
+                currentPage = 1
+                do {
+                    if (sleepMillis > 0L) session.pageTurnDelay(baseMillis = sleepMillis)
+                    val response = session.read("navi", JSONObject().put("naviCode", naviCode).put("pageNum", currentPage)
+                        .put("pageSize", 18).put("uniqueId", naviUniqueId), "权益导航[$naviCode]第 $currentPage 页") {
+                        JSONObject(AntMemberRpcCall.queryIndexNaviBenefitFlowV2(naviCode, currentPage, 18, naviUniqueId))
+                    }
+                    if (!ResChecker.checkRes(TAG, "会员权益导航查询失败:", response)) {
+                        onFailure?.invoke(memberDomainTaskFailureResult(null, response, response.toString(), "queryIndexNaviBenefitFlowV2", "权益导航查询失败"))
+                        error("会员权益导航查询失败")
+                    }
+                    val entities = response.optJSONArray("entityInfoList") ?: error("会员权益导航缺少 entityInfoList")
+                    naviUniqueId = response.optString("uniqueId").ifBlank { naviUniqueId }
+                    navi.put(JSONObject().put("response", response).put("pageNum", currentPage).put("uniqueId", naviUniqueId))
+                    val next = response.optInt("nextPageNum", 0)
+                    check(next <= 0 || next > currentPage) { "会员权益导航分页未前进: currentPage=$currentPage nextPageNum=$next" }
+                    hasNextPage = next > currentPage
+                    check(!hasNextPage || entities.length() > 0) { "会员权益导航分页未返回商品: currentPage=$currentPage nextPageNum=$next" }
+                    session.commit(JSONObject().put("stage", "navi").put("naviCode", naviCode).put("pageNum", next),
+                        entities.length(), if (hasNextPage) "权益导航[$naviCode]第 $next 页" else "当前权益导航结束")
+                    if (hasNextPage) currentPage = next
+                } while (hasNextPage)
+            }
+            session.commit(JSONObject().put("stage", "navi").put("done", true), nextLabel = "权益目录结束，保存完整列表")
+            val payload = JSONObject().put("shandie", shandie).put("delivery", delivery).put("navi", navi)
             ExchangeOptionsSnapshot(parse(payload).values.map { it.item.toOptionRow() }, payload)
         }
         return parse(snapshot.payload)
@@ -1199,7 +948,8 @@ class AntMember : ModelTask() {
         candidateMap: LinkedHashMap<String, MemberExchangeCandidate>,
         pageNum: Int,
         pageSize: Int,
-        uniqueId: String
+        uniqueId: String,
+        sourcePassMap: JSONObject? = null,
     ) {
         if (entities == null || entities.length() == 0) {
             return
@@ -1207,11 +957,13 @@ class AntMember : ModelTask() {
         for (i in 0 until entities.length()) {
             val benefit = entities.optJSONObject(i)?.optJSONObject("benefitInfo") ?: continue
             val globalIndex = (pageNum - 1) * pageSize + i + 1
-            val sourcePassMap = buildMemberDeliveryZoneSourcePassMap(uniqueId, globalIndex)
+            val itemSourcePassMap = sourcePassMap?.let {
+                JSONObject(it.toString()).put("uniqueId", uniqueId).put("feedsIndex", globalIndex.toString())
+            } ?: buildMemberDeliveryZoneSourcePassMap(uniqueId, globalIndex)
             val candidate = buildMemberExchangeCandidate(
                 benefit,
                 requestSourceInfo = "SID:$uniqueId|$globalIndex",
-                sourcePassMap = sourcePassMap
+                sourcePassMap = itemSourcePassMap
             ) ?: continue
             candidateMap.putIfAbsent(candidate.item.id, candidate)
         }
@@ -1418,25 +1170,10 @@ class AntMember : ModelTask() {
     }
 
     internal fun memberPointExchangeBenefit() {
-        if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)) {
-            return
-        }
-        val selectedIds: Set<String> = memberPointExchangeBenefitList?.value
-            ?.filterNotNull()
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.toSet()
-            ?: emptySet()
-        if (selectedIds.isNotEmpty() && selectedIds.all { !canMemberPointExchangeBenefitToday(it) }) {
-            Log.member("会员积分🎐兑换列表今日已全部处理，跳过执行")
-            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
-            return
-        }
-        if (selectedIds.isEmpty()) {
-            Log.member("会员积分🎐未勾选目标，跳过列表拉取")
-            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
-            return
-        }
+        val selectedIds = ExchangeReplenisher.remainingSelectedIds(
+            memberPointExchangeBenefitList?.value, ::canMemberPointExchangeBenefitToday
+        )
+        if (selectedIds.isEmpty()) return
         try {
             val userId = UserMap.currentUid
             val memberInfo = JSONObject(AntMemberRpcCall.queryMemberInfo())
@@ -1452,7 +1189,7 @@ class AntMember : ModelTask() {
             }
             val memberBenefitMap = IdMapManager.getInstance(MemberBenefitsMap::class.java)
             Log.member("会员积分🎐兑换列表刷新..")
-            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 1000L)
+            val candidateMap = queryMemberExchangeCandidates(userId, pointBalance, 850L)
             candidateMap.values.forEach { candidate ->
                 memberBenefitMap.add(candidate.item.id, candidate.item.displayName())
                 if (!selectedIds.contains(candidate.item.id)) {
@@ -1464,14 +1201,11 @@ class AntMember : ModelTask() {
                     return@forEach
                 }
                 when (candidate.item.safety) {
-                    ExchangeSafety.UNAVAILABLE -> {
-                        Log.member("会员积分🎐跳过[${candidate.item.displayName()}]#${candidate.item.safetyReason}")
-                    }
                     ExchangeSafety.LOG_ONLY -> {
                         Log.member("会员积分🎐已勾选[${candidate.item.displayName()}]#仅提醒，不自动兑换")
-                        memberPointExchangeBenefitToday(candidate.item.id)
                     }
-                    ExchangeSafety.AUTO -> {
+                    ExchangeSafety.AUTO, ExchangeSafety.UNAVAILABLE -> {
+                        // 缓存中的临时不可兑状态不能替代本次详情复核。
                         if (exchangeMemberPointBenefit(candidate)) {
                             memberPointExchangeBenefitToday(candidate.item.id)
                         }
@@ -1487,8 +1221,6 @@ class AntMember : ModelTask() {
             remainingSelectedIds
                 ?.filter { canMemberPointExchangeBenefitToday(it) }
                 ?.forEach { Log.member("会员积分🎐已勾选[$it]#本次列表未返回，保留配置不删除") }
-            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_BENEFIT_REFRESH_DONE)
-
         } catch (t: Throwable) {
             Log.member("memberPointExchangeBenefit 运行异常: ${t.message}")
             Log.printStackTrace(TAG, t)
@@ -1914,10 +1646,6 @@ class AntMember : ModelTask() {
                     result.deferredUntil?.let { scheduleMemberTaskContinuation("memberGameEntrance", it) }
                 }
 
-                override fun onQueryFailed(response: JSONObject) {
-                    Log.error(TAG, "会员游戏乐园浏览任务查询失败:$response")
-                }
-
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }).run()
@@ -1935,7 +1663,7 @@ class AntMember : ModelTask() {
 
     internal suspend fun doAllMemberAvailableTaskCompat(): Unit = CoroutineUtils.run {
         try {
-            val floatingBallState = memberFloatingBallMutex.withLock { processMemberFloatingBallTaskCompat() }
+            val floatingBallState = memberFloatingBallQueue.submit { processMemberFloatingBallTaskCompat() }
             val processedAnyTask = floatingBallState == MemberFloatingBallTaskProcessState.PROCESSED
             if (ApplicationHookConstants.isOffline()) {
                 Log.member("会员任务[浮球]#检测到离线模式，本轮中断")
@@ -1954,14 +1682,19 @@ class AntMember : ModelTask() {
                     Log.error(TAG, "会员浮球状态未确认，继续处理独立会员任务")
                 }
 
+                MemberFloatingBallTaskProcessState.STOPPED_TODAY -> {
+                    Log.member("会员任务[浮球]#今日已停止请求，继续处理独立会员任务")
+                }
+
                 MemberFloatingBallTaskProcessState.NO_TASK -> {
                     Unit
                 }
             }
 
-            val taskListState = memberFloatingBallMutex.withLock { processCurrentMemberTaskListCompat() }
+            val taskListState = memberFloatingBallQueue.submit { processCurrentMemberTaskListCompat() }
             if (floatingBallState == MemberFloatingBallTaskProcessState.RETRY_LATER ||
-                floatingBallState == MemberFloatingBallTaskProcessState.UNKNOWN
+                floatingBallState == MemberFloatingBallTaskProcessState.UNKNOWN ||
+                floatingBallState == MemberFloatingBallTaskProcessState.STOPPED_TODAY
             ) return@run
             when (taskListState) {
                 CurrentMemberTaskListProcessState.COMPLETED -> {
@@ -2001,7 +1734,7 @@ class AntMember : ModelTask() {
     private suspend fun processCurrentMemberTaskListCompat(): CurrentMemberTaskListProcessState = CoroutineUtils.run {
         try {
             val adapter = CurrentMemberTaskFlowAdapter()
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
             return@run when {
                 adapter.queryFailed -> CurrentMemberTaskListProcessState.UNKNOWN
                 adapter.hasIncompleteQuery || adapter.hasRetryableFailure || adapter.hasBlockingFailure || runResult.stopped ->
@@ -2304,7 +2037,7 @@ class AntMember : ModelTask() {
             }
             Log.error(
                 "$TAG.processCurrentMemberTaskListCompat",
-                "会员任务[$stopScene]响应失败: " +
+                "$flowName[任务查询失败] scene=$stopScene reason=" +
                     stopObject.optString("resultDesc").ifBlank {
                         stopObject.optString("errorMsg").ifBlank { response.optString("_rawResponse", response.toString()) }
                     }
@@ -2440,10 +2173,9 @@ class AntMember : ModelTask() {
                     return TaskFlowActionResult.success(refreshAfterAction = true)
                 }
 
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "会员阶段奖励查询失败:$response")
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
-            }, roundSleepMs = 300L).run()
+            }, roundSleepMs = 255L).run()
         } catch (t: Throwable) {
             if (t is CancellationException || t is InterruptedException) throw t
             TaskExecutionReport.current()?.recordException()
@@ -2719,6 +2451,9 @@ class AntMember : ModelTask() {
     }
 
     private suspend fun processMemberFloatingBallTaskCompat(): MemberFloatingBallTaskProcessState = CoroutineUtils.run {
+        if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)) {
+            return@run MemberFloatingBallTaskProcessState.STOPPED_TODAY
+        }
         try {
             val floatingBallResponse = AntMemberRpcCall.querySignFloatingBall()
             val floatingBallObject = JSONObject(floatingBallResponse)
@@ -2744,6 +2479,14 @@ class AntMember : ModelTask() {
                 Log.member("会员任务[浮球]#当前浮球任务已完成，停止本轮继续刷新")
                 return@run MemberFloatingBallTaskProcessState.NO_TASK
             }
+            // video 入口也返回 MULTIPLE_TIMER_TASK，但应先处理广告任务，不能直接领取计时奖励。
+            if (floatingBallObject.optString("playType").equals("video", ignoreCase = true)) {
+                return@run if (tryProcessMemberFloatingBallAdTask(taskRef)) {
+                    MemberFloatingBallTaskProcessState.RETRY_LATER
+                } else {
+                    MemberFloatingBallTaskProcessState.UNKNOWN
+                }
+            }
             if (!taskRef.taskType.equals("MULTIPLE_TIMER_TASK", true)) {
                 Log.member("会员任务[浮球]#未适配任务类型${taskRef.taskType}，停止本轮继续刷新")
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
@@ -2760,6 +2503,11 @@ class AntMember : ModelTask() {
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
             if (!ResChecker.checkRes(TAG, "会员浮球完成失败[triggerSignFloatingBall]:", triggered)) {
+                Log.error(
+                    TAG,
+                    "会员浮球完成失败上下文: bizNo=${taskRef.bizNo}, taskType=${taskRef.taskType}, " +
+                        "领取前快照=$floatingBallObject",
+                )
                 return@run MemberFloatingBallTaskProcessState.UNKNOWN
             }
             val completedTask = triggered.optJSONObject("currentTaskInfo")
@@ -2781,6 +2529,9 @@ class AntMember : ModelTask() {
                 }
             if (nextTask != null) scheduleMemberFloatingBallTask(nextTask)
             if (!tryProcessMemberFloatingBallAdTask(taskRef)) {
+                if (hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)) {
+                    return@run MemberFloatingBallTaskProcessState.UNKNOWN
+                }
                 Log.member("会员任务[浮球]#后续广告任务待确认，后续调度继续查询")
                 return@run MemberFloatingBallTaskProcessState.RETRY_LATER
             }
@@ -2792,6 +2543,10 @@ class AntMember : ModelTask() {
             TaskExecutionReport.current()?.recordException()
             Log.printStackTrace(TAG, "processMemberFloatingBallTaskCompat err:", t)
             return@run MemberFloatingBallTaskProcessState.UNKNOWN
+        }
+    }.also { state ->
+        if (state == MemberFloatingBallTaskProcessState.UNKNOWN) {
+            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
         }
     }
 
@@ -2876,7 +2631,7 @@ class AntMember : ModelTask() {
             ownerUserId = ownerUserId,
             sessionEpoch = payload.optLong("session_epoch"),
             source = "member_floating_ball:$source",
-            workflowMutex = memberFloatingBallMutex,
+            workflowQueue = memberFloatingBallQueue,
             persistent = persistent,
         ) {
             if (!isEnable()) return@executePersistentChild TaskExecutionOutcome.SKIPPED
@@ -2915,6 +2670,7 @@ class AntMember : ModelTask() {
             } else {
                 when (processMemberFloatingBallTaskCompat()) {
                     MemberFloatingBallTaskProcessState.UNKNOWN -> TaskExecutionOutcome.FAILED
+                    MemberFloatingBallTaskProcessState.STOPPED_TODAY -> TaskExecutionOutcome.SKIPPED
                     MemberFloatingBallTaskProcessState.RETRY_LATER -> TaskExecutionOutcome.DEFERRED
                     MemberFloatingBallTaskProcessState.PROCESSED,
                     MemberFloatingBallTaskProcessState.NO_TASK -> TaskExecutionOutcome.SUCCESS
@@ -2980,6 +2736,7 @@ class AntMember : ModelTask() {
                     "$TAG.tryProcessMemberFloatingBallAdTask",
                     "会员浮球广告任务查询失败: " + adTaskObject.optString("resultDesc", adTaskResponse)
                 )
+                setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
                 return@run false
             }
             val adTaskInfoObjects = listOfNotNull(
@@ -2993,25 +2750,30 @@ class AntMember : ModelTask() {
                 .map { it.optString("taskStatus") }
                 .firstOrNull { isMemberTaskProcessInProgressStatus(it) }
             if (inProgressStatus != null) {
-                Log.member("会员任务[浮球]#广告任务状态${inProgressStatus}，保留后续调度确认")
+                Log.member("会员任务[浮球]#广告任务状态${inProgressStatus}，尚未确认完成")
                 return@run false
             }
             val floatingBallAdTask = buildCurrentMemberTaskFromFloatingBallAdResponse(adTaskObject)
             if (floatingBallAdTask == null) {
-                Log.member("会员任务[浮球]#广告查询成功，当前未返回可执行的广告对象，保留后续刷新")
+                Log.member("会员任务[浮球]#广告查询成功，当前未返回可执行的广告对象")
                 return@run false
             }
-            return@run finishMemberAdTask(
+            val result = finishMemberAdTask(
                 floatingBallAdTask.taskConfigId,
                 floatingBallAdTask.title,
                 floatingBallAdTask.awardPoint,
                 floatingBallAdTask.adBizId
-            ).success
+            )
+            if (!result.success) {
+                setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
+            }
+            return@run result.success
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             TaskExecutionReport.current()?.recordException()
             Log.printStackTrace(TAG, "tryProcessMemberFloatingBallAdTask err:", t)
+            setFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY)
             return@run false
         }
     }
@@ -3783,7 +3545,7 @@ class AntMember : ModelTask() {
         var taskCount = 0
         for (config in insuredTaskCenterConfigs) {
             val adapter = InsuredTaskCenterFlowAdapter(config, entrance)
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
             taskCount += adapter.taskCount
             val configResult = when {
                 adapter.queryFailed || adapter.hasBlockingFailure -> DailyTaskProcessResult.UNKNOWN_FAILURE
@@ -4017,7 +3779,7 @@ class AntMember : ModelTask() {
                 .ifBlank { response.toString() }
             Log.error(
                 "$TAG.collectInsuredTaskCenterRewards.queryTaskListV2",
-                "保障金🏥[任务中心]#查询失败:${config.taskCenterId}/${config.sceneCode}#$reason raw=${response.optString("_rawResponse")}"
+                "$flowName[任务查询失败] taskCenterId=${config.taskCenterId} sceneCode=${config.sceneCode} reason=$reason raw=${response.optString("_rawResponse")}"
             )
         }
 
@@ -4278,10 +4040,7 @@ class AntMember : ModelTask() {
     private fun isInsuredTaskRewardConfirmed(task: JSONObject): Boolean {
         val status = task.optString("taskProcessStatus").trim().uppercase(Locale.ROOT)
         return status in setOf(
-            "TO_RECEIVE",
-            "WAIT_RECEIVE",
-            "FINISHED",
-            "COMPLETE",
+            "SEND_SUCCESS",
             "RECEIVE_SUCCESS",
             "HAS_RECEIVED",
             "RECEIVED",
@@ -4298,7 +4057,7 @@ class AntMember : ModelTask() {
         for (i in 0 until sendOrderList.length()) {
             val sendOrder = sendOrderList.optJSONObject(i) ?: continue
             val sendStatus = sendOrder.optString("sendStatus")
-            if (sendStatus.isBlank() || sendStatus == "SUCCESS") {
+            if (sendStatus == "SUCCESS") {
                 return true
             }
         }
@@ -4443,6 +4202,8 @@ class AntMember : ModelTask() {
         responseObject: JSONObject
     ): TaskRpcFailureType {
         return when {
+            code == "AE15140290002002" -> TaskRpcFailureType.BUSINESS_LIMIT
+
             containsAny(
                 message,
                 "已领取",
@@ -5303,7 +5064,7 @@ class AntMember : ModelTask() {
                 autoTaskPredicate = ::isGoldTicketKnownWelfareAutoTask,
                 recordUnsupportedTasks = true
             )
-            val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
             adapter.logSummary()
             GoldTicketTaskFlowHandleResult(
                 querySuccess = !adapter.queryFailed,
@@ -5339,7 +5100,7 @@ class AntMember : ModelTask() {
                 autoTaskPredicate = ::isGoldTicketKnownWelfareAutoTask,
                 recordUnsupportedTasks = false
             )
-            TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+            TaskFlowEngine(adapter, roundSleepMs = 425L).run()
 
             val refreshedTodoTasks = queryGoldTicketWelfareTodoTasks()
             if (refreshedTodoTasks == null) {
@@ -5527,7 +5288,7 @@ class AntMember : ModelTask() {
 
         override fun onQueryFailed(response: JSONObject) {
             queryFailed = true
-            Log.error(TAG, "黄金票🎫[${source}任务查询失败] raw=$response")
+            Log.error(TAG, "$flowName[任务查询失败] source=$source raw=$response")
         }
 
         override fun logInfo(message: String) {
@@ -5866,7 +5627,6 @@ class AntMember : ModelTask() {
                     Log.member("会员游戏宝箱🎁领取已受理，回查剩余宝箱")
                     return TaskFlowActionResult.defer(DeferredReason.STATE_CONFIRMATION, "回查外部游戏宝箱", refreshAfterAction = true)
                 }
-                override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "外部游戏宝箱查询失败:$response")
                 override fun logInfo(message: String) = Log.member(message)
                 override fun logError(message: String) = Log.error(TAG, message)
             }).run()
@@ -5908,7 +5668,7 @@ class AntMember : ModelTask() {
                     return root
                 }
                 page++
-                GlobalThreadPools.sleepCompat(300L)
+                GlobalThreadPools.sleepCompat(kotlin.random.Random.nextLong(255L, 301L))
             }
             return JSONObject().put("success", false).put("errorMsg", "外部游戏查询已中断")
         }
@@ -5969,7 +5729,6 @@ class AntMember : ModelTask() {
             result.deferredUntil?.let { scheduleMemberTaskContinuation("memberExternalGameCenter", it) }
         }
 
-        override fun onQueryFailed(response: JSONObject) = Log.error(TAG, "外部游戏任务查询失败:$response")
         override fun logInfo(message: String) = Log.member(message)
         override fun logError(message: String) = Log.error(TAG, message)
     }
@@ -6158,7 +5917,7 @@ class AntMember : ModelTask() {
 
     private fun runGameCenterP2eTaskFlow(): DailyTaskProcessResult {
         val adapter = GameCenterP2eTaskFlowAdapter()
-        val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+        val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
         if (adapter.taskCount == 0) {
             Log.member("游戏中心🎮[赚现金暂无任务模块]")
         } else if (adapter.availableTaskCount == 0) {
@@ -6174,7 +5933,7 @@ class AntMember : ModelTask() {
 
     private fun runGameCenterPlatformTaskFlow(): DailyTaskProcessResult {
         val adapter = GameCenterPlatformTaskFlowAdapter()
-        val runResult = TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+        val runResult = TaskFlowEngine(adapter, roundSleepMs = 425L).run()
         if (adapter.taskCount == 0) {
             Log.member("游戏中心🎮[暂无平台任务模块]")
         } else if (adapter.availableTaskCount == 0) {
@@ -6422,7 +6181,7 @@ class AntMember : ModelTask() {
                 .ifBlank { response.optString("resultView") }
                 .ifBlank { response.optString("resultDesc") }
                 .ifBlank { response.optString("_rawResponse", response.toString()) }
-            Log.error("$TAG.enableGameCenter.tasks", "游戏中心🎮[任务列表查询失败]#$msg")
+            Log.error("$TAG.enableGameCenter.tasks", "$flowName[任务查询失败] reason=$msg")
         }
 
         override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
@@ -6893,7 +6652,7 @@ class AntMember : ModelTask() {
                 .ifBlank { response.optString("resultView") }
                 .ifBlank { response.optString("resultDesc") }
                 .ifBlank { response.optString("_rawResponse", response.toString()) }
-            Log.error("$TAG.enableGameCenter.p2eTasks", "游戏中心🎮[赚现金任务列表查询失败]#$msg")
+            Log.error("$TAG.enableGameCenter.p2eTasks", "$flowName[任务查询失败] reason=$msg")
         }
 
         override fun onUnknownPhase(item: TaskFlowItem, phase: TaskFlowPhase) {
@@ -8642,12 +8401,9 @@ class AntMember : ModelTask() {
         if (memberPointExchangeBenefit?.value != true) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
-        val selectedIds = memberPointExchangeBenefitList?.value
-            ?.filterNotNull()
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.toSet()
-            ?: emptySet()
+        val selectedIds = ExchangeReplenisher.remainingSelectedIds(
+            memberPointExchangeBenefitList?.value, ::canMemberPointExchangeBenefitToday
+        )
         if (selectedIds.isEmpty()) {
             return ExchangeReplenishResult.NOT_SELECTED
         }
@@ -8664,7 +8420,7 @@ class AntMember : ModelTask() {
                 failure = result
                 onFailure?.invoke(result)
             }
-            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 1000L, onFailure = report)
+            val candidateMap = queryMemberExchangeCandidates(UserMap.currentUid, pointBalance, 850L, onFailure = report)
             if (failure != null) return@runCatching ExchangeReplenishResult.RETRY_LATER
             var matchedSelected = false
             var exchangedCount = 0
@@ -8679,7 +8435,7 @@ class AntMember : ModelTask() {
                 }
                 matchedSelected = true
                 if (!canMemberPointExchangeBenefitToday(candidate.item.id)) continue
-                if (candidate.item.safety != ExchangeSafety.AUTO) continue
+                if (candidate.item.safety == ExchangeSafety.LOG_ONLY) continue
                 if (exchangeMemberPointBenefit(candidate, report)) {
                     memberPointExchangeBenefitToday(candidate.item.id)
                     exchangedCount += 1
@@ -8748,11 +8504,12 @@ class AntMember : ModelTask() {
             }
             when {
                 exchangedCount > 0 -> ExchangeReplenishResult.EXCHANGED
-                matchedSelected && attempted -> ExchangeReplenishResult.BUSINESS_LIMIT
+                matchedSelected && attempted -> ExchangeReplenishResult.RETRY_LATER
                 matchedSelected -> ExchangeReplenishResult.NOT_AVAILABLE
                 else -> ExchangeReplenishResult.NOT_SELECTED
             }
         }.onFailure {
+            if (it is CancellationException) throw it
             Log.printStackTrace(TAG, "replenishBeanExchangeByNeed err:", it)
         }.getOrDefault(ExchangeReplenishResult.RETRY_LATER)
     }
@@ -8776,7 +8533,7 @@ class AntMember : ModelTask() {
                 .onFailure { Log.printStackTrace(TAG, "exchangeBeanCandidate.postQuery err:", it) }
             return true
         }
-        Log.member("安心豆🫘兑换失败[${candidate.item.name}]#$exchangeResult")
+        Log.error(TAG, "安心豆🫘兑换失败[${candidate.item.name}]#$exchangeResult")
         return false
     }
 
@@ -8878,7 +8635,11 @@ class AntMember : ModelTask() {
         raw.optInt("lackPointNum", 0)
             .takeIf { it > 0 }
             ?.let { statusParts.add("安心豆不足$it") }
-        val balanceNotEnough = beanBalance != null && assetAmount > beanBalance
+        val balanceNotEnough = if (beanBalance != null && assetAmount > 0) {
+            assetAmount > beanBalance
+        } else {
+            raw.optInt("lackPointNum", 0) > 0
+        }
         if (balanceNotEnough) {
             statusParts.add("安心豆不足")
         }
@@ -8887,7 +8648,6 @@ class AntMember : ModelTask() {
             status.equals("WAIT_EFFECTIVE", true) ||
             status.equals("INVALID", true) ||
             status.equals("USED", true) ||
-            raw.optInt("lackPointNum", 0) > 0 ||
             balanceNotEnough
         val unsafeByType = showType.equals("GOODS", true) ||
             showType.equals("CASH", true) ||
@@ -8908,7 +8668,7 @@ class AntMember : ModelTask() {
         val safetyReason = when {
             unavailable -> when {
                 fromHistory -> "已兑换记录"
-                balanceNotEnough || raw.optInt("lackPointNum", 0) > 0 -> "安心豆不足"
+                balanceNotEnough -> "安心豆不足"
                 else -> statusParts.firstOrNull().orEmpty().ifEmpty { "服务端状态不可兑换" }
             }
             unsafeByType -> "商品/现金/券类权益需手动处理"
@@ -9592,7 +9352,7 @@ class AntMember : ModelTask() {
         private suspend fun doMerchantMoreTask(): Unit = CoroutineUtils.run {
             try {
                 val adapter = MerchantTaskFlowAdapter()
-                TaskFlowEngine(adapter, roundSleepMs = 500L).run()
+                TaskFlowEngine(adapter, roundSleepMs = 425L).run()
                 if (adapter.taskListObserved && adapter.taskCount == 0) {
                     Log.member("商家服务🏬[积分任务]#未查询到任务列表")
                 }

@@ -8,17 +8,20 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.Binder
+import android.os.Bundle
 import android.os.IBinder
 import android.os.Process
 import android.os.RemoteCallbackList
 import android.os.RemoteException
 import androidx.core.app.NotificationCompat
 import io.github.aoguai.sesameag.ICallback
+import io.github.aoguai.sesameag.ICaptureSession
 import io.github.aoguai.sesameag.ICommandService
 import io.github.aoguai.sesameag.IStatusListener
 import io.github.aoguai.sesameag.R
 import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.data.General
+import io.github.aoguai.sesameag.hook.AccountSlotRegistry
 import io.github.aoguai.sesameag.hook.keepalive.SystemWakeScheduler
 import io.github.aoguai.sesameag.ui.MainActivity
 import io.github.aoguai.sesameag.util.Log
@@ -28,9 +31,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import io.github.aoguai.sesameag.util.SerialTaskQueue
 import kotlinx.coroutines.withTimeout
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -60,7 +63,7 @@ class CommandService : Service() {
 
     // 使用 SupervisorJob，确保单个任务崩溃不影响整个作用域
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val commandMutex = Mutex()
+    private val commandQueue = SerialTaskQueue()
     private val pendingCommandCount = AtomicInteger(0)
 
     // ShellManager 实例
@@ -70,12 +73,37 @@ class CommandService : Service() {
     @Volatile
     private var stopWhenIdle = false
 
+    @Volatile
+    private var captureSessionProvider: ICaptureSession? = null
+
     private val binder = object : ICommandService.Stub() {
+        override fun beginStoreTransaction(client: IBinder): io.github.aoguai.sesameag.IStoreTransaction {
+            val uid = enforceTrustedCaller()
+            return io.github.aoguai.sesameag.storage.StoreAccess.begin(client, uid)
+        }
+        override fun isStoreReady(): Boolean {
+            enforceTrustedCaller()
+            return io.github.aoguai.sesameag.storage.PrivateStorage.isReady
+        }
+        override fun registerStoreListener(listener: io.github.aoguai.sesameag.IStoreListener) {
+            enforceTrustedCaller()
+            io.github.aoguai.sesameag.storage.StoreAccess.register(listener)
+        }
+        override fun unregisterStoreListener(listener: io.github.aoguai.sesameag.IStoreListener) {
+            enforceTrustedCaller()
+            io.github.aoguai.sesameag.storage.StoreAccess.unregister(listener)
+        }
+        override fun openLogStream(channel: String, processName: String): android.os.ParcelFileDescriptor {
+            enforceTrustedCaller()
+            return io.github.aoguai.sesameag.storage.StoreLogs.open(channel, processName)
+        }
+
         override fun executeCommand(command: String, callback: ICallback?) {
+            enforceTrustedCaller()
             pendingCommandCount.incrementAndGet()
             serviceScope.launch {
                 try {
-                    commandMutex.withLock {
+                    commandQueue.submit {
                         try {
                             ensureShellManager()
                             shellManager?.onStateChanged = { newType ->
@@ -85,13 +113,13 @@ class CommandService : Service() {
                             if (shellManager?.selectedName == "no_executor") {
                                 if (command == io.github.aoguai.sesameag.util.CommandUtil.DIAGNOSTIC_LOGCAT_COMMAND) {
                                     safeCallbackError(callback, "executor_unavailable")
-                                    return@withLock
+                                    return@submit
                                 }
                                 val refreshedType = shellManager?.refreshSelection(notifyUnavailable = false)
                                 if (refreshedType == "no_executor") {
                                     dispatchStatusChange("no_executor")
                                     safeCallbackError(callback, "无 Root/Shizuku 权限")
-                                    return@withLock
+                                    return@submit
                                 }
                             }
 
@@ -145,6 +173,7 @@ class CommandService : Service() {
          * 实现注册
          */
         override fun registerListener(listener: IStatusListener?) {
+            enforceTrustedCaller()
             listeners.register(listener)
             val currentType = shellManager?.selectedName
             if (currentType.isNullOrBlank() || currentType == "no_executor") {
@@ -172,16 +201,12 @@ class CommandService : Service() {
          * 实现注销
          */
         override fun unregisterListener(listener: IStatusListener?) {
+            enforceTrustedCaller()
             listeners.unregister(listener)
         }
 
         override fun getPersistentScheduleAlarmIntent(lane: Int): PendingIntent {
-            val callerUid = Binder.getCallingUid()
-            @Suppress("DEPRECATION")
-            val targetUid = runCatching { packageManager.getPackageUid(General.PACKAGE_NAME, 0) }.getOrNull()
-            if (callerUid != Process.myUid() && callerUid != targetUid) {
-                throw SecurityException("Untrusted persistent schedule caller")
-            }
+            enforceTrustedCaller()
             require(lane == SystemWakeScheduler.LANE_EXACT || lane == SystemWakeScheduler.LANE_FLEXIBLE)
             val identity = Binder.clearCallingIdentity()
             return try {
@@ -191,40 +216,129 @@ class CommandService : Service() {
             }
         }
 
+        override fun verifyRuntimeIdentity(expectedModuleUid: Int, expectedModuleSourceDir: String?): Boolean {
+            val callerUid = enforceTrustedCaller()
+            if (expectedModuleUid !in 0 until 100_000 || expectedModuleSourceDir.isNullOrBlank()) return false
+            val identity = Binder.clearCallingIdentity()
+            return try {
+                @Suppress("DEPRECATION")
+                val moduleInfo = packageManager.getApplicationInfo(General.MODULE_PACKAGE_NAME, 0)
+                @Suppress("DEPRECATION")
+                val targetInfo = packageManager.getApplicationInfo(General.PACKAGE_NAME, 0)
+                val moduleApk = moduleInfo.sourceDir?.takeIf { it.isNotBlank() }?.let { File(it).canonicalFile }
+                val targetApk = targetInfo.sourceDir?.takeIf { it.isNotBlank() }?.let { File(it).canonicalFile }
+                val contextApk = applicationInfo.sourceDir?.takeIf { it.isNotBlank() }?.let { File(it).canonicalFile }
+                val accepted = packageName == General.MODULE_PACKAGE_NAME &&
+                    applicationInfo.packageName == General.MODULE_PACKAGE_NAME &&
+                    applicationInfo.uid == Process.myUid() &&
+                    moduleApk != null && moduleApk.isFile && moduleApk == contextApk &&
+                    targetApk != null && targetApk.isFile && targetApk != moduleApk &&
+                    moduleInfo.uid != targetInfo.uid &&
+                    moduleInfo.packageName == General.MODULE_PACKAGE_NAME &&
+                    moduleInfo.uid == Process.myUid() &&
+                    moduleInfo.uid == expectedModuleUid &&
+                    moduleInfo.sourceDir == expectedModuleSourceDir &&
+                    targetInfo.packageName == General.PACKAGE_NAME &&
+                    targetInfo.uid in 0 until 100_000 &&
+                    callerUid == targetInfo.uid &&
+                    !targetInfo.sourceDir.isNullOrBlank()
+                if (!accepted) {
+                    Log.w(TAG, "runtime_identity_rejected: callerUid=$callerUid targetUid=${targetInfo.uid} " +
+                        "moduleUid=${moduleInfo.uid} expectedModuleUid=$expectedModuleUid " +
+                        "moduleSource=${moduleInfo.sourceDir} expectedModuleSource=$expectedModuleSourceDir")
+                }
+                accepted
+            } catch (e: Exception) {
+                Log.e(TAG, "运行身份安装信息查询失败", e)
+                false
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
+        }
+
+        override fun setCaptureSessionProvider(provider: ICaptureSession?) {
+            val callerUid = enforceTrustedCaller()
+            if (callerUid == Process.myUid()) throw SecurityException("Capture session must come from target")
+            captureSessionProvider = provider
+        }
+
+        override fun getCaptureSession(): Bundle? {
+            enforceTrustedCaller()
+            val provider = captureSessionProvider ?: return null
+            val identity = Binder.clearCallingIdentity()
+            return try {
+                if (!provider.asBinder().isBinderAlive ||
+                    shellManager?.selectedName.let { it == null || it == "no_executor" } ||
+                    !io.github.aoguai.sesameag.storage.PrivateStorage.isReady ||
+                    !LsposedServiceManager.hasTargetScope(General.PACKAGE_NAME)
+                ) return null
+                val session = provider.currentSession ?: return null
+                val userId = session.getString("userId")?.takeIf { it.isNotBlank() } ?: return null
+                if (session.getLong("sessionEpoch") <= 0L ||
+                    !AccountSlotRegistry.isExecutableUser(userId) ||
+                    !Config.readLegalAcceptedForCurrentVersion(userId)
+                ) return null
+                if (captureSessionProvider !== provider) return null
+                session
+            } catch (e: Exception) {
+                Log.w(TAG, "抓包实时会话不可用: ${e.message}")
+                null
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
+        }
+
         override fun isExecutionAllowed(userId: String?): Boolean {
+            enforceTrustedCaller()
             val activeUserId = userId?.trim()?.takeIf { it.isNotEmpty() } ?: return false
             val manager = shellManager ?: return false
             if (manager.selectedName == "no_executor") return false
-            return runCatching {
-                LsposedServiceManager.refreshScope()
-                PermissionUtil.checkFilePermissions(this@CommandService) &&
-                    LsposedServiceManager.hasTargetScope(General.PACKAGE_NAME) &&
-                    Config.readLegalAcceptedForCurrentVersion(activeUserId)
-            }.getOrDefault(false)
+            val identity = Binder.clearCallingIdentity()
+            return try {
+                runCatching {
+                    LsposedServiceManager.refreshScope()
+                    io.github.aoguai.sesameag.storage.PrivateStorage.isReady &&
+                        LsposedServiceManager.hasTargetScope(General.PACKAGE_NAME) &&
+                        Config.readLegalAcceptedForCurrentVersion(activeUserId)
+                }.getOrDefault(false)
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
         }
     }
 
-    @SuppressLint("ForegroundServiceType")
+    /** 在切换协程或清除 Binder 身份前校验调用者，避免转借执行器权限。 */
+    private fun enforceTrustedCaller(): Int {
+        val callerUid = Binder.getCallingUid()
+        if (Process.myUid() !in 0 until 100_000 ||
+            packageName != General.MODULE_PACKAGE_NAME || applicationInfo.uid != Process.myUid()
+        ) {
+            throw SecurityException("Untrusted command service instance")
+        }
+        if (callerUid == Process.myUid()) return callerUid
+        val identity = Binder.clearCallingIdentity()
+        try {
+            @Suppress("DEPRECATION")
+            val target = packageManager.getApplicationInfo(General.PACKAGE_NAME, 0)
+            if (callerUid != target.uid || target.uid !in 0 until 100_000 ||
+                target.packageName != General.PACKAGE_NAME || target.sourceDir.isNullOrBlank()
+            ) {
+                throw SecurityException("Untrusted command service caller")
+            }
+            return callerUid
+        } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+            throw SecurityException("Target application is not installed", e)
+        } finally {
+            Binder.restoreCallingIdentity(identity)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
 
         Log.d(TAG, "CommandService onCreate")
-        // 立即启动前台服务，避免超时
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification())
         LsposedServiceManager.init()
-        // 延迟初始化 ShellManager（不阻塞前台服务启动）
-        serviceScope.launch {
-            try {
-                ensureShellManager()
-                shellManager?.onStateChanged = { newType ->
-                    dispatchStatusChange(newType)
-                }
-                shellManager?.refreshSelection(notifyUnavailable = false)
-            } catch (e: Exception) {
-                Log.e(TAG, "ShellManager 初始化失败", e)
-            }
-        }
+        // 身份确认也会绑定此服务；执行器只在实际启动命令服务或注册监听时初始化。
     }
 
     /**
@@ -256,7 +370,24 @@ class CommandService : Service() {
         return false
     }
 
+    @SuppressLint("ForegroundServiceType")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 普通命令路径通过 startForegroundService 启动；仅身份绑定不提升为前台服务。
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, createNotification())
+        if (shellManager == null) {
+            serviceScope.launch {
+                try {
+                    ensureShellManager()
+                    shellManager?.onStateChanged = { newType ->
+                        dispatchStatusChange(newType)
+                    }
+                    shellManager?.refreshSelection(notifyUnavailable = false)
+                } catch (e: Exception) {
+                    Log.e(TAG, "ShellManager 初始化失败", e)
+                }
+            }
+        }
         // TODO: 当前模块侧命令服务既承担 UI 命令执行，也会影响“用户划掉模块后台后是否仍被系统保活”。
         // 现象上，用户希望保留必要的后台能力，但在主动划掉任务时应允许真正退出。
         // 后续可增加独立配置开关，决定 CommandService 使用 START_STICKY 还是 START_NOT_STICKY，
@@ -276,6 +407,7 @@ class CommandService : Service() {
 //        Log.d(TAG, "CommandService onDestroy")
         stopForeground(STOP_FOREGROUND_REMOVE)
         shellManager = null
+        captureSessionProvider = null
         serviceScope.cancel() // 销毁时取消所有协程任务
     }
 

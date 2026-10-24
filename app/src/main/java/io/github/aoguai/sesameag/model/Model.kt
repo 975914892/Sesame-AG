@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.model
 
+import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.model.modelFieldExt.BooleanModelField
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.util.Log
@@ -46,8 +47,6 @@ abstract class Model {
     /** 获取模型字段 */
     abstract fun getFields(): ModelFields?
 
-    private val lifecycleLock = Any()
-
     @Volatile
     private var isPrepared = false
 
@@ -71,13 +70,13 @@ abstract class Model {
     }
 
     internal fun ensurePrepared() {
-        synchronized(lifecycleLock) {
+        io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             ensurePreparedLocked()
         }
     }
 
     internal fun ensureBooted(classLoader: ClassLoader?) {
-        synchronized(lifecycleLock) {
+        io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             ensurePreparedLocked()
             if (!isBooted) {
                 boot(classLoader)
@@ -153,8 +152,7 @@ abstract class Model {
          * 销毁现有模型，然后创建新的模型实例
          */
         @JvmStatic
-        @Synchronized
-        fun initAllModel() {
+        fun initAllModel(): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             destroyAllModel()
             
             modelClazzList.forEachIndexed { i, modelClazz ->
@@ -191,8 +189,7 @@ abstract class Model {
          * @param classLoader 类加载器
          */
         @JvmStatic
-        @Synchronized
-        fun bootAllModel(classLoader: ClassLoader?) {
+        fun bootAllModel(classLoader: ClassLoader?): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
             for (model in modelArray) {
                 if (model == null) continue
                 
@@ -219,8 +216,8 @@ abstract class Model {
          * 清理所有模型实例和映射
          */
         @JvmStatic
-        @Synchronized
-        fun destroyAllModel() {
+        fun destroyAllModel(): Unit = io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            Config.unload()
             for (i in modelArray.indices) {
                 val model = modelArray[i]
                 if (model != null) {

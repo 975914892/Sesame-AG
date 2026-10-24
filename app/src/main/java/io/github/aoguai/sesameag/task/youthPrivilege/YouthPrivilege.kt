@@ -99,7 +99,7 @@ class YouthPrivilege : ModelTask() {
                 claimForestProps()
             }
             if (youthTasks?.value == true) {
-                TaskFlowEngine(YouthTaskFlowAdapter(), roundSleepMs = 800L).run()
+                TaskFlowEngine(YouthTaskFlowAdapter(), roundSleepMs = 680L).run()
                 claimTrialPrize()
                 TaskFlowEngine(MonthlyPrivilegeAdapter(), roundSleepMs = 0L).run()
             }
@@ -186,7 +186,10 @@ class YouthPrivilege : ModelTask() {
     }
 
     private fun handleCheckIn() {
-        val previouslyConfirmed = Status.hasFlagToday(StatusFlags.FLAG_YOUTH_PRIVILEGE_CHECK_IN_DONE)
+        if (Status.hasFlagToday(StatusFlags.FLAG_YOUTH_PRIVILEGE_CHECK_IN_DONE)) {
+            Log.youthPrivilege("青春特权今日签到已确认，跳过重复签到查询")
+            return
+        }
         val model = JSONObject(YouthPrivilegeRpcCall.queryCheckInModel())
         if (!isYouthSuccess(model)) {
             Log.error(TAG, "青春特权签到模型查询失败:$model")
@@ -206,9 +209,7 @@ class YouthPrivilege : ModelTask() {
 
             CHECKED_IN_ACTION -> {
                 Status.setFlagToday(StatusFlags.FLAG_YOUTH_PRIVILEGE_CHECK_IN_DONE)
-                Log.youthPrivilege(
-                    if (previouslyConfirmed) "青春特权签到服务端仍确认完成" else "青春特权签到已完成#action=$action",
-                )
+                Log.youthPrivilege("青春特权签到已完成#action=$action")
             }
 
             else -> Log.youthPrivilege("青春特权签到暂不处理#action=${action.ifBlank { "UNKNOWN" }} raw=$model")
@@ -490,10 +491,6 @@ class YouthPrivilege : ModelTask() {
             Log.youthPrivilege("青春特权任务服务端已无待处理项#${snapshot.totalTasks}")
         }
 
-        override fun onQueryFailed(response: JSONObject) {
-            Log.error(TAG, "青春特权任务查询失败:$response")
-        }
-
         override fun logInfo(message: String) {
             Log.youthPrivilege(message)
         }
@@ -637,7 +634,6 @@ class YouthPrivilege : ModelTask() {
             )
             return TaskFlowActionResult.success(refreshAfterAction = true, progressChanged = false)
         }
-        override fun onQueryFailed(response: JSONObject) { Log.error(TAG, "青春每月权益查询失败 raw=$response") }
         override fun logInfo(message: String) { Log.youthPrivilege(message) }
         override fun logError(message: String) { Log.error(TAG, message) }
     }

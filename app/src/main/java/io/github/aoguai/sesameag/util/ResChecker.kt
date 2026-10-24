@@ -4,6 +4,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.util.regex.Pattern
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 响应检查工具类
@@ -45,11 +46,11 @@ object ResChecker {
         val desc: String
     )
     private data class CheckFailedWindowStat(
-        var windowStartMs: Long,
-        var count: Int
+        val windowStartMs: Long,
+        val count: Int
     )
 
-    private val checkFailedWindowStats = ConcurrentHashMap<String, CheckFailedWindowStat>()
+    private val checkFailedWindowStats = ConcurrentHashMap<String, AtomicReference<CheckFailedWindowStat>>()
     private const val CHECK_FAILED_SUMMARY_WINDOW_MS = 10 * 60_000L
 
     private fun formatFailureMessage(context: String?, message: String): String {
@@ -143,29 +144,17 @@ object ResChecker {
             val key = "$tag|${context.orEmpty().trim()}|${failureInfo.code}"
             val now = System.currentTimeMillis()
             val stat = checkFailedWindowStats.computeIfAbsent(key) {
-                CheckFailedWindowStat(windowStartMs = now, count = 0)
+                AtomicReference(CheckFailedWindowStat(windowStartMs = now, count = 0))
+            }.getAndUpdate { previous ->
+                if (now - previous.windowStartMs >= CHECK_FAILED_SUMMARY_WINDOW_MS) {
+                    CheckFailedWindowStat(now, 1)
+                } else previous.copy(count = previous.count + 1)
             }
-
-            var summaryLog: String? = null
-            var shouldLogDetail = false
-            synchronized(stat) {
-                if (now - stat.windowStartMs >= CHECK_FAILED_SUMMARY_WINDOW_MS) {
-                    summaryLog = buildString {
-                        append("Check failed summary: code=")
-                        append(failureInfo.code)
-                        append(" count=")
-                        append(stat.count)
-                        append(" windowMs=")
-                        append(CHECK_FAILED_SUMMARY_WINDOW_MS)
-                    }
-                    stat.windowStartMs = now
-                    stat.count = 0
-                    shouldLogDetail = true
-                } else if (stat.count == 0) {
-                    shouldLogDetail = true
-                }
-                stat.count++
-            }
+            val expired = now - stat.windowStartMs >= CHECK_FAILED_SUMMARY_WINDOW_MS
+            val shouldLogDetail = expired || stat.count == 0
+            val summaryLog = if (expired) {
+                "Check failed summary: code=${failureInfo.code} count=${stat.count} windowMs=$CHECK_FAILED_SUMMARY_WINDOW_MS"
+            } else null
             summaryLog?.let { Log.error(tag, formatFailureMessage(context, it)) }
             if (shouldLogDetail) {
                 Log.error(tag, formatFailureMessage(context, "Check failed: [来源: $callerInfo] $jo"))

@@ -1,5 +1,7 @@
 package io.github.aoguai.sesameag.task.antForest
 
+import io.github.aoguai.sesameag.util.RandomUtil
+
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.ResChecker
@@ -9,9 +11,6 @@ import org.json.JSONObject
 
 /**
  * 医疗健康任务（绿色医疗、电子小票）
- *
- * @author Byseven
- * @date 2025/3/7
  */
 object Healthcare {
 
@@ -47,7 +46,7 @@ object Healthcare {
                 if (energyList.length() == 0 || !harvestForestEnergy(scene, energyList)) {
                     return
                 }
-                TimeUtil.sleepCompat(1000)
+                TimeUtil.sleepCompat(RandomUtil.nextLong(850, 1001))
             }
         } catch (th: Throwable) {
             Log.runtime(TAG, "queryForestEnergy err:")

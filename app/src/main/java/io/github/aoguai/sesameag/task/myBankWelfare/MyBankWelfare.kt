@@ -15,6 +15,7 @@ import io.github.aoguai.sesameag.model.modelFieldExt.SelectModelField
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antMember.AntMemberRpcCall
+import io.github.aoguai.sesameag.task.common.DeferredReason
 import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
 import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
 import io.github.aoguai.sesameag.task.common.TaskFlowEngine
@@ -134,7 +135,7 @@ class MyBankWelfare : ModelTask() {
                 handleSign()
             }
             if (myBankWelfareTask?.value == true) {
-                TaskFlowEngine(MyBankWelfareTaskFlowAdapter(), roundSleepMs = 800L).run()
+                TaskFlowEngine(MyBankWelfareTaskFlowAdapter(), roundSleepMs = 680L).run()
             }
             if (myBankWelfareExchange?.value == true) {
                 myBankWelfareExchange()
@@ -896,13 +897,20 @@ class MyBankWelfare : ModelTask() {
         }
 
         override fun mapPhase(item: TaskFlowItem): TaskFlowPhase {
+            val status = item.status.uppercase(Locale.ROOT)
+            if (status == "RECEIVE_SUCCESS") {
+                return TaskFlowPhase.TERMINAL
+            }
             if (item.type !in SUPPORTED_TRIGGER_TYPES) {
                 return TaskFlowPhase.UNSUPPORTED
             }
-            return when (item.status.uppercase(Locale.ROOT)) {
+            return when (status) {
                 "NONE_SIGNUP" -> TaskFlowPhase.SIGNUP_REQUIRED
-                "SIGNUP_COMPLETE" -> TaskFlowPhase.SIGNUP_COMPLETE
-                "RECEIVE_SUCCESS" -> TaskFlowPhase.TERMINAL
+                "SIGNUP_COMPLETE" -> if (item.type == "EVENT_TRIGGER") {
+                    TaskFlowPhase.BUSINESS_ACTION
+                } else {
+                    TaskFlowPhase.SIGNUP_COMPLETE
+                }
                 else -> TaskFlowPhase.UNKNOWN
             }
         }

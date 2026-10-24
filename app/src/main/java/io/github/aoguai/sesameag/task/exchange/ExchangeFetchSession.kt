@@ -1,5 +1,6 @@
 package io.github.aoguai.sesameag.task.exchange
 
+import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.TimeUtil
 import org.json.JSONObject
@@ -104,10 +105,7 @@ class ExchangeFetchSession private constructor(
         if (replayIndex >= records.size) {
             check(current.has("response")) { "兑换列表请求尚未成功" }
             current.put("nextState", nextState).put("itemCount", itemCount).put("nextLabel", nextLabel)
-            FileOutputStream(file, true).use { output ->
-                output.write((current.toString() + "\n").toByteArray(Charsets.UTF_8))
-                output.fd.sync()
-            }
+            Files.appendSynced(file, current.toString() + "\n")
             records.add(current)
             checkCurrent()
             val elapsed = (System.nanoTime() - startedAt) / 1_000_000_000L
@@ -119,7 +117,7 @@ class ExchangeFetchSession private constructor(
         active = null
     }
 
-    fun pageTurnDelay(baseMillis: Long = 1000L) {
+    fun pageTurnDelay(baseMillis: Long = 850L) {
         if (replayIndex >= records.size) {
             checkCurrent()
             ExchangeFetchPacing.pageTurnDelay(baseMillis = baseMillis)
@@ -146,7 +144,7 @@ class ExchangeFetchSession private constructor(
 
         internal fun readHeader(file: File): JSONObject? = runCatching {
             if (!file.exists()) return null
-            file.bufferedReader(Charsets.UTF_8).use { reader -> reader.readLine()?.let { JSONObject(it) } }
+            Files.withInputStream(file) { input -> input.bufferedReader(Charsets.UTF_8).use { reader -> reader.readLine()?.let { JSONObject(it) } } }
         }.getOrNull()
 
         internal fun isCurrentHeader(header: JSONObject, userId: String, target: String): Boolean =
@@ -165,33 +163,44 @@ class ExchangeFetchSession private constructor(
                 matchesContext(header.optJSONObject("context") ?: JSONObject(), context)
             if (validHeader) {
                 val restored = runCatching {
-                    RandomAccessFile(file, "rw").use { input ->
-                        input.readLine()
-                        var validEnd = input.filePointer
-                        while (input.filePointer < input.length()) {
-                            val raw = input.readLine() ?: break
-                            val end = input.filePointer
-                            input.seek(end - 1)
-                            val terminated = input.readByte().toInt() == 10
-                            input.seek(end)
-                            if (!terminated) {
-                                checkCurrent()
-                                input.setLength(validEnd)
-                                input.fd.sync()
-                                ExchangeFetchProgress.report(userId, target, "上次写入中断，保留完整步骤并重试未保存页")
-                                break
+                    io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+                        var validEnd = 0L
+                        var interrupted = false
+                        Files.withInputStream(file) { input ->
+                            input.bufferedReader(Charsets.UTF_8).use { reader ->
+                                fun line(): Pair<String, Boolean>? {
+                                    val text = StringBuilder()
+                                    while (true) {
+                                        val char = reader.read()
+                                        if (char == -1) return if (text.isEmpty()) null else text.toString() to false
+                                        if (char == 10) return text.toString() to true
+                                        text.append(char.toChar())
+                                    }
+                                }
+                                val first = checkNotNull(line()) { "断点头部缺失" }
+                                check(first.second) { "断点头部未完整保存" }
+                                validEnd = first.first.toByteArray(Charsets.UTF_8).size + 1L
+                                while (true) {
+                                    val next = line() ?: break
+                                    if (!next.second) { interrupted = true; break }
+                                    val record = JSONObject(next.first)
+                                    check(record.getInt("sequence") == records.size + 1) { "步骤序号不连续" }
+                                    record.getString("stage")
+                                    record.getString("label")
+                                    record.getJSONObject("cursor")
+                                    record.getJSONObject("response")
+                                    record.getJSONObject("nextState")
+                                    record.getInt("itemCount")
+                                    record.getString("nextLabel")
+                                    records.add(record)
+                                    validEnd += next.first.toByteArray(Charsets.UTF_8).size + 1L
+                                }
                             }
-                            val record = JSONObject(String(raw.toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8))
-                            check(record.getInt("sequence") == records.size + 1) { "步骤序号不连续" }
-                            record.getString("stage")
-                            record.getString("label")
-                            record.getJSONObject("cursor")
-                            record.getJSONObject("response")
-                            record.getJSONObject("nextState")
-                            record.getInt("itemCount")
-                            record.getString("nextLabel")
-                            records.add(record)
-                            validEnd = end
+                        }
+                        if (interrupted) {
+                            checkCurrent()
+                            Files.truncate(file, validEnd)
+                            ExchangeFetchProgress.report(userId, target, "上次写入中断，保留完整步骤并重试未保存页")
                         }
                     }
                 }
@@ -211,17 +220,8 @@ class ExchangeFetchSession private constructor(
                 header = JSONObject().put("userId", userId).put("target", target)
                     .put("createdAt", System.currentTimeMillis()).put("runId", UUID.randomUUID().toString())
                     .put("context", context)
-                val temporary = File(file.parentFile, "${file.name}.tmp")
-                try {
-                    temporary.outputStream().use { output ->
-                        output.write((header.toString() + "\n").toByteArray(Charsets.UTF_8))
-                        output.fd.sync()
-                    }
-                    checkCurrent()
-                    android.system.Os.rename(temporary.absolutePath, file.absolutePath)
-                } finally {
-                    temporary.delete()
-                }
+                checkCurrent()
+                check(Files.writeAtomically(header.toString() + "\n", file)) { "无法保存断点头部" }
                 ExchangeFetchProgress.report(userId, target, "开始新一轮完整列表查询")
             }
             return ExchangeFetchSession(file, userId, target, header, records, checkCurrent).also { session ->

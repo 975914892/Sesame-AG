@@ -1,6 +1,7 @@
 package io.github.aoguai.sesameag.hook
 
 import android.annotation.SuppressLint
+import java.util.concurrent.atomic.AtomicBoolean
 import android.app.Application
 import android.app.Service
 import android.content.BroadcastReceiver
@@ -15,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import com.fasterxml.jackson.databind.node.ObjectNode
 import io.github.aoguai.sesameag.BuildConfig
 import io.github.aoguai.sesameag.SesameApplication
 import io.github.aoguai.sesameag.data.Config
@@ -65,6 +67,7 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.GlobalThreadPools.shutdownAndRestart
 import io.github.aoguai.sesameag.util.CommandUtil
+import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.LocaleSettingsApplier
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.Log.error
@@ -105,25 +108,15 @@ class ApplicationHook {
     }
 
     private class TaskLock : AutoCloseable {
-        private val acquired: Boolean
+        private val acquired = AtomicBoolean(false)
 
         init {
-            synchronized(taskLock) {
-                if (isTaskRunning) {
-                    acquired = false
-                    throw IllegalStateException("任务已在运行中")
-                }
-                isTaskRunning = true
-                acquired = true
-            }
+            check(isTaskRunning.compareAndSet(false, true)) { "任务已在运行中" }
+            acquired.set(true)
         }
 
         override fun close() {
-            if (acquired) {
-                synchronized(taskLock) {
-                    isTaskRunning = false
-                }
-            }
+            if (acquired.compareAndSet(true, false)) isTaskRunning.set(false)
         }
     }
 
@@ -161,13 +154,11 @@ class ApplicationHook {
 
         // 2. 进程检查。Lite 子进程只安装自然 RPC 抓包，不得进入任务运行时。
         if (shouldHookCaptureOnlyProcess()) {
-            installCaptureOnlyHooks(activeLoader)
             hookCaptureOnlyProcessAttach()
             return
         }
         if (!shouldHookProcess()) return
 
-        init(Files.CONFIG_DIR)
         if (isHooked) return
         isHooked = true
 
@@ -181,8 +172,6 @@ class ApplicationHook {
         hookLauncherResume()
         hookLoginResume()
         hookServiceLifecycle(apkPath)
-
-        HookUtil.hookOtherService(activeLoader)
     }
 
     private fun loadRemotePreferences(framework: String): SharedPreferences? {
@@ -225,42 +214,35 @@ class ApplicationHook {
         }
     }
 
-    private fun installCaptureOnlyHooks(activeLoader: ClassLoader) {
-        val installed = RpcTrafficCapture.installForCaptureOnlyProcess(activeLoader)
-        val application = runCatching {
-            val activityThread = Class.forName("android.app.ActivityThread")
-            activityThread.getDeclaredMethod("currentApplication").invoke(null) as? Application
-        }.getOrNull()
-        application?.let { Log.init(it) }
-        Log.runtime(
-            TAG,
-            "capture_only_hook_install: process=$finalProcessName installed=$installed applicationReady=${application != null}",
-        )
-    }
-
     private fun hookCaptureOnlyProcessAttach() {
         try {
             val attachMethod = findMethod(Application::class.java, "attach", Context::class.java)
             requireXposedInterface().hook(attachMethod).intercept { chain ->
                 val result = chain.proceed()
                 val context = chain.args[0] as? Context ?: return@intercept result
-                val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
-                if (!identityDecision.accepted || !RuntimeIdentityGuard.isCaptureOnlyProcess()) {
-                    val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
-                    val message =
-                        "capture_instance_rejected: $reasonCode process=$processName process_role=capture_only"
-                    logFrameworkWarning(message)
-                    android.util.Log.w(TAG, message)
-                    return@intercept result
+                execute(Dispatchers.IO) {
+                    val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
+                    if (!identityDecision.accepted || !RuntimeIdentityGuard.isCaptureOnlyProcess()) {
+                        val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
+                        val message =
+                            "capture_instance_rejected: $reasonCode process=$processName process_role=capture_only"
+                        logFrameworkWarning(message)
+                        android.util.Log.w(TAG, message)
+                        return@execute
+                    }
+                    if (!io.github.aoguai.sesameag.util.CommandUtil.connectStorage(context)) {
+                        android.util.Log.w(TAG, "模块存储未就绪，请打开模块完成数据迁移")
+                        return@execute
+                    }
+                    XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
+                    Log.init(context)
+                    val activeLoader = classLoader ?: return@execute
+                    val installed = RpcTrafficCapture.installForCaptureOnlyProcess(activeLoader, context)
+                    Log.runtime(
+                        TAG,
+                        "capture_only_hook_ready: process=$finalProcessName installed=$installed",
+                    )
                 }
-                XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
-                Log.init(context)
-                val activeLoader = classLoader ?: return@intercept result
-                val installed = RpcTrafficCapture.installForCaptureOnlyProcess(activeLoader)
-                Log.runtime(
-                    TAG,
-                    "capture_only_hook_ready: process=$finalProcessName installed=$installed",
-                )
                 result
             }
         } catch (e: Exception) {
@@ -275,31 +257,45 @@ class ApplicationHook {
                 val result = chain.proceed()
                 val context = chain.args[0] as? Context ?: return@intercept result
                 val application = chain.getThisObject() as? Application
-                val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
-                if (!identityDecision.accepted) {
-                    val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
-                    val message = "instance_rejected: $reasonCode process=$processName process_role=main"
-                    logFrameworkWarning(message)
-                    android.util.Log.w(TAG, message)
-                    return@intercept result
-                }
-                XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
-                appContext = context
-                mainHandler = Handler(Looper.getMainLooper())
-                Log.init(context)
-                // Application.attach 位于宿主启动主路径；反射安装和调度恢复延后到入口线程，
-                // 避免慢设备在 attach 阶段被这些非必要初始化阻塞。
-                ApplicationHookConstants.submitEntry("application_attach_init") {
-                    ensureScheduler()
-                    application?.let { PageStructureSnapshotter.install(it) }
-                    RpcTrafficCapture.install(classLoader!!)
+                // 身份确认包含跨进程绑定，不能在宿主启动线程等待。
+                execute(Dispatchers.IO) {
+                    val identityDecision = RuntimeIdentityGuard.verifyApplicationAttach(context)
+                    if (!identityDecision.accepted) {
+                        val reasonCode = identityDecision.reasonCode ?: "identity_not_verified"
+                        val message = "instance_rejected: $reasonCode process=$processName process_role=main"
+                        logFrameworkWarning(message)
+                        android.util.Log.w(TAG, message)
+                        return@execute
+                    }
+                    if (!io.github.aoguai.sesameag.util.CommandUtil.connectStorage(context)) {
+                        android.util.Log.w(TAG, "模块存储未就绪，请打开模块完成数据迁移")
+                        return@execute
+                    }
+                    init(Files.CONFIG_DIR)
+                    appContext = context
+                    mainHandler = Handler(Looper.getMainLooper())
+                    Log.init(context)
+                    ApplicationHookConstants.submitEntry("application_attach_init") {
+                        XposedEnv.runtimeIdentity = RuntimeIdentityGuard.trustedIdentity()
+                        ensureScheduler()
+                        application?.let { PageStructureSnapshotter.install(it) }
+                        RpcTrafficCapture.install(classLoader!!, context)
 
-                    SecurityBodyHelper.init(classLoader!!)
-                    AlipayMiniMarkHelper.init(classLoader!!)
-                    LocationHelper.init(classLoader!!)
-                    AuthCodeHelper.init(classLoader!!)
+                        SecurityBodyHelper.init(classLoader!!)
+                        AlipayMiniMarkHelper.init(classLoader!!)
+                        LocationHelper.init(classLoader!!)
+                        AuthCodeHelper.init(classLoader!!)
 
-                    initVersionInfo(packageName)
+                        initVersionInfo(packageName)
+                        // Service 可能已在身份确认期间创建，补接被延后的初始化。
+                        if (service != null && (!init || pendingInit)) {
+                            ensureMainTask()
+                            dayCalendar = Calendar.getInstance()
+                            if (initHandler(pendingInitReason ?: "service_onCreate")) {
+                                init = true
+                            }
+                        }
+                    }
                 }
                 result
             }
@@ -393,6 +389,7 @@ class ApplicationHook {
                 ApplicationHookConstants.submitEntry("launcher_onResume") {
                     val targetUid =
                         HookUtil.getUserId(classLoader!!) ?: run {
+                            onHostAccountUnavailable("launcher_onResume")
                             show("用户未登录")
                             return@submitEntry
                         }
@@ -533,7 +530,9 @@ class ApplicationHook {
                 appContext = appService.applicationContext
                 // 宿主 Service 生命周期回调必须快速返回；完整初始化仅在入口后台线程执行。
                 ApplicationHookConstants.submitEntry("service_onCreate") {
-                    if (service !== appService) return@submitEntry
+                    if (service !== appService || XposedEnv.runtimeIdentity == null ||
+                        !RuntimeIdentityGuard.isTrustedForExecution()
+                    ) return@submitEntry
                     ensureScheduler()
                     ensureMainTask()
                     dayCalendar = Calendar.getInstance()
@@ -574,11 +573,15 @@ class ApplicationHook {
     private fun initVersionInfo(packageName: String?) {
         if (VersionHook.hasVersion()) {
             alipayVersion = VersionHook.getCapturedVersion() ?: AlipayVersion("")
+            VersionHook.completeCapture(alipayVersion)
             record(TAG, "📦 目标应用版本(Hook): $alipayVersion")
         } else {
             try {
                 val pInfo: PackageInfo = appContext!!.packageManager.getPackageInfo(packageName!!, 0)
                 alipayVersion = AlipayVersion(pInfo.versionName.toString())
+                if (!pInfo.versionName.isNullOrBlank()) {
+                    VersionHook.completeCapture(alipayVersion)
+                }
             } catch (_: Exception) {
                 alipayVersion = AlipayVersion("")
             }
@@ -618,11 +621,7 @@ class ApplicationHook {
         @Volatile
         var appContext: Context? = null
 
-        // 任务锁
-        private val taskLock = Any()
-
-        @Volatile
-        private var isTaskRunning = false
+        private val isTaskRunning = AtomicBoolean(false)
 
         @JvmStatic
         var alipayVersion: AlipayVersion = AlipayVersion("")
@@ -640,6 +639,8 @@ class ApplicationHook {
 
         @Volatile
         private var pendingInitReason: String? = null
+        @Volatile
+        private var sessionShutdownPending = false
 
         @Volatile
         private var rootCheckInProgress = false
@@ -809,7 +810,8 @@ class ApplicationHook {
             return true
         }
 
-        internal fun restartWorkflow(reason: String): Boolean = initHandler(reason)
+        internal fun restartWorkflow(reason: String, onComplete: ((Boolean) -> Unit)? = null): Boolean =
+            initHandler(reason, onComplete = onComplete)
 
         internal fun ensureLegalAcceptedForWorkflow(): Boolean = ensureLegalAcceptanceForWorkflow()
 
@@ -832,43 +834,40 @@ class ApplicationHook {
                     message = "刷新好友失败：Hook classLoader 不可用",
                 )
 
-            UserMap.setCurrentUserId(safeUserId)
-            runCatching { UserMap.load(safeUserId) }.onFailure {
-                Log.printStackTrace(TAG, "刷新好友前加载本地好友快照失败", it)
+            val session = AccountSessionCoordinator.currentSession()
+                ?: return HookUtil.FriendRefreshResult(false, safeUserId, "当前账号会话未就绪")
+            val identity = AccountSessionIdentity(safeUserId, session.sessionEpoch)
+            return try {
+                AccountSessionCoordinator.withCurrentSession(identity) {
+                    check(currentUid == safeUserId && HookUtil.getUserId(loader) == safeUserId) { "目标账号未登录" }
+                    UserMap.load(safeUserId)
+                    load(safeUserId, false)
+                }
+                if (!force && Status.hasFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)) {
+                    val config = FriendRepository.current(safeUserId)
+                    return HookUtil.FriendRefreshResult(
+                        true, safeUserId, "好友中心今日已刷新，跳过自动同步[$source]",
+                        config.profiles.size, config.groups.size
+                    )
+                }
+                val result = HookUtil.hookUser(loader, identity)
+                if (result.success && result.userId == safeUserId) {
+                    AccountSessionCoordinator.withCurrentSession(identity) {
+                        check(currentUid == safeUserId && HookUtil.getUserId(loader) == safeUserId) { "刷新后账号已变化" }
+                        Status.setFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY, expectedUserId = safeUserId)
+                    }
+                }
+                record(TAG, "好友中心刷新[$source]: ${result.message}")
+                result
+            } catch (e: Exception) {
+                Log.printStackTrace(TAG, "好友刷新失败", e)
+                HookUtil.FriendRefreshResult(false, safeUserId, "好友刷新未完成：${e.message}")
             }
-            runCatching { load(safeUserId, false) }.onFailure {
-                Log.printStackTrace(TAG, "刷新好友前加载每日状态失败", it)
-            }
-
-            if (!force && Status.hasFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)) {
-                val config = FriendRepository.current(safeUserId)
-                AccountSessionCoordinator.ensureActiveUserSnapshot(safeUserId, loader)
-                val message = "好友中心今日已刷新，跳过自动同步[$source]"
-                record(TAG, message)
-                return HookUtil.FriendRefreshResult(
-                    success = true,
-                    userId = safeUserId,
-                    message = message,
-                    profiles = config.profiles.size,
-                    groups = config.groups.size,
-                )
-            }
-
-            val result = HookUtil.hookUser(loader)
-            AccountSessionCoordinator.ensureActiveUserSnapshot(safeUserId, loader)
-            if (result.success) {
-                Status.setFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)
-                record(TAG, "好友中心刷新完成[$source]: ${result.message}")
-            } else {
-                record(TAG, "好友中心刷新未完成[$source]: ${result.message}")
-            }
-            return result
         }
 
         /**
          * 冷启动首次好友实时同步的后移延时(毫秒)。
-         * 用于规避目标应用社交库(AliAccountDaoOp)在冷启动期未加载完时 getAllFriends() 返回“非空但不完整”
-         * 快照被误判为可信全量。可按实测调大；现有“重新登录”延时为 20s 作参考。
+         * 等待社交库初始化以减少空结果；延时不代表缓存完整，缺失项不会据此判定失效。
          */
         private const val FRIEND_CENTER_FIRST_SYNC_DEFER_MS: Long = 30_000L
         private val MIN_SUPPORTED_RPC_VERSION = AlipayVersion("10.3.96.8100")
@@ -904,6 +903,7 @@ class ApplicationHook {
         ) {
             val safeUserId = userId.trim()
             if (safeUserId.isEmpty()) return
+            val expectedEpoch = AccountSessionCoordinator.currentSessionEpoch()
             UnifiedScheduler.scheduleLongDelay(
                 FRIEND_CENTER_FIRST_SYNC_DEFER_MS,
                 "好友中心首次同步",
@@ -914,7 +914,8 @@ class ApplicationHook {
                     // 后移期间账号可能切换 → 执行前重新校验当前账号，避免给旧账号误同步。
                     val activeUserId = AccountSessionCoordinator.currentUserId() ?: currentUid
                     val liveUserId = runCatching { classLoader?.let { HookUtil.getUserId(it) } }.getOrNull()
-                    if (safeUserId != activeUserId || (liveUserId != null && liveUserId != safeUserId)) {
+                    if (safeUserId != activeUserId || liveUserId != safeUserId ||
+                        !AccountSessionCoordinator.isCurrentSession(safeUserId, expectedEpoch)) {
                         record(
                             TAG,
                             "好友中心首次同步已取消：账号已切换(expect=$safeUserId, active=$activeUserId, live=$liveUserId)",
@@ -928,7 +929,6 @@ class ApplicationHook {
 
         @Volatile
         var rpcBridge: RpcBridge? = null
-        private val rpcBridgeLock = Any()
 
         @Volatile
         var lastExecTime: Long = 0
@@ -1158,20 +1158,23 @@ class ApplicationHook {
         }
 
         // --- 初始化核心逻辑 ---
-        @Synchronized
-        private fun initHandler(reason: String): Boolean {
+        private fun initHandler(reason: String, tasksStopped: Boolean = false, onComplete: ((Boolean) -> Unit)? = null): Boolean {
+            if (sessionShutdownPending) {
+                pendingInit = true
+                pendingInitReason = reason
+                onComplete?.invoke(false)
+                return false
+            }
             var sessionApplied = false
+            var completed = false
+            var completionDeferred = false
             try {
-                // 启动阶段可能出现 Service.onCreate 与 Launcher.onResume 并发触发 initHandler 的竞态：
-                // - onResume 线程看到 init=false -> 进入 initHandler 等锁
-                // - Service 线程完成初始化并将 init=true
-                // - onResume 获锁后会因 init=true 走 destroyHandler()，导致二次初始化与双 Toast
-                //
-                // 对于“启动类触发”(service_onCreate/onResume)且当前已就绪的场景，直接判定为重复触发并跳过。
+                // 生命周期入口已统一顺序执行；重复启动事件不再重建已就绪的实例。
                 if (init && isReadyForExec() && (reason == "onResume" || reason == "service_onCreate")) {
                     pendingInit = false
                     pendingInitReason = null
                     record(TAG, "✅ 已初始化完成，忽略重复初始化触发: $reason")
+                    completed = true
                     return true
                 }
 
@@ -1181,7 +1184,7 @@ class ApplicationHook {
                     record(TAG, "⏳ Service 未就绪，延后初始化: $reason")
                     return false
                 }
-                if (!RuntimeIdentityGuard.isTrustedForExecution()) {
+                if (!RuntimeIdentityGuard.isTrustedForExecution() || XposedEnv.runtimeIdentity == null) {
                     record(TAG, "instance_rejected: ${RuntimeIdentityGuard.lastReasonCode() ?: "identity_not_verified"}")
                     Log.w(TAG, "instance_rejected: ${RuntimeIdentityGuard.lastReasonCode() ?: "identity_not_verified"}")
                     return false
@@ -1191,28 +1194,48 @@ class ApplicationHook {
                 val userId = HookUtil.getUserId(activeClassLoader)
                 if (userId == null) {
                     Log.w(TAG, "account_unavailable: phase=initialization trigger=$reason")
+                    onHostAccountUnavailable(reason)
                     show("用户未登录")
                     return false
                 }
 
                 // 切换会话会先推进 epoch，必须在此之前捕获旧计划及其配置。
-                if (init && shouldCaptureReloadState(reason)) {
-                    captureReloadResumeDecision(reason)
-                } else {
-                    reloadResumeDecision = null
+                if (!tasksStopped) {
+                    if (init && shouldCaptureReloadState(reason)) captureReloadResumeDecision(reason)
+                    else reloadResumeDecision = null
                 }
                 val allowPersistedSessionReuse =
                     !init &&
                         (reason == "onResume" || reason == "service_onCreate")
-                AccountSessionCoordinator.beginSessionSwitch(
-                    reason,
-                    userId,
-                    allowPersistedReuse = allowPersistedSessionReuse,
-                )
+                if (!tasksStopped) {
+                    AccountSessionCoordinator.beginSessionSwitch(reason, userId, allowPersistedReuse = allowPersistedSessionReuse)
+                    sessionShutdownPending = true
+                    val stopped = io.github.aoguai.sesameag.task.ModelTask.stopAllTaskAndNotify(mainTask) {
+                        ApplicationHookConstants.submitEntry("session_tasks_stopped") {
+                            sessionShutdownPending = false
+                            val unchanged = HookUtil.getUserId(activeClassLoader) == userId
+                            if (!unchanged) onComplete?.invoke(false)
+                            initHandler(
+                                if (unchanged) reason else "user_switch",
+                                tasksStopped = unchanged,
+                                onComplete = onComplete.takeIf { unchanged },
+                            )
+                        }
+                    }
+                    if (!stopped) {
+                        completionDeferred = true
+                        pendingInit = true
+                        pendingInitReason = reason
+                        updateRunningStatus("等待旧账号任务退出")
+                        return false
+                    }
+                    sessionShutdownPending = false
+                }
                 val admission = when (val result = AccountSlotRegistry.admitRuntimeUser(userId)) {
                     is AccountSlotAdmission.Denied -> {
                         record(TAG, "execution_gate_denied: ${result.reasonCode} process_role=main")
                         Log.w(TAG, "execution_gate_denied: ${result.reasonCode} process_role=main account=${AccountSlotRegistry.shortHash(userId)}")
+                        provisionUnregisteredAccount(result.reasonCode, userId, activeClassLoader)
                         destroyHandlerInternal("account_slot_${result.reasonCode}", invalidateSession = true)
                         return false
                     }
@@ -1242,10 +1265,7 @@ class ApplicationHook {
 
                 UserMap.setCurrentUserId(userId)
                 load(userId)
-                // 冷启动期目标应用社交库(AliAccountDaoOp)可能尚未加载完，过早 getAllFriends() 会拿到
-                // “非空但不完整”的好友快照，被 mergeFromUserMap(allowPruneMissing=true) 误剪为 REMOVED 并持久化。
-                // 这里先同步加载本地已持久化的好友身份(上次完整快照)，供本会话首轮任务使用；
-                // 真正从目标应用侧获取实时快照后移到社交库就绪概率更高的时机再做。手动刷新(force=true)不走此路径，仍立即执行。
+                // 首轮先使用已保存的好友资料；延迟采集实时缓存，任何缓存缺失都不用于判定删除。
                 runCatching { UserMap.load(userId) }.onFailure {
                     printStackTrace(TAG, "初始化加载本地好友快照失败", it)
                 }
@@ -1307,6 +1327,7 @@ class ApplicationHook {
                     reason = reason,
                 )
                 sessionApplied = true
+                RpcTrafficCapture.refreshCaptureState()
                 pendingInit = false
                 pendingInitReason = null
 
@@ -1344,10 +1365,7 @@ class ApplicationHook {
                 Notify.startRunning(service!!)
                 setWakenAtTimeAlarm()
 
-                synchronized(rpcBridgeLock) {
-                    rpcBridge = AriverRpcBridge()
-                    rpcBridge!!.load()
-                }
+                rpcBridge = AriverRpcBridge().also { it.load() }
 
                 start(userId)
                 checkBatteryPermission()
@@ -1368,6 +1386,7 @@ class ApplicationHook {
                 val deferGenericStartupTrigger = handlePersistentLaunchAfterInit(appContext!!)
                 ModuleStatusReporter.requestUpdate(reason = "ready")
                 ApplicationHookEntry.onInitCompleted(reason, deferGenericStartupTrigger)
+                completed = true
                 return true
             } catch (th: Throwable) {
                 if (sessionApplied) {
@@ -1378,6 +1397,8 @@ class ApplicationHook {
                 }
                 printStackTrace(TAG, "startHandler", th)
                 return false
+            } finally {
+                if (!completionDeferred) onComplete?.invoke(completed)
             }
         }
 
@@ -1423,7 +1444,6 @@ class ApplicationHook {
             }
         }
 
-        @Synchronized
         fun destroyHandler() {
             // 允许任意 Hook 线程请求销毁，但绝不让生命周期/主线程同步执行整套清理。
             ApplicationHookConstants.submitEntry("destroy_handler") {
@@ -1474,6 +1494,7 @@ class ApplicationHook {
                     stopRunning()
                     clearIntervalLimit()
                     Config.unload()
+                    RpcTrafficCapture.refreshCaptureState()
                     UserMap.setCurrentUserId(null)
                     UserMap.unload()
                 }
@@ -1484,13 +1505,10 @@ class ApplicationHook {
                 unregisterBroadcastReceiver(appContext)
                 unregisterAppVisibilityCallbacks(appContext)
 
-                synchronized(rpcBridgeLock) {
-                    if (rpcBridge != null) {
-                        rpcBridge!!.unload()
-                        rpcBridge = null
-                    }
-                    stopAllTask()
-                }
+                val previousBridge = rpcBridge
+                rpcBridge = null
+                previousBridge?.unload()
+                stopAllTask()
 
                 WorkflowRootGuard.invalidate()
             } catch (th: Throwable) {
@@ -1560,6 +1578,7 @@ class ApplicationHook {
                 val userId = HookUtil.getUserId(activeClassLoader) ?: return false
                 Config.load(userId)
                 LocaleSettingsApplier.apply(appContext)
+                RpcTrafficCapture.refreshCaptureState()
             }
             val legalAccepted = Config.isLegalAcceptedForCurrentVersion()
             if (legalAccepted && WorkflowRootGuard.isExecutionAllowed()) {
@@ -1576,6 +1595,88 @@ class ApplicationHook {
             ApplicationHookConstants.clearPendingTriggers("execution_prerequisites_missing")
             AccountSessionCoordinator.refreshWorkflowState(appContext, "execution_prerequisites_missing", legalAccepted = legalAccepted)
             return false
+        }
+
+        /**
+         * 为已被运行时识别、但尚未建立配置目录的账号登记最小配置。
+         *
+         * 可执行槽位只允许用户显式选择，而候选名单来自已存在的配置目录，因此被拒绝的账号若不在此处落地
+         * 目录与快照，就永远无法出现在槽位候选里。这里只补齐账号配置与当前账号快照，
+         * 不授予执行权，也不启动任何调度。
+         */
+        private fun provisionUnregisteredAccount(reasonCode: String, userId: String, loader: ClassLoader?) {
+            if (reasonCode != "account_slot_not_selected" && reasonCode != "account_slot_migration_required") {
+                return
+            }
+            val accountTag = AccountSlotRegistry.shortHash(userId)
+            if (!RuntimeIdentityGuard.isTrustedForExecution()) {
+                record(TAG, "account_provision_skipped: runtime_identity_untrusted account=$accountTag")
+                return
+            }
+            runCatching {
+                val userDirectory = Files.child(Files.CONFIG_DIR, userId)
+                val configProbe = Files.child(userDirectory, "config_v2.json")
+                val selfProbe = Files.child(userDirectory, "self.json")
+                if (configProbe.isFile && configProbe.length() > 0L && selfProbe.isFile && selfProbe.length() > 0L) {
+                    return
+                }
+                Files.withAccountLock(userId) {
+                    // 保留旧版迁移和共享默认业务配置；新账号必须独立确认使用协议。
+                    val configFile = Files.getConfigV2File(userId)
+                    if (!configFile.isFile || configFile.length() == 0L) {
+                        val defaultFile = Files.getDefaultConfigV2File()
+                        val mapper = JsonUtil.copyMapper()
+                        val configNode = if (defaultFile.exists()) {
+                            mapper.readTree(Files.readText(defaultFile)) as? ObjectNode
+                                ?: kotlin.error("default_config_invalid")
+                        } else {
+                            mapper.createObjectNode()
+                        }
+                        configNode.remove("legalAcceptedAppVersion")
+                        check(Files.writeAtomically(mapper.writeValueAsString(configNode), configFile)) {
+                            "config_skeleton_write_failed"
+                        }
+                    }
+                    AccountSessionCoordinator.ensureActiveUserSnapshot(userId, loader)
+                }
+                // 账号快照写入失败只返回结果不抛异常，因此以磁盘上的实际文件作为登记成功依据。
+                val registered = configProbe.isFile && configProbe.length() > 0L &&
+                    selfProbe.isFile && selfProbe.length() > 0L
+                if (registered) {
+                    record(TAG, "account_provision_registered: account=$accountTag reason=$reasonCode")
+                } else {
+                    record(TAG, "account_provision_incomplete: account=$accountTag reason=$reasonCode")
+                    Log.w(TAG, "account_provision_incomplete: account=$accountTag")
+                }
+            }.onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                record(TAG, "account_provision_failed: ${error.javaClass.simpleName} account=$accountTag")
+                Log.w(TAG, "account_provision_failed: ${error.javaClass.simpleName} account=$accountTag")
+            }
+        }
+
+        internal fun onHostAccountUnavailable(reason: String) {
+            if (init || AccountSessionCoordinator.currentSession() != null || AccountSessionCoordinator.isSwitching()) {
+                destroyHandlerInternal(reason, invalidateSession = true)
+            }
+            ApplicationHookConstants.setOffline(true, "login_timeout", reason)
+        }
+
+        internal fun reconcileHostSession(reason: String): Boolean {
+            val loader = classLoader ?: return false
+            val userId = HookUtil.getUserId(loader)
+            if (userId.isNullOrBlank()) {
+                onHostAccountUnavailable(reason)
+                return false
+            }
+            val session = AccountSessionCoordinator.currentSession()
+            if (session == null || session.userId != userId ||
+                !AccountSessionCoordinator.isCurrentSession(userId, session.sessionEpoch)
+            ) {
+                initHandler("user_switch")
+                return false
+            }
+            return true
         }
 
         private fun stopHandler() {

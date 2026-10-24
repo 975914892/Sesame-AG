@@ -254,6 +254,8 @@ fun MainScreen(
                 onClearModuleData = {
                     interceptedEvent(MainActivity.MainUiEvent.ClearConfig)
                 },
+                onExportStorageBackup = { onEvent(MainActivity.MainUiEvent.ExportStorageBackup) },
+                onRestoreStorageBackup = { onEvent(MainActivity.MainUiEvent.RestoreStorageBackup) },
                 clearModuleDataFailurePaths = clearModuleDataFailurePaths,
                 onDismissClearModuleDataFailure = onDismissClearModuleDataFailure,
             )

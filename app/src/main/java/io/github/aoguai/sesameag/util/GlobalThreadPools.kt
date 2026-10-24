@@ -13,15 +13,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * @author: ghostxx
- * @date: 2025/9/17
- * @description: 全局协程调度器，用于统一管理应用内的协程，提供结构化并发和生命周期管理。
- * @update: 修复了 R8 编译器在处理 Java 兼容方法时的元数据崩溃问题
+ * 全局协程调度器，用于统一管理应用内的协程，提供结构化并发和生命周期管理。
  */
 object GlobalThreadPools {
     private const val TAG = "GlobalThreadPools"
@@ -50,10 +48,10 @@ object GlobalThreadPools {
     /**
      * 全局协程作用域
      * 用于启动不绑定到特定生命周期的长寿命协程
-     * 使用 @Volatile 以支持在会话切换时进行重置
+     * 会话切换时一次发布新作用域，再取消自己取出的旧作用域
      */
-    @Volatile
-    private var globalScope = createScope()
+    private val scope = AtomicReference(createScope())
+    private val globalScope: CoroutineScope get() = scope.get()
 
     /**
      * 计算密集型任务调度器
@@ -154,13 +152,10 @@ object GlobalThreadPools {
      * 关闭并重启全局协程作用域。
      * 主要用于用户切换账号等需要彻底清理会话资源的场景。
      */
-    @Synchronized
     fun shutdownAndRestart() {
         Log.record(TAG, "正在关闭并重启全局协程池...")
-        if (globalScope.isActive) {
-            globalScope.cancel("User session changed. Resetting coroutine scope.")
-        }
-        globalScope = createScope()
+        val previous = scope.getAndSet(createScope())
+        previous.cancel("User session changed. Resetting coroutine scope.")
         Log.record(TAG, "全局协程池已重置。")
     }
 

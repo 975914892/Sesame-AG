@@ -124,6 +124,10 @@ object ModelFieldTodayStateResolver {
             "AntMember.memberSignPageTask",
             "AntMember.memberSignInAdTask" -> {
                 when {
+                    Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_FLOATING_BALL_FAILED_TODAY) -> {
+                        ModelFieldTodayState(reason = "今日浮球已停止请求，其他会员任务按状态执行")
+                    }
+
                     Status.hasFlagToday(StatusFlags.FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY) -> {
                         inactive("今日会员任务已处理")
                     }
@@ -341,7 +345,11 @@ object ModelFieldTodayStateResolver {
             }
 
             "GoldenBeanTreasure.goldenBeanTreasure" -> {
-                flag(StatusFlags.FLAG_GOLDEN_BEAN_TASKS_DONE, "今日金豆夺宝任务已处理")
+                if (Status.hasFlagToday(StatusFlags.FLAG_GOLDEN_BEAN_FORTUNE_DRAWN)) {
+                    flag(StatusFlags.FLAG_GOLDEN_BEAN_TASKS_DONE, "今日金豆夺宝任务与求签已处理")
+                } else {
+                    ModelFieldTodayState()
+                }
             }
 
             "GoldenBeanTreasure.goldenBeanMallExchange",

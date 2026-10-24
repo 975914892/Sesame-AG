@@ -6,12 +6,16 @@ import android.util.Base64
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.friend.FriendCapabilityState
+import io.github.aoguai.sesameag.entity.friend.FriendRelation
 import io.github.aoguai.sesameag.hook.AccountSessionCoordinator
 import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.keepalive.PersistentLaunchPolicy
+import io.github.aoguai.sesameag.hook.keepalive.PersistentSchedule
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleDefaults
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleKind
 import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleRegistry
+import io.github.aoguai.sesameag.hook.keepalive.PersistentScheduleState
+import io.github.aoguai.sesameag.hook.keepalive.ScheduledTaskRouter
 import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.model.ModelFields
 import io.github.aoguai.sesameag.model.ModelGroup
@@ -21,6 +25,7 @@ import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionModelField
 import io.github.aoguai.sesameag.model.modelFieldExt.IntegerModelField
 import io.github.aoguai.sesameag.model.withDesc
 import io.github.aoguai.sesameag.task.ModelTask
+import io.github.aoguai.sesameag.task.TaskExecutionOutcome
 import io.github.aoguai.sesameag.task.TaskStatus
 import io.github.aoguai.sesameag.task.antOrchard.UrlUtil
 import io.github.aoguai.sesameag.task.common.DeferredReason
@@ -46,7 +51,13 @@ import io.github.aoguai.sesameag.util.TimeCounter
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WakeLockManager
 import io.github.aoguai.sesameag.util.friend.FriendCapabilityRecorder
+import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
+import io.github.aoguai.sesameag.util.SerialTaskQueue
+
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
@@ -57,8 +68,6 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * @file AntStall.kt
  * @brief 蚂蚁新村任务模块
- * @author Constanline
- * @since 2023/08/22
  */
 class AntStall : ModelTask() {
     private enum class StallTaskCompleteRoute {
@@ -132,6 +141,7 @@ class AntStall : ModelTask() {
     private lateinit var assistFriendList: FriendSelectionModelField
     private val loggedTaskMessages = LinkedHashSet<String>()
     private val reservedInviteShopUserIds = ConcurrentHashMap.newKeySet<String>()
+    private val stallWorkflowQueue = SerialTaskQueue()
     private var stallTasksDoneInvalidatedThisRun = false
 
     override fun getName(): String = "新村"
@@ -153,9 +163,9 @@ class AntStall : ModelTask() {
         group: String,
         triggerAtMs: Long,
         extraPayload: JSONObject = JSONObject(),
-    ) {
-        val context = ApplicationHook.appContext ?: return
-        if (triggerAtMs <= System.currentTimeMillis()) return
+    ): PersistentSchedule? {
+        val context = ApplicationHook.appContext ?: return null
+        if (triggerAtMs <= System.currentTimeMillis()) return null
         try {
             val ownerUserId =
                 AccountSessionCoordinator.currentUserId()?.takeIf { it.isNotBlank() }
@@ -183,8 +193,11 @@ class AntStall : ModelTask() {
             if (PersistentLaunchPolicy.isFrontLaunchDisabled(schedule.lastError)) {
                 Log.stall("新村持久子任务[$group][$childId]已因禁止系统调度前台拉起目标应用降级为仅进程存活时等待，需手动打开目标应用后恢复")
             }
+            return schedule.takeIf { it.state == PersistentScheduleState.SCHEDULED }
         } catch (t: Throwable) {
+            if (t is InterruptedException || t is CancellationException) throw t
             Log.printStackTrace(TAG, "注册新村持久子任务失败[$group][$childId]", t)
+            return null
         }
     }
 
@@ -229,6 +242,17 @@ class AntStall : ModelTask() {
                 source = "stall_disabled:$source",
             )
             return true
+        }
+        if (group == "SB") {
+            return executePersistentChild(
+                scheduleId = scheduleId,
+                ownerUserId = currentOwnerUserId,
+                sessionEpoch = payloadSessionEpoch,
+                source = "stall_send_back:$source",
+                workflowQueue = stallWorkflowQueue,
+            ) {
+                runInterruptible(Dispatchers.IO) { runSendBackPersistentTask(childId, payload) }
+            }
         }
         val worker =
             runCatching {
@@ -512,6 +536,10 @@ class AntStall : ModelTask() {
             )
         }
 
+    override suspend fun runSuspend() {
+        stallWorkflowQueue.submit { super.runSuspend() }
+    }
+
     override fun runJava() {
         val taskFlowExecutionState = TaskFlowExecutionState()
         try {
@@ -637,6 +665,7 @@ class AntStall : ModelTask() {
                 tc.countDebug("贴罚单")
             }
         } catch (t: Throwable) {
+            if (t is InterruptedException || t is CancellationException) throw t
             Log.printStackTrace(TAG, "home err:", t)
         } finally {
             Log.stall("执行结束-${getName()}")
@@ -652,34 +681,63 @@ class AntStall : ModelTask() {
         shopId: String,
         shopUserId: String,
         sentUserId: MutableSet<String>,
-    ) {
+    ): TaskExecutionOutcome {
         try {
-            val preResponse = AntStallRpcCall.shopSendBackPre(billNo, seatId, shopId, shopUserId)
-            val preJson = JSONObject(preResponse)
-
-            if (!ResChecker.checkRes(TAG, preJson)) {
-                Log.error(TAG, "sendBackPre err: $preResponse")
-                return
-            }
-
-            val income = preJson.getJSONObject("astPreviewShopSettleVO").getJSONObject("income")
-            val amount = income.getDouble("amount").toInt()
-
-            val sendBackResponse = AntStallRpcCall.shopSendBack(seatId)
-            val sendBackJson = JSONObject(sendBackResponse)
-
-            if (ResChecker.checkRes(TAG, sendBackJson)) {
-                val amountText = if (amount > 0) "获得金币$amount" else ""
-                Log.stall("蚂蚁新村⛪请走[${UserMap.getMaskName(shopUserId)}]的小摊$amountText")
-                reservedInviteShopUserIds.remove(shopUserId)
-                if (stallInviteShop.value == true) {
-                    inviteOpen(seatId, sentUserId)
+            var response = AntStallRpcCall.shopSendBackPre(billNo, seatId, shopId, shopUserId)
+            var json = JSONObject(response)
+            if (json.optString("resultCode") != "B_FREE_SEAT") {
+                if (!ResChecker.checkRes(TAG, json)) {
+                    Log.error(TAG, "sendBackPre err: $response")
+                    return TaskExecutionOutcome.FAILED
                 }
-            } else {
-                Log.error(TAG, "sendBack err: $sendBackResponse")
+                val income = json.getJSONObject("astPreviewShopSettleVO").getJSONObject("income")
+                val amount = income.getDouble("amount").toInt()
+                response = AntStallRpcCall.shopSendBack(seatId)
+                json = JSONObject(response)
+                if (json.optString("resultCode") != "B_FREE_SEAT" && ResChecker.checkRes(TAG, json)) {
+                    val amountText = if (amount > 0) "获得金币$amount" else ""
+                    Log.stall("蚂蚁新村⛪请走[${UserMap.getMaskName(shopUserId)}]的小摊$amountText")
+                    reservedInviteShopUserIds.remove(shopUserId)
+                    if (stallInviteShop.value == true) {
+                        inviteOpen(seatId, sentUserId)
+                    }
+                    return TaskExecutionOutcome.SUCCESS
+                }
             }
+            if (json.optString("resultCode") == "B_FREE_SEAT") {
+                Log.error(TAG, "sendBack 返回目标摊位已离场，回查当前状态: $response")
+                val homeResponse = AntStallRpcCall.home()
+                val home = JSONObject(homeResponse)
+                if (!ResChecker.checkRes(TAG, home)) {
+                    Log.error(TAG, "sendBack 状态回查失败: $homeResponse")
+                    return TaskExecutionOutcome.FAILED
+                }
+                val seats = home.optJSONObject("seatsMap") ?: run {
+                    Log.error(TAG, "sendBack 状态回查缺少摊位信息: $homeResponse")
+                    return TaskExecutionOutcome.FAILED
+                }
+                val seat = findSeatById(seats, seatId)
+                if (seat?.optString("status") == "FREE") {
+                    Log.stall("新村摊位[$seatId]已空闲，无需重复请走")
+                    reservedInviteShopUserIds.remove(shopUserId)
+                    sentUserId.clear()
+                    sentUserId.addAll(collectOccupiedStallUsers(seats))
+                    if (stallInviteShop.value == true) inviteOpen(seatId, sentUserId)
+                    return TaskExecutionOutcome.SUCCESS
+                }
+                if (seat?.optString("status") == "BUSY" &&
+                    seat.optString("rentLastBill").isNotBlank() && seat.optString("rentLastBill") != billNo
+                ) {
+                    Log.stall("新村摊位[$seatId]订单已变化，保留当前小摊")
+                    return TaskExecutionOutcome.SUCCESS
+                }
+            }
+            Log.error(TAG, "sendBack err: $response")
+            return TaskExecutionOutcome.FAILED
         } catch (t: Throwable) {
+            if (t is InterruptedException || t is CancellationException) throw t
             Log.printStackTrace(TAG, "sendBack err:", t)
+            return TaskExecutionOutcome.FAILED
         }
     }
 
@@ -700,7 +758,7 @@ class AntStall : ModelTask() {
             }
 
             val friendRankList = json.getJSONArray("friendRankList")
-            for (i in 0 until friendRankList.length()) {
+            for (i in (0 until friendRankList.length()).shuffled()) {
                 val friend = friendRankList.getJSONObject(i)
                 val friendUserId = friend.getString("userId")
 
@@ -747,6 +805,7 @@ class AntStall : ModelTask() {
                 )
             }
         } catch (t: Throwable) {
+            if (t is InterruptedException || t is CancellationException) throw t
             Log.printStackTrace(TAG, "inviteOpen err:", t)
         }
     }
@@ -770,7 +829,7 @@ class AntStall : ModelTask() {
             }
 
             // 处理每个摊位
-            for (i in 1..2) {
+            for (i in (1..2).shuffled()) {
                 val seat = seatsMap.getJSONObject("GUEST_0$i")
                 val seatId = seat.getString("seatId")
 
@@ -822,38 +881,41 @@ class AntStall : ModelTask() {
                 } else {
                     val taskId = "SB|$seatId"
                     if (!hasChildTask(taskId)) {
+                        val session = AccountSessionCoordinator.currentSession() ?: continue
+                        val payload = JSONObject()
+                            .put("seat_id", seatId)
+                            .put("rent_last_bill", rentLastBill)
+                            .put("rent_last_shop", rentLastShop)
+                            .put("rent_last_user", rentLastUser)
+                            .put("biz_start_time", bizStartTime)
+                        val schedule = registerPersistentChildTask(taskId, "SB", endTime, payload)
                         addChildTask(
                             ChildModelTask(taskId, "SB", {
-                                cancelPersistentChildTask(taskId)
-                                if (stallAllowOpenReject.value == true) {
-                                    if (!FriendGuard.shouldSkipFriend(rentLastUser, TAG, "请走小摊")) {
-                                        sendBack(
-                                            rentLastBill,
-                                            seatId,
-                                            rentLastShop,
-                                            rentLastUser,
-                                            sentUserId,
-                                        )
+                                if (schedule != null) {
+                                    // 内存到点也走同一计划认领，不直接取消持久计划后执行业务。
+                                    ApplicationHook.appContext?.let {
+                                        ScheduledTaskRouter.fire(it, schedule, "stall_memory_timer")
+                                    }
+                                } else {
+                                    executePersistentChild(
+                                        scheduleId = taskId,
+                                        ownerUserId = session.userId,
+                                        sessionEpoch = session.sessionEpoch,
+                                        source = "stall_memory_fallback",
+                                        workflowQueue = stallWorkflowQueue,
+                                        persistent = false,
+                                    ) {
+                                        runInterruptible(Dispatchers.IO) { runSendBackPersistentTask(taskId, payload) }
                                     }
                                 }
                             }, endTime),
-                        )
-                        registerPersistentChildTask(
-                            taskId,
-                            "SB",
-                            endTime,
-                            JSONObject()
-                                .put("seat_id", seatId)
-                                .put("rent_last_bill", rentLastBill)
-                                .put("rent_last_shop", rentLastShop)
-                                .put("rent_last_user", rentLastUser)
-                                .put("biz_start_time", bizStartTime),
                         )
                         Log.stall("新村请走已交给定时子任务⛪将在[${TimeUtil.getCommonDate(endTime)}]执行")
                     }
                 }
             }
         } catch (t: Throwable) {
+            if (t is InterruptedException || t is CancellationException) throw t
             Log.printStackTrace(TAG, "sendBack err:", t)
         }
     }
@@ -861,55 +923,62 @@ class AntStall : ModelTask() {
     private fun runSendBackPersistentTask(
         childId: String,
         payload: JSONObject,
-    ) {
+    ): TaskExecutionOutcome {
         if (stallAllowOpenReject.value != true) {
             Log.stall("新村持久请走[$childId]触发时功能已关闭，跳过")
-            return
+            return TaskExecutionOutcome.SUCCESS
         }
         val targetSeatId =
             payload.optString("seat_id").trim().ifBlank {
                 childId.substringAfter("SB|", "")
             }
         val expectedUserId = payload.optString("rent_last_user").trim()
+        val expectedBill = payload.optString("rent_last_bill").trim()
         if (targetSeatId.isBlank()) {
             Log.stall("新村持久请走[$childId]缺少 seat_id，跳过")
-            return
+            return TaskExecutionOutcome.FAILED
         }
 
         val homeResponse = AntStallRpcCall.home()
         val homeJson = JSONObject(homeResponse)
         if (!ResChecker.checkRes(TAG, homeJson)) {
             Log.error(TAG, "persistent sendBack home err: $homeResponse")
-            return
+            return TaskExecutionOutcome.FAILED
         }
         val seatsMap =
             homeJson.optJSONObject("seatsMap") ?: run {
                 Log.stall("新村持久请走[$childId]未查询到摊位信息，跳过")
-                return
+                return TaskExecutionOutcome.FAILED
             }
         val seat =
             findSeatById(seatsMap, targetSeatId) ?: run {
                 Log.stall("新村持久请走[$childId]未找到摊位[$targetSeatId]，跳过")
-                return
+                return TaskExecutionOutcome.FAILED
             }
         if (seat.optString("status") != "BUSY") {
             Log.stall("新村持久请走[$childId]摊位已非占用状态，跳过")
-            return
+            return TaskExecutionOutcome.SUCCESS
         }
         val currentUserId = seat.optString("rentLastUser").trim()
         if (currentUserId.isBlank() || (expectedUserId.isNotBlank() && currentUserId != expectedUserId)) {
             Log.stall("新村持久请走[$childId]摊位用户已变化，跳过")
-            return
+            return TaskExecutionOutcome.SUCCESS
         }
-        if (FriendGuard.shouldSkipFriend(currentUserId, TAG, "请走小摊")) {
-            return
+        if (expectedBill.isNotBlank() && seat.optString("rentLastBill") != expectedBill) {
+            Log.stall("新村持久请走[$childId]摊位订单已变化，跳过")
+            return TaskExecutionOutcome.SUCCESS
+        }
+        if (FriendGuard.shouldSkipFriend(currentUserId, TAG, "请走小摊") ||
+            stallWhiteList.containsConfigured(currentUserId)
+        ) {
+            return TaskExecutionOutcome.SUCCESS
         }
 
         val bizStartTime = seat.optLong("bizStartTime", 0L)
         val allowMinutes = stallAllowOpenTime.value ?: 0
         val endTime = bizStartTime + allowMinutes * 60 * 1000L
         if (endTime > System.currentTimeMillis()) {
-            registerPersistentChildTask(
+            val schedule = registerPersistentChildTask(
                 childId,
                 "SB",
                 endTime,
@@ -920,11 +989,12 @@ class AntStall : ModelTask() {
                     .put("rent_last_user", currentUserId)
                     .put("biz_start_time", bizStartTime),
             )
+            if (schedule == null) return TaskExecutionOutcome.FAILED
             Log.stall("新村持久请走[$childId]尚未到点，重排到[${TimeUtil.getCommonDate(endTime)}]")
-            return
+            return TaskExecutionOutcome.DEFERRED
         }
 
-        sendBack(
+        return sendBack(
             seat.optString("rentLastBill"),
             targetSeatId,
             seat.optString("rentLastShop"),
@@ -1271,7 +1341,8 @@ class AntStall : ModelTask() {
         shopIds: Queue<String>,
     ): Boolean {
         var opened = false
-        val sortedSeats = seats.sortedByDescending { it.hot }
+        // 保留热度优先，只随机相同热度好友的尝试顺序。
+        val sortedSeats = seats.shuffled().sortedByDescending { it.hot }
         val currentUid = UserMap.currentUid
 
         for (seat in sortedSeats) {
@@ -1403,7 +1474,7 @@ class AntStall : ModelTask() {
             val result =
                 TaskFlowEngine(
                     adapter = adapter,
-                    roundSleepMs = 500L,
+                    roundSleepMs = 425L,
                     executionState = executionState,
                 ).run()
             if (allowMarkDone && !result.stopped && adapter.canMarkTasksDone()) {
@@ -1627,10 +1698,6 @@ class AntStall : ModelTask() {
 
         override fun onAllTasksDone(snapshot: TaskFlowSnapshot) {
             Log.stall("新村任务⛪全部处理完成[${snapshot.completedTasks}/${snapshot.totalTasks}]")
-        }
-
-        override fun onQueryFailed(response: JSONObject) {
-            Log.error(TAG, "新村任务列表查询失败 raw=$response")
         }
 
         override fun onUnknownPhase(
@@ -1989,7 +2056,7 @@ class AntStall : ModelTask() {
                 processedEventKeys.add(eventKey)
                 finishedCount++
                 if (config.usePagedSearchInfo && nextPlayingPageInfo != null && finishedCount < config.rounds) {
-                    GlobalThreadPools.sleepCompat(5000)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(4250, 5001))
                     playingPageInfo = nextPlayingPageInfo
                     pageNo++
                     advanceToNextPage = true
@@ -2749,7 +2816,7 @@ class AntStall : ModelTask() {
             val friendRankList = json.optJSONArray("friendRankList") ?: return false
             if (friendRankList.length() == 0) return false
 
-            for (i in 0 until friendRankList.length()) {
+            for (i in (0 until friendRankList.length()).shuffled()) {
                 val friend = friendRankList.getJSONObject(i)
 
                 if (!friend.optBoolean("canInviteRegister", false) ||
@@ -2824,7 +2891,7 @@ class AntStall : ModelTask() {
             Log.stall("开始为 ${friendSet.size} 位好友进行新村助力...")
             var progressed = false
 
-            for (safeUid in friendSet) {
+            for (safeUid in friendSet.shuffled()) {
                 if (FriendGuard.shouldSkipFriend(safeUid, TAG, "新村助力")) {
                     continue
                 }
@@ -2860,7 +2927,7 @@ class AntStall : ModelTask() {
 
                 Log.stall("新村助力🎉成功[$name]")
                 progressed = true
-                GlobalThreadPools.sleepCompat(5000)
+                GlobalThreadPools.sleepCompat(RandomUtil.nextLong(4250, 5001))
             }
 
             Status.antStallAssistFriendToday()
@@ -3103,10 +3170,9 @@ class AntStall : ModelTask() {
     /**
      * @brief 丢肥料批量处理
      */
-    private fun throwManure(dynamicList: JSONArray) {
-        // 前置检查:如果今日已达上限,直接跳过
+    private fun throwManure(dynamicList: JSONArray): Boolean {
         if (Status.hasFlagToday(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT)) {
-            return
+            return false
         }
 
         try {
@@ -3116,19 +3182,22 @@ class AntStall : ModelTask() {
             // 先于ResChecker判断特定业务错误码
             val resultCode = json.optString("resultCode")
             if (resultCode == "B_OVER_LIMIT_COUNT_OF_THROW_TO_FRIEND") {
-                Log.stall("检测到今日丢肥料次数已达上限,停止后续尝试")
+                Log.error(TAG, "今日丢肥料次数已达上限: $response")
                 Status.setFlagToday(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT)
-                return
+                return false
             }
 
             // 正常的响应检查
-            if (ResChecker.checkRes(TAG, json)) {
-                Log.stall("蚂蚁新村⛪打肥料成功")
+            if (!ResChecker.checkRes(TAG, json)) {
+                Log.error(TAG, "throwManure err: $response")
+                return false
             }
+            Log.stall("蚂蚁新村⛪打肥料成功")
+            return true
         } catch (t: Throwable) {
+            if (t is CancellationException || t is InterruptedException) throw t
             Log.printStackTrace(TAG, "throwManure err:", t)
-        } finally {
-            GlobalThreadPools.sleepCompat(1000)
+            return false
         }
     }
 
@@ -3136,6 +3205,7 @@ class AntStall : ModelTask() {
      * @brief 丢肥料主流程
      */
     private fun throwManure() {
+        if (Status.hasFlagToday(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT)) return
         try {
             val response = AntStallRpcCall.dynamicLoss()
             val json = JSONObject(response)
@@ -3148,13 +3218,21 @@ class AntStall : ModelTask() {
             val astLossDynamicVOS = json.getJSONArray("astLossDynamicVOS")
             var dynamicList = JSONArray()
 
-            for (i in 0 until astLossDynamicVOS.length()) {
+            for (i in (0 until astLossDynamicVOS.length()).shuffled()) {
                 val lossDynamic = astLossDynamicVOS.getJSONObject(i)
 
                 if (lossDynamic.has("specialEmojiVO")) continue
 
-                val objectId = lossDynamic.getString("objectId")
-                if (FriendGuard.shouldSkipFriend(objectId, TAG, "新村丢肥料")) {
+                val objectId = lossDynamic.getString("objectId").trim()
+                if (FriendRepository.isGlobalBlocked(objectId)) {
+                    Log.record(TAG, "新村丢肥料 跳过[$objectId]：好友中心全局黑名单")
+                    continue
+                }
+                // 服务端损失动态可包含好友库之外的目标；已知关系仍遵守原有约束。
+                if ((objectId.isEmpty() || FriendGuard.isSelf(objectId) ||
+                        FriendRepository.relationOf(objectId) != FriendRelation.UNKNOWN) &&
+                    FriendGuard.shouldSkipFriend(objectId, TAG, "新村丢肥料")
+                ) {
                     continue
                 }
                 var isThrowManure = stallThrowManureList.contains(objectId)
@@ -3173,7 +3251,7 @@ class AntStall : ModelTask() {
                 dynamicList.put(dynamic)
 
                 if (dynamicList.length() == 5) {
-                    throwManure(dynamicList)
+                    if (!throwManure(dynamicList)) return
                     dynamicList = JSONArray()
                 }
             }
@@ -3182,6 +3260,7 @@ class AntStall : ModelTask() {
                 throwManure(dynamicList)
             }
         } catch (t: Throwable) {
+            if (t is CancellationException || t is InterruptedException) throw t
             Log.printStackTrace(TAG, "throwManure err:", t)
         }
     }
@@ -3296,11 +3375,11 @@ class AntStall : ModelTask() {
 
                             Log.stall("蚂蚁新村🚫在[${UserMap.getMaskName(friendId)}]贴罚单")
                         } finally {
-                            GlobalThreadPools.sleepCompat(1000)
+                            GlobalThreadPools.sleepCompat(RandomUtil.nextLong(850, 1001))
                         }
                     }
                 } finally {
-                    GlobalThreadPools.sleepCompat(1500)
+                    GlobalThreadPools.sleepCompat(RandomUtil.nextLong(1275, 1501))
                 }
             }
         } catch (t: Throwable) {

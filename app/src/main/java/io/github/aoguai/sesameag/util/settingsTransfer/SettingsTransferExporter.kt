@@ -2,6 +2,7 @@ package io.github.aoguai.sesameag.util.settingsTransfer
 
 import com.fasterxml.jackson.core.type.TypeReference
 import io.github.aoguai.sesameag.BuildConfig
+import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.entity.friend.FriendCenterConfig
 import io.github.aoguai.sesameag.model.ConfigPortScope
 import io.github.aoguai.sesameag.model.Model
@@ -12,7 +13,11 @@ import java.io.File
 
 object SettingsTransferExporter {
     fun exportJson(userId: String?, exportMode: SettingsTransferExportMode): String {
-        return SettingsTransferCodec.encodePackage(buildPackage(userId, exportMode))
+        val snapshot = Config.withLoadedAccount(userId) {
+            if (userId.isNullOrBlank()) buildPackage(null, exportMode)
+            else Files.withAccountLock(userId) { buildPackage(userId, exportMode) }
+        }
+        return SettingsTransferCodec.encodePackage(snapshot)
     }
 
     fun snapshotCurrentConfig(scope: ConfigPortScope): ConfigTransferSnapshot {
@@ -60,8 +65,8 @@ object SettingsTransferExporter {
         if (userId.isBlank()) {
             return null
         }
-        val file = File(Files.getUserConfigDir(userId), "customset.json")
-        val body = Files.readFromFile(file)
+        val file = Files.child(Files.getUserConfigDir(userId), "customset.json")
+        val body = if (file.exists()) Files.readText(file) else ""
         if (body.isBlank()) {
             return linkedMapOf()
         }

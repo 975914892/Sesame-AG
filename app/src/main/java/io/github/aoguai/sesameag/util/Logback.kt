@@ -11,6 +11,10 @@ import ch.qos.logback.classic.android.LogcatAppender
 import ch.qos.logback.classic.encoder.PatternLayoutEncoder
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.FileAppender
+import ch.qos.logback.core.OutputStreamAppender
+import android.os.ParcelFileDescriptor
+import io.github.aoguai.sesameag.storage.PrivateStorage
+import io.github.aoguai.sesameag.storage.StoreAccess
 import ch.qos.logback.core.rolling.RollingFileAppender
 import ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy
 import ch.qos.logback.core.util.FileSize
@@ -26,12 +30,18 @@ object Logback {
     private const val DEFAULT_LOG_FILE_MAX_SIZE_MB = 7
     private const val DEFAULT_LOG_TOTAL_SIZE_CAP_MB = 256
 
+    private val outputQueue = SerialTaskQueue()
+    @Volatile
     private var isFileInitialized = false
+    @Volatile
     private var appContext: Context? = null
+    @Volatile
     private var nextMidnightMillis: Long = 0
+    @Volatile
     private var isRollingOwnerProcess = false
     private var processLogSuffix: String? = null
 
+    @Volatile
     var systemLogFile: File? = null
         private set
 
@@ -42,7 +52,9 @@ object Logback {
      * 初始化 Logcat (保证控制台一定有日志)
      * 在 Log 类的 init 块中自动调用
      */
-    fun initLogcatOnly() {
+    fun initLogcatOnly(): Unit = outputQueue.execute { initLogcatOnlyInternal() }
+
+    private fun initLogcatOnlyInternal() {
         try {
             val lc = LoggerFactory.getILoggerFactory() as LoggerContext
             lc.reset() // 清除之前的配置
@@ -75,8 +87,10 @@ object Logback {
      * 初始化文件日志 (有了 Context 之后调用)
      * 常规日志由主进程滚动；抓包日志由所有已允许的进程安全追加到同一个 capture.log。
      */
-    @Synchronized
-    fun initFileLogging(
+    fun initFileLogging(context: Context, force: Boolean = false): Unit =
+        outputQueue.execute { initFileLoggingInternal(context, force) }
+
+    private fun initFileLoggingInternal(
         context: Context,
         force: Boolean = false,
     ) {
@@ -100,18 +114,32 @@ object Logback {
         // 3. 如果是触发了跨天刷新，需重置上下文以彻底清除旧的 Appender 句柄
         if (isRebuildingExistingAppenders) {
             Log.i("SesameLog", if (force) "检测到日志配置变更，正在刷新日志重定向..." else "检测到跨天，正在刷新日志重定向...")
-            initLogcatOnly() // 内部执行 lc.reset()
+            initLogcatOnlyInternal() // 内部执行 lc.reset()
         }
 
         try {
             val lc = LoggerFactory.getILoggerFactory() as LoggerContext
-            // 首次使用尚未获得共享文件权限时，诊断仍必须可以落盘。
+            if (processName != General.MODULE_PACKAGE_NAME) {
+                (LogCatalog.loggerNames() + listOf("other", "captcha")).distinct().forEach { channel ->
+                    if (channel != LogChannel.SYSTEM.loggerName &&
+                        (channel != LogChannel.CAPTURE.loggerName || isCaptureFileAppenderEnabled)) {
+                        addPipeAppender(lc, channel, processName)
+                    }
+                }
+                isFileInitialized = true
+                nextMidnightMillis = calculateNextMidnight(now)
+                return
+            }
+            // Before migration only the module-private diagnostic log is available.
             if (processName == General.MODULE_PACKAGE_NAME) {
                 val directory = File(context.filesDir, "logs/diagnostics")
                 check(File(directory, "bak").isDirectory || File(directory, "bak").mkdirs())
                 systemLogFile = File(directory, LogChannel.SYSTEM.fileName)
                 addFileAppender(lc, LogChannel.SYSTEM.loggerName, directory.absolutePath + File.separator, LogChannel.SYSTEM.fileName)
             }
+            if (!PrivateStorage.isReady) return
+            isRollingOwnerProcess = true
+            processLogSuffix = null
             val logDir = resolveLogDir(context)
 
             val fullTimestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date())
@@ -158,20 +186,29 @@ object Logback {
         }
     }
 
-    @Synchronized
-    fun reloadFileLogging(enableCaptureAppender: Boolean = isCaptureFileAppenderEnabled) {
+    fun reloadFileLogging(enableCaptureAppender: Boolean = isCaptureFileAppenderEnabled): Unit = outputQueue.execute {
         isCaptureFileAppenderEnabled = enableCaptureAppender
-        val context = appContext ?: return
-        initFileLogging(context, force = true)
+        val context = appContext ?: return@execute
+        initFileLoggingInternal(context, force = true)
     }
 
-    @Synchronized
-    fun clearSystemLog(): Boolean {
-        val file = systemLogFile ?: return false
+    fun <T> withFileLoggingPaused(action: () -> T): T = outputQueue.execute {
+        val lc = LoggerFactory.getILoggerFactory() as LoggerContext
+        val initialized = isFileInitialized
+        lc.loggerList.filter { it.name != LogChannel.SYSTEM.loggerName && it.name != Logger.ROOT_LOGGER_NAME }
+            .forEach { it.detachAndStopAllAppenders() }
+        isFileInitialized = false
+        try { action() } finally {
+            if (initialized && PrivateStorage.isReady) appContext?.let { initFileLoggingInternal(it, force = true) }
+        }
+    }
+
+    fun clearSystemLog(): Boolean = outputQueue.execute {
+        val file = systemLogFile ?: return@execute false
         val lc = LoggerFactory.getILoggerFactory() as LoggerContext
         lc.getLogger(LogChannel.SYSTEM.loggerName).detachAndStopAllAppenders()
-        return try {
-            val children = file.parentFile?.listFiles() ?: return false
+        try {
+            val children = file.parentFile?.listFiles() ?: return@execute false
             children.map { it.deleteRecursively() }.all { it }
         } finally {
             file.parentFile?.let { directory ->
@@ -194,28 +231,54 @@ object Logback {
             }.timeInMillis
 
     /**
-     * 优先 Files.LOG_DIR -> 失败则回退到 Context.external -> Context.files
+     * Business logs are written only to the module-owned private store.
      */
     private fun resolveLogDir(context: Context): String {
-        // 1. 尝试使用 Files 类中定义的路径
-        var targetDir = Files.LOG_DIR
-
-        // 尝试创建目录，确保 exists() 判断准确
-        if (!targetDir.exists()) {
-            targetDir.mkdirs()
-        }
-
-        // 2. 检查是否有权写入
-        if (!targetDir.exists() || !targetDir.canWrite()) {
-            // 回退逻辑
-            val fallbackDir = context.getExternalFilesDir("logs")
-            targetDir = fallbackDir ?: File(context.filesDir, "logs")
-        }
-
-        // 3. 确保目录结构完整 (创建 bak 子目录)
-        File(targetDir, "bak").mkdirs()
-
+        PrivateStorage.requireReady()
+        val targetDir = Files.LOG_DIR
+        check(targetDir.isDirectory || targetDir.mkdirs())
+        check(File(targetDir, "bak").isDirectory || File(targetDir, "bak").mkdirs())
         return targetDir.absolutePath + File.separator
+    }
+
+    fun remoteLogger(channel: String, suffix: String?): Logger = outputQueue.execute {
+        PrivateStorage.requireReady()
+        val lc = LoggerFactory.getILoggerFactory() as LoggerContext
+        val loggerName = if (suffix == null || channel == LogChannel.CAPTURE.loggerName) channel else "$channel-$suffix"
+        val logger = lc.getLogger(loggerName)
+        if (!logger.iteratorForAppenders().hasNext()) {
+            addFileAppender(lc, loggerName, resolveLogDir(checkNotNull(appContext)), "$loggerName.log")
+        }
+        logger
+    }
+
+    private fun addPipeAppender(lc: LoggerContext, channel: String, processName: String) {
+        val logger = lc.getLogger(channel)
+        listOf("PIPE-$channel", "ASYNC-$channel").forEach { name ->
+            logger.getAppender(name)?.let { logger.detachAppender(it); it.stop() }
+        }
+        val pipe = OutputStreamAppender<ILoggingEvent>().apply {
+            context = lc
+            name = "PIPE-$channel"
+            encoder = PatternLayoutEncoder().apply {
+                context = lc
+                pattern = "%msg%n"
+                start()
+            }
+            outputStream = ParcelFileDescriptor.AutoCloseOutputStream(CommandUtil.storageService().openLogStream(channel, processName))
+            start()
+        }
+        val async = AsyncAppender().apply {
+            context = lc
+            name = "ASYNC-$channel"
+            queueSize = 512
+            discardingThreshold = 0
+            isNeverBlock = true
+            addAppender(pipe)
+            start()
+        }
+        logger.level = Level.ALL
+        logger.addAppender(async)
     }
 
     private fun resolveLogFileName(logName: String): String {

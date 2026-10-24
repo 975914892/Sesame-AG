@@ -9,6 +9,11 @@ import java.io.File
 object DirectoryWatcher {
 
     fun observeDirectoryChanges(directory: File): Flow<Unit> = callbackFlow {
+        if (directory is io.github.aoguai.sesameag.storage.StoreFile) {
+            val stop = io.github.aoguai.sesameag.storage.StoreAccess.observe { trySend(Unit) }
+            awaitClose { stop() }
+            return@callbackFlow
+        }
         if (!directory.exists()) {
             directory.mkdirs()
         }

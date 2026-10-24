@@ -6,8 +6,12 @@ import io.github.aoguai.sesameag.util.Files
 import io.github.aoguai.sesameag.util.JsonUtil
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.UserDataStoreManager
+import kotlinx.coroutines.CancellationException
 import java.io.File
+import java.nio.channels.ClosedByInterruptException
 import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.channels.FileLockInterruptionException
 import java.nio.file.Files as NioFiles
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
@@ -90,10 +94,7 @@ object AccountSlotRegistry {
     private const val PENDING_RUNTIME_SLOT_TTL_MS = 120_000L
     private const val REGISTRY_UNAVAILABLE_LOG_INTERVAL_MS = 60_000L
 
-    // File locks are not reentrant in one JVM. Serialize every local read/write before
-    // taking the cross-process lock so concurrent task callbacks cannot self-conflict.
-    private val recordMutationLock = Any()
-    private var lastRegistryUnavailableLogAtMs = 0L
+    private val lastRegistryUnavailableLogAtMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     private data class LoadedRecord(
         val record: AccountSlotRecord,
@@ -232,15 +233,16 @@ object AccountSlotRegistry {
 
     fun checkExecutableUser(rawUserId: String?): AccountSlotExecutionCheck {
         val userId = normalizeUserId(rawUserId) ?: return AccountSlotExecutionCheck.InvalidUserId
-        val current = snapshot()
-        if (current.errorCode != null) {
-            return AccountSlotExecutionCheck.RegistryUnavailable
-        }
-        return if (current.isReady && userId in current.activeUserIds) {
-            AccountSlotExecutionCheck.Allowed(userId)
-        } else {
-            AccountSlotExecutionCheck.Inactive(userId)
-        }
+        return withLockedRecord<AccountSlotExecutionCheck> { loaded ->
+            val record = loaded.record
+            LockedResult(
+                if (record.migrationState == AccountSlotMigrationState.READY && userId in record.activeUserIds) {
+                    AccountSlotExecutionCheck.Allowed(userId)
+                } else {
+                    AccountSlotExecutionCheck.Inactive(userId)
+                },
+            )
+        } ?: AccountSlotExecutionCheck.RegistryUnavailable
     }
 
     fun isExecutableUser(rawUserId: String?): Boolean =
@@ -362,7 +364,7 @@ object AccountSlotRegistry {
     private fun configuredUserIds(): List<String> =
         Files.listExistingUserConfigIds()
             .asSequence()
-            .map { userId -> File(Files.CONFIG_DIR, userId) }
+            .map { userId -> Files.child(Files.CONFIG_DIR, userId) }
             .mapNotNull(::verifiedDirectoryUserId)
             .distinct()
             .sorted()
@@ -370,8 +372,8 @@ object AccountSlotRegistry {
 
     private fun verifiedDirectoryUserId(directory: File): String? {
         val directoryUserId = normalizeUserId(directory.name) ?: return null
-        val configFile = File(directory, "config_v2.json")
-        val selfFile = File(directory, "self.json")
+        val configFile = Files.child(directory, "config_v2.json")
+        val selfFile = Files.child(directory, "self.json")
         if (!configFile.isFile || configFile.length() == 0L || !selfFile.isFile || selfFile.length() == 0L) {
             return null
         }
@@ -382,7 +384,7 @@ object AccountSlotRegistry {
     }
 
     private fun hasVerifiedConfiguredUser(userId: String): Boolean =
-        verifiedDirectoryUserId(File(Files.CONFIG_DIR, userId)) == userId
+        verifiedDirectoryUserId(Files.child(Files.CONFIG_DIR, userId)) == userId
 
     private fun bootstrapRecord(): AccountSlotRecord {
         val candidates = configuredUserIds()
@@ -402,7 +404,11 @@ object AccountSlotRegistry {
         record: AccountSlotRecord,
         recoverExpiredPending: Boolean,
     ): AccountSlotRecord {
-        val candidates = configuredUserIds()
+        val candidates = if (record.migrationState == AccountSlotMigrationState.SELECTION_REQUIRED) {
+            configuredUserIds()
+        } else {
+            null
+        }
         val expiredPendingUserId = record.pendingRuntimeUserId
             ?.takeIf { recoverExpiredPending && isPendingRuntimeSlotExpired(record) }
         val recordWithoutExpiredPending = if (expiredPendingUserId == null) {
@@ -414,8 +420,7 @@ object AccountSlotRegistry {
             )
         }
         val recovered = when {
-            recordWithoutExpiredPending.migrationState == AccountSlotMigrationState.SELECTION_REQUIRED &&
-                candidates.size <= MAX_EXECUTABLE_ACCOUNT_SLOTS -> {
+            candidates != null && candidates.size <= MAX_EXECUTABLE_ACCOUNT_SLOTS -> {
                 recordWithoutExpiredPending.copy(
                     migrationState = AccountSlotMigrationState.READY,
                     activeUserIds = candidates,
@@ -432,7 +437,7 @@ object AccountSlotRegistry {
             Log.record(
                 TAG,
                 "account_slot_record_recovered: from=${record.migrationState} " +
-                    "to=${recovered.migrationState} candidates=${candidates.size}",
+                    "to=${recovered.migrationState} active=${recovered.activeUserIds.size}",
             )
         }
         return recovered
@@ -482,37 +487,27 @@ object AccountSlotRegistry {
     private fun <T> withLockedRecord(
         recoverExpiredPending: Boolean = true,
         operation: (LoadedRecord) -> LockedResult<T>,
-    ): T? =
-        synchronized(recordMutationLock) {
-            runCatching {
-                val configDir = Files.CONFIG_DIR
-                require(configDir.isDirectory || configDir.mkdirs()) { "config_dir_unavailable" }
-                val lockFile = File(configDir, LOCK_FILE_NAME)
-                FileChannel.open(lockFile.toPath(), CREATE, WRITE).use { channel ->
-                    // Wait for the module UI process to finish its short atomic update instead of
-                    // treating transient lock contention as an account-slot revocation.
-                    channel.lock().use {
-                        val loaded = requireNotNull(
-                            readLockedRecord(configDir, recoverExpiredPending),
-                        ) { "registry_read_failed" }
-                        val result = operation(loaded)
-                        val recordToWrite = result.updatedRecord ?: loaded.record.takeIf { loaded.needsWrite }
-                        if (recordToWrite != null) {
-                            check(writeLockedRecord(configDir, recordToWrite)) { "registry_write_failed" }
-                        }
-                        result.value
-                    }
-                }
-            }.onFailure(::logRegistryUnavailable).getOrNull()
+    ): T? = runCatching {
+        io.github.aoguai.sesameag.storage.StoreAccess.transaction {
+            val configDir = Files.CONFIG_DIR
+            check(configDir.isDirectory || configDir.mkdirs()) { "config_dir_unavailable" }
+            val loaded = requireNotNull(readLockedRecord(configDir, recoverExpiredPending)) { "registry_read_failed" }
+            val result = operation(loaded)
+            val record = result.updatedRecord ?: loaded.record.takeIf { loaded.needsWrite }
+            if (record != null) check(writeLockedRecord(configDir, record)) { "registry_write_failed" }
+            result.value
         }
+    }.onFailure { error ->
+        if (error is CancellationException) throw error
+        logRegistryUnavailable(error)
+    }.getOrNull()
 
     private fun logRegistryUnavailable(error: Throwable) {
         val now = System.currentTimeMillis()
-        synchronized(recordMutationLock) {
-            if (now - lastRegistryUnavailableLogAtMs < REGISTRY_UNAVAILABLE_LOG_INTERVAL_MS) {
-                return
-            }
-            lastRegistryUnavailableLogAtMs = now
+        while (true) {
+            val previous = lastRegistryUnavailableLogAtMs.get()
+            if (now - previous < REGISTRY_UNAVAILABLE_LOG_INTERVAL_MS) return
+            if (lastRegistryUnavailableLogAtMs.compareAndSet(previous, now)) break
         }
         Log.record(
             TAG,
@@ -525,7 +520,7 @@ object AccountSlotRegistry {
         configDir: File,
         recoverExpiredPending: Boolean,
     ): LoadedRecord? {
-        val recordFile = File(configDir, RECORD_FILE_NAME)
+        val recordFile = Files.child(configDir, RECORD_FILE_NAME)
         if (!recordFile.exists()) {
             return LoadedRecord(bootstrapRecord(), needsWrite = true)
         }
@@ -539,24 +534,7 @@ object AccountSlotRegistry {
 
     private fun writeLockedRecord(configDir: File, record: AccountSlotRecord): Boolean {
         val canonicalRecord = validateRecord(record) ?: return false
-        var temporaryFile: File? = null
-        return runCatching {
-            temporaryFile = File.createTempFile("$RECORD_FILE_NAME.", ".tmp", configDir)
-            temporaryFile!!.writeText(JsonUtil.formatJson(canonicalRecord), Charsets.UTF_8)
-            NioFiles.move(
-                temporaryFile!!.toPath(),
-                File(configDir, RECORD_FILE_NAME).toPath(),
-                ATOMIC_MOVE,
-                REPLACE_EXISTING,
-            )
-            true
-        }.getOrDefault(false).also { success ->
-            if (!success) {
-                Log.record(TAG, "account_slot_registry_write_failed")
-                Log.w(TAG, "account_slot_registry_write_failed")
-            }
-            temporaryFile?.takeIf { it.exists() }?.delete()
-        }
+        return Files.writeAtomically(JsonUtil.formatJson(canonicalRecord), Files.child(configDir, RECORD_FILE_NAME))
     }
 
     internal fun shortHash(value: String): String =

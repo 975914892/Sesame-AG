@@ -9,7 +9,7 @@ import kotlin.math.sqrt
  * 离线城市坐标表：国内地级行政区（含省直辖县级市/县、兵团城市）中心坐标。
  *
  * 数据来源：阿里 DataV GeoAtlas（geo.datav.aliyun.com/areas_v3，高德系行政区划数据），
- * 城市码为国标行政区划代码，与支付宝 cityCode 一致（如 330100=杭州市）；
+ * 城市码为国标行政区划代码，与目标应用 cityCode 一致（如 330100=杭州市）；
  * 直辖市映射为市辖区码（110000→110100）。
  *
  * 用途：国内 ROM 普遍无 GMS，android.location.Geocoder 的地理编码后端不可用，

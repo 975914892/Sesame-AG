@@ -5,8 +5,6 @@ import io.github.aoguai.sesameag.hook.RequestManager
 /**
  * @file ReadingDadaRpcCall.kt
  * @brief 阅读答题相关RPC调用
- * @author
- * @since 2023/08/22
  */
 object ReadingDadaRpcCall {
     private const val VERSION = "1"
