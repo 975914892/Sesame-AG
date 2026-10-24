@@ -6,7 +6,7 @@ on:
     branches: [ main, master, dev ]
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # 每天北京时间早上8点自动检测更新
+    - cron: '47 2 * * *' # 每天上午不定时（北京约10:47，GitHub定时触发有延迟抖动）
 
 env:
   CI: "true"
@@ -310,11 +310,11 @@ jobs:
             ${{ env.ASSET_DIR }}/*.sha256
           body_path: release-body.md
 
-      - name: 清理旧版本（保留最近10个）
+      - name: 清理旧版本（保留最近3个）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          KEEP_LATEST: 10
+          KEEP_LATEST: 3
         run: |
           releases=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/$REPO/releases?per_page=100" | \
