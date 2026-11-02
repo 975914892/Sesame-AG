@@ -6,7 +6,7 @@ on:
     branches: [ main, master, dev ]
   workflow_dispatch:
   schedule:
-    - cron: '47 2 * * *' # 每天上午不定时（北京约10:47，GitHub定时触发有延迟抖动）
+    - cron: '0 0 * * *' # 每天北京8:00整点触发，构建前随机等待0-120分钟，使构建落在上午8-10点窗口
 
 env:
   CI: "true"
@@ -126,6 +126,13 @@ jobs:
         with:
           fetch-depth: 0
           ref: dev
+
+      - name: 随机等待（构建时间散开在上午8-10点窗口内）
+        if: github.event_name == 'schedule'
+        run: |
+          WAIT_SEC=$((RANDOM % 7200))
+          echo "随机等待 ${WAIT_SEC} 秒（约 $((WAIT_SEC / 60)) 分钟），构建实际时间落在北京上午8-10点窗口内"
+          sleep "$WAIT_SEC"
 
       - name: 安装JDK环境
         uses: actions/setup-java@v5
