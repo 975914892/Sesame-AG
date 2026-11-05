@@ -6,7 +6,7 @@ on:
     branches: [ main, master, dev ]
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # 每天北京8:00整点触发，构建前随机等待0-120分钟，使构建落在上午8-10点窗口
+    - cron: '0 20 * * *' # 每天UTC 20:00（北京次日4:00）触发，构建前对齐到北京8:00+随机0-120分钟窗口
 
 env:
   CI: "true"
@@ -100,6 +100,7 @@ jobs:
   build-and-sign:
     runs-on: ubuntu-latest
     needs: sync-upstream
+    timeout-minutes: 540
     permissions:
       contents: write
     outputs:
@@ -127,12 +128,22 @@ jobs:
           fetch-depth: 0
           ref: dev
 
-      - name: 随机等待（构建时间散开在上午8-10点窗口内）
+      - name: 对齐到上午8-10点构建窗口
         if: github.event_name == 'schedule'
         run: |
-          WAIT_SEC=$((RANDOM % 7200))
-          echo "随机等待 ${WAIT_SEC} 秒（约 $((WAIT_SEC / 60)) 分钟），构建实际时间落在北京上午8-10点窗口内"
-          sleep "$WAIT_SEC"
+          NOW=$(date -u +%s)
+          BJ_DATE=$(TZ=Asia/Shanghai date -d "@$NOW" +%Y-%m-%d)
+          TARGET_BASE=$(date -u -d "$BJ_DATE 00:00:00" +%s)   # 北京当天8:00 == UTC 00:00
+          RAND_OFFSET=$((RANDOM % 7200))                        # 随机0~120分钟
+          TARGET=$((TARGET_BASE + RAND_OFFSET))
+          WAIT=$((TARGET - NOW))
+          echo "触发时间(北京): $(TZ=Asia/Shanghai date -d "@$NOW" '+%F %H:%M:%S')，随机偏移: ${RAND_OFFSET}s"
+          if [ "$WAIT" -gt 0 ] && [ "$WAIT" -lt 25200 ]; then
+            echo "⏳ 等待 ${WAIT} 秒（约 $((WAIT/60)) 分钟），构建开始于北京 $(TZ=Asia/Shanghai date -d "@$TARGET" '+%F %H:%M:%S')"
+            sleep "$WAIT"
+          else
+            echo "⏭ 已过目标窗口或等待超7小时，立即构建（北京 $(TZ=Asia/Shanghai date '+%F %H:%M:%S')）"
+          fi
 
       - name: 安装JDK环境
         uses: actions/setup-java@v5
