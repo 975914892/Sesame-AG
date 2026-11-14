@@ -186,8 +186,14 @@ jobs:
         run: |
           rm -rf "${STAGING_DIR}" "${ASSET_DIR}"
           mkdir -p "${STAGING_DIR}"
-          mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*.apk" | sort)
+          mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*arm64-v8a*.apk" | sort)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "❌ 未找到 arm64-v8a 架构的 APK，构建产物如下："
+            find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*.apk" | sed 's/^/   /'
+            exit 1
+          fi
           for apk in "${apks[@]}"; do
+            echo "保留: $(basename "$apk")"
             cp "${apk}" "${STAGING_DIR}/"
           done
 
@@ -302,13 +308,9 @@ jobs:
           ## 📱 下载说明
           | 架构版本 | 适用设备 |
           |--------|----------|
-          | `universal` | ✅ 推荐所有用户使用，兼容全部安卓设备 |
-          | `arm64-v8a` | 64位ARM架构，绝大多数新款安卓手机 |
-          | `armeabi-v7a` | 32位ARM架构，老旧安卓设备 |
-          | `x86_64` | 64位x86架构，部分安卓模拟器 |
-          | `x86` | 32位x86架构，极少老旧模拟器 |
+          | `arm64-v8a` | ✅ 仅提供 64 位 ARM 架构版本，适用于绝大多数新款安卓手机 |
 
-          > 安装完成后，请在LSPosed框架中激活模块并重启设备生效。
+          本版本仅发布 arm64-v8a APK。安装完成后，请在LSPosed框架中激活模块并重启设备生效。
           BODY_EOF
 
           echo "✅ Release说明文件已生成"
