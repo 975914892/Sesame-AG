@@ -429,7 +429,6 @@ class AntDodo : ModelTask() {
                         !Status.hasFlagToday(StatusFlags.FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE)
                     ) {
                         Status.setFlagToday(StatusFlags.FLAG_ANTDODO_CONSECUTIVE_COLLECT_DONE)
-                        Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
                         taskListRefreshNeeded = true
                     }
                     for (j in 0 until leftFreeQuota) {
@@ -441,7 +440,6 @@ class AntDodo : ModelTask() {
                         }
                         jo = JSONObject(collectResponse)
                         if (ResChecker.checkRes(TAG, jo)) {
-                            Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
                             taskListRefreshNeeded = true
                             data = jo.optJSONObject("data")
                             if (data == null) {
@@ -512,6 +510,7 @@ class AntDodo : ModelTask() {
     private inner class DodoTaskFlowAdapter : TaskFlowAdapter {
         override val moduleName: String = TASK_BLACKLIST_MODULE
         override val flowName: String = "神奇物种任务"
+        override val nonRetryableActionFlagPrefix: String = StatusFlags.FLAG_ANTDODO_TASK_ACTION_STOP_PREFIX
 
         override fun isFlowHandledToday(): Boolean = Status.hasFlagToday(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
 
@@ -686,11 +685,10 @@ class AntDodo : ModelTask() {
                 }
                 GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT -> {
                     val game = decision.mappedTask ?: return missingRawResult(item, "externalGame")
-                    val result = runBlocking {
+                    return runBlocking {
                         NonDurationGameTask.advance(game, item.raw,
                             detail = dodoActionDetail(item, "externalGame"), logger = Log::dodo)
                     }
-                    if (result.deferredReason != DeferredReason.STATE_CONFIRMATION) return result
                 }
                 GameCenterPlayRpcCall.TaskAction.DEFERRED -> return TaskFlowActionResult.defer(
                     DeferredReason.PREREQUISITE_PENDING, decision.reason,
@@ -1450,7 +1448,6 @@ class AntDodo : ModelTask() {
             }
             val jo = JSONObject(socialResponse)
             if (ResChecker.checkRes(TAG, jo)) {
-                Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
                 taskListRefreshNeeded = true
                 Log.dodo("赠送卡片🦕[${UserMap.getMaskName(targetUser) ?: targetUser}]#$ecosystem-$name")
             } else {
@@ -1546,7 +1543,6 @@ class AntDodo : ModelTask() {
                     }
                     jo = JSONObject(collectFriendResponse)
                     if (ResChecker.checkRes(TAG, jo)) {
-                        Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
                         taskListRefreshNeeded = true
                         val collectData = jo.optJSONObject("data")
                         if (collectData == null) {
@@ -1705,7 +1701,6 @@ class AntDodo : ModelTask() {
                 val result = collectToFriend(manageScheduledWakeup = false)
                 val rewardResult = if (result.progressed || result.completed || taskListRefreshNeeded) {
                     // 次数已用尽时也补回查，覆盖抽卡成功后进程在领奖前退出的情况。
-                    Status.removeFlag(StatusFlags.FLAG_ANTDODO_TASKS_DONE)
                     receiveTaskAward() ?: return@runInterruptible TaskExecutionOutcome.FAILED
                 } else null
                 when {

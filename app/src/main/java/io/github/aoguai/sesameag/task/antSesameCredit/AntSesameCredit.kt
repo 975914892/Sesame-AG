@@ -1129,6 +1129,7 @@ class AntSesameCredit : ModelTask() {
     private inner class SesameCreditTaskFlowAdapter : TaskFlowAdapter {
         override val moduleName: String = sesameCreditTaskBlacklistModule
         override val flowName: String = "芝麻信用任务"
+        override val nonRetryableActionFlagPrefix: String = StatusFlags.FLAG_SESAME_TASK_ACTION_STOP_PREFIX
         override val continueCurrentRoundOnRetryableFailure: Boolean = true
 
         override fun isSameTask(previous: TaskFlowItem, current: TaskFlowItem): Boolean {
@@ -2731,6 +2732,7 @@ class AntSesameCredit : ModelTask() {
     private inner class SesameAlchemyTaskFlowAdapter(private val changeRewardType: String = "") : TaskFlowAdapter {
         override val moduleName: String = sesameAlchemyTaskBlacklistModule
         override val flowName: String = "芝麻炼金任务"
+        override val nonRetryableActionFlagPrefix: String = StatusFlags.FLAG_SESAME_ALCHEMY_ACTION_STOP_PREFIX
         override val continueCurrentRoundOnRetryableFailure: Boolean = true
 
         override fun isSameTask(previous: TaskFlowItem, current: TaskFlowItem): Boolean {
@@ -6128,11 +6130,10 @@ class AntSesameCredit : ModelTask() {
                 detail = "$actionDetail reason=${gameDecision.reason} missingFields=${gameDecision.missingFields.joinToString(",")}",
             )
         }
-        gameDecision.mappedTask?.let { mappedTask ->
-            val report = kotlinx.coroutines.runBlocking {
+        gameDecision.mappedTask?.takeIf { gameDecision.action == GameCenterPlayRpcCall.TaskAction.LEGACY_EXTERNAL_REPORT }?.let { mappedTask ->
+            return kotlinx.coroutines.runBlocking {
                 NonDurationGameTask.advance(mappedTask, task, detail = actionDetail, logger = Log::sesame)
             }
-            if (report.deferredReason != DeferredReason.STATE_CONFIRMATION) return report
         }
         val templateId = task.optString("templateId").trim()
         val recordId = task.optString("recordId").trim()
