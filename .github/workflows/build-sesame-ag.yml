@@ -443,6 +443,8 @@ jobs:
           echo "✅ 邮件内容已生成"
 
       - name: 发送构建结果邮件
+        id: send_email
+        continue-on-error: true
         uses: dawidd6/action-send-mail@v6
         with:
           server_address: smtp.qq.com
@@ -453,6 +455,13 @@ jobs:
           from: GitHub Actions 自动构建
           subject: ${{ steps.gen_email.outputs.subject }}
           body: file://email-body.txt
+
+      - name: 邮件发送失败提示（不影响构建结论）
+        if: steps.send_email.outcome == 'failure'
+        run: |
+          echo "## ⚠️ 邮件通知未发出（构建本身已成功）" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "SMTP 登录失败，请检查 \`secrets.EMAIL_PASSWORD\`（QQ邮箱 SMTP 授权码）是否失效，或是否触发发送频率限制。" >> $GITHUB_STEP_SUMMARY
 
   # 任务4：构建失败摘要补充
   notify-failure:
