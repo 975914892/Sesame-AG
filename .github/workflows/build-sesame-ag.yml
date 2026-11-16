@@ -220,20 +220,28 @@ jobs:
         id: prepare_assets
         run: |
           mkdir -p "${ASSET_DIR}"
+
+          # 先算出版本号/提交哈希/日期，用于重命名 APK
+          VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date '+%Y%m%d')
+
           IFS=':' read -r -a files <<< "${{ steps.sign_apks.outputs.signedFiles }}"
           for file in "${files[@]}"; do
-            cp "${file}" "${ASSET_DIR}/"
+            BASE=$(basename "${file}")
+            # 从原文件名提取架构，如 app-arm64-v8a-release-signed.apk -> arm64-v8a
+            ARCH=$(echo "${BASE}" | sed -E 's/.*-(arm64-v8a|armeabi-v7a|x86_64|x86|universal)-.*/\1/')
+            if [ "${ARCH}" == "${BASE}" ]; then ARCH="unknown"; fi
+            NEW_NAME="Sesame-AG-v${VERSION}-${DATE}-${SHORT_SHA}-${ARCH}.apk"
+            echo "重命名: ${BASE} -> ${NEW_NAME}"
+            cp "${file}" "${ASSET_DIR}/${NEW_NAME}"
             (
               cd "${ASSET_DIR}"
-              sha256sum "$(basename "${file}")" > "CHECKSUMS-$(basename "${file}").sha256"
+              sha256sum "${NEW_NAME}" > "CHECKSUMS-${NEW_NAME}.sha256"
             )
           done
 
-          VERSION=$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          DATE=$(date '+%Y%m%d')
           echo "tag_name=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
           echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
